@@ -1,0 +1,28 @@
+{
+  "name": "rabbitball",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "跟随鼠标的果冻兔球桌面助手",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/prepare.mjs",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && electron .",
+    "pack:win": "npm run build && electron-builder --win --x64 --dir --publish never",
+    "dist:win": "npm run build && electron-builder --win --x64 --publish never",
+    "preview": "node prototype/serve.cjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "dompurify": "3.4.17",
+    "katex": "0.19.1",
+    "markdown-it": "15.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "electron": "45.2.3",
+    "electron-builder": "^26.18.0",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,18 @@
+@font-face {
+  font-family: RabbitBallText;
+  src: url('./fonts/BC-love-asteroid.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --rabbit-font: RabbitBallText, 'Microsoft YaHei', sans-serif;
+}
+
+/* 普通文本与控件共用本地字体，公式仍由 KaTeX 的独立字体规则绘制。 */
+body, button, input, textarea, select, option {
+  font-family: var(--rabbit-font);
+}
+
+body { font-size: 18px; }
