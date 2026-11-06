@@ -20,8 +20,6 @@
     #rabbit-capture-root .capture-box,#rabbit-capture-root .capture-confirm { position:absolute;z-index:2;box-sizing:border-box;border:1.5px solid var(--capture-accent);border-radius:10px;background:transparent;pointer-events:none; }
     #rabbit-capture-root .capture-box { display:none;box-shadow:0 0 0 2px #fffffff5,0 0 0 100vmax var(--capture-veil); }
     #rabbit-capture-root .capture-box::after { content:'';position:absolute;inset:0;border:1px solid #ffffffa8;border-radius:inherit; }
-    #rabbit-capture-root .capture-size { position:absolute;z-index:4;display:none;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--rb-line,#f0e4ea);border-radius:12px;background:#fff;color:var(--capture-ink);font:500 13px/1.4 var(--rabbit-font);font-variant-numeric:tabular-nums;white-space:nowrap;pointer-events:none;box-shadow:0 3px 14px #3025300b; }
-    #rabbit-capture-root .capture-size > svg { width:14px;height:14px;fill:none;stroke:var(--capture-accent);stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round; }
     #rabbit-capture-root .capture-confirm { box-shadow:0 0 0 2px #fffffff5;background:color-mix(in srgb,var(--capture-accent) 4%,transparent); }
     @media(prefers-reduced-motion:no-preference) { #rabbit-capture-root.is-active .capture-status { animation:rb-capture-arrive .2s cubic-bezier(.22,1,.36,1) both; } }
     @keyframes rb-capture-arrive { from { opacity:0;transform:translate(-50%,-5px); } to { opacity:1;transform:translate(-50%,0); } }
@@ -29,11 +27,10 @@
   `;
   document.head.appendChild(style);
   const root=document.createElement('div');root.id='rabbit-capture-root';root.setAttribute('role','region');root.setAttribute('aria-label','连续选区截图');
-  root.innerHTML='<img class="capture-background" alt=""><canvas class="capture-background" hidden></canvas><div class="capture-shade"></div><div class="capture-status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m8 0h3a2 2 0 0 0 2-2v-3M7 12h10"/></svg><div><div class="capture-status-title"></div><div class="capture-status-detail"><span class="capture-status-count"></span><span>Esc 取消</span></div></div></div><div class="capture-box"></div><div class="capture-size"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="3"/></svg><span class="capture-size-value"></span></div><div class="capture-announcement" aria-live="polite"></div>';
+  root.innerHTML='<img class="capture-background" alt=""><canvas class="capture-background" hidden></canvas><div class="capture-shade"></div><div class="capture-status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m8 0h3a2 2 0 0 0 2-2v-3M7 12h10"/></svg><div><div class="capture-status-title"></div><div class="capture-status-detail"><span class="capture-status-count"></span><span>Esc 取消</span></div></div></div><div class="capture-box"></div><div class="capture-announcement" aria-live="polite"></div>';
   document.body.appendChild(root);
-  const background=root.querySelector('.capture-background'),box=root.querySelector('.capture-box'),size=root.querySelector('.capture-size'),announcement=root.querySelector('.capture-announcement');
+  const background=root.querySelector('.capture-background'),box=root.querySelector('.capture-box'),announcement=root.querySelector('.capture-announcement');
   const bitmap=root.querySelector('canvas');
-  const sizeValue=root.querySelector('.capture-size-value');
   const statusTitle=root.querySelector('.capture-status-title'),statusCount=root.querySelector('.capture-status-count');
   let session=null,lastPoint=null,paintFrame=0;
   const emit=(name,detail)=>document.dispatchEvent(new CustomEvent('selection:'+name,{detail}));
@@ -51,16 +48,9 @@
     const rect=session?.frame??(session?.drag?rectangle(session.drag):null);
     const visible=!!rect&&(session?.native?rect.width>0&&rect.height>0:valid(rect))&&rect.x<innerWidth&&rect.y<innerHeight&&rect.x+rect.width>0&&rect.y+rect.height>0;
     root.classList.toggle('is-selecting',visible);
-    if(!visible){box.style.display='none';size.style.display='none';return;}
+    if(!visible){box.style.display='none';return;}
     placeFrame(box,rect);box.style.display='block';
-    if(session.showSize===false){size.style.display='none';return;}
-    const dimensions=session.physicalSize??rect;
-    sizeValue.textContent=Math.round(dimensions.width)+' × '+Math.round(dimensions.height);size.style.display='flex';
-    const margin=10,gap=10,width=size.offsetWidth,height=size.offsetHeight;
-    let top=rect.y+rect.height+gap;
-    if(top+height>innerHeight-margin)top=rect.y-height-gap;
-    if(top<margin)top=innerHeight-height-margin;
-    Object.assign(size.style,{left:Math.max(margin,Math.min(rect.x,innerWidth-width-margin))+'px',top:Math.max(margin,Math.min(top,innerHeight-height-margin))+'px'});
+
   }
   function placeFrame(element,rect){Object.assign(element.style,{left:rect.x+'px',top:rect.y+'px',width:rect.width+'px',height:rect.height+'px',borderRadius:Math.min(10,rect.width*.2,rect.height*.2)+'px'});}
   function schedulePaint(){if(!paintFrame)paintFrame=requestAnimationFrame(renderBox);}
@@ -74,7 +64,7 @@
     const previous=session;if(!previous)return;
     session=null;cancelAnimationFrame(paintFrame);paintFrame=0;
     if(previous.pointerId!==null&&root.hasPointerCapture(previous.pointerId))root.releasePointerCapture(previous.pointerId);
-    root.classList.remove('is-active','is-selecting');background.removeAttribute('src');bitmap.width=bitmap.height=0;box.style.display='none';size.style.display='none';
+    root.classList.remove('is-active','is-selecting');background.removeAttribute('src');bitmap.width=bitmap.height=0;box.style.display='none';
     root.querySelectorAll('.capture-confirm').forEach(element=>{element.getAnimations().forEach(animation=>animation.cancel());element.remove();});
     if(previous.visible)emit('close',{sessionId:previous.id,cancelled});
   }
@@ -82,7 +72,7 @@
     if(session)hide(true);
     if(data.shortcut)activationShortcut=shortcut.normalizeShortcut(data.shortcut);
     if(data.color)root.style.setProperty('--capture-accent',data.color);
-    const current={id:data.sessionId,native,visible,context:data.context,drag:null,frame:null,physicalSize:null,showSize:true,pointerId:null,pending:Promise.resolve(),finishing:false,failed:false,count:data.context?.images?.length??0};
+    const current={id:data.sessionId,native,visible,context:data.context,drag:null,frame:null,pointerId:null,pending:Promise.resolve(),finishing:false,failed:false,count:data.context?.images?.length??0};
     session=current;background.hidden=!!data.backgroundBitmap;bitmap.hidden=!data.backgroundBitmap;root.dataset.demo=String(!!data.context?.demo);
     if(data.backgroundBitmap){
       const {data:pixels,width,height}=data.backgroundBitmap;
@@ -143,7 +133,7 @@
     const current=session;if(!current||!current.native||current.id!==event.sessionId)return;
     if(event.type==='frame'){
       // 主进程给出未裁切的本屏局部矩形；跨屏边界由视口自然裁切。
-      current.drag=null;current.frame=event.rect??null;current.physicalSize=event.physicalSize??null;current.showSize=event.showSize;schedulePaint();
+      current.drag=null;current.frame=event.rect??null;schedulePaint();
     }else if(event.type==='pointer'){
       lastPoint=point(event.x,event.y);
       if(event.phase==='down')current.drag={start:lastPoint,end:lastPoint};
@@ -189,7 +179,7 @@
       if(recording)return;
       if(event.key==='Escape'&&(held||session)){cancelPress();event.preventDefault();event.stopImmediatePropagation();return;}
       const chat=window.RabbitChat?.getSnapshot(),settings=window.RabbitSettings?.getSnapshot();
-      if(!held&&!session&&(chat?.open||chat?.opening||settings?.open))return;
+      if(!held&&!session&&settings?.open)return;
       pressed.add(event.code);
       if(event.getModifierState?.('AltGraph')){
         if(!activationShortcut.includes('AltRight')){cancelPress();return;}
@@ -199,11 +189,10 @@
       if(event.repeat||held||blocked||!shortcut.matchesShortcut(activationShortcut,pressed))return;
       // 组合中的普通键必须最后新按下，避免先打字、再补修饰键时误触发。
       if(activationShortcut.some(code=>!shortcut.isModifierCode(code))&&shortcut.isModifierCode(event.code))return;
+      if(chat?.open||chat?.opening){blocked=true;window.RabbitChat.close();event.preventDefault();event.stopImmediatePropagation();return;}
       held=true;event.preventDefault();
       holdTimer=setTimeout(()=>{holdTimer=0;if(held&&!blocked)startDemo();},500);
     },true);
-    document.addEventListener('pointerdown',event=>{if(held&&(!session||event.button!==0))cancelPress();},true);
-    document.addEventListener('wheel',()=>{if(held)cancelPress();},{capture:true,passive:true});
     document.addEventListener('keyup',event=>{
       if(recording)return;
       pressed.delete(event.code);

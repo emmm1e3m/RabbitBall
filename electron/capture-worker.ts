@@ -9,6 +9,8 @@ export interface NativeCaptureResult {
   handle: string;
   title: string;
   processId: number;
+  appName?: string;
+  processName?: string;
   bounds: CaptureRect;
   cursor: { x: number; y: number };
   imageBase64?: string;

@@ -20,6 +20,7 @@ const desktop: RabbitDesktop = {
     listener(activation);
   }),
   onAgentEvent: (listener: (event: AgentEvent) => void) => subscribe('rabbit:agent-event', listener),
+  onDismiss: (listener: (activationId: number) => void) => subscribe('rabbit:dismiss', listener),
   onSettingsChanged: (listener: (settings: PublicSettings) => void) => subscribe('rabbit:settings-changed', listener),
   onCursor: (listener: (point: CursorPoint) => void) => subscribe('rabbit:cursor', listener),
   onPointerDown: (listener: (point: PointerPoint) => void) => subscribe('rabbit:pointer-down', listener),

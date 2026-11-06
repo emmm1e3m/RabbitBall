@@ -98,7 +98,10 @@
       };
       const unsubscribe = bridge.onAgentEvent(event => {
         if (event.id !== id || settled) return;
-        if (event.type === 'start' || event.type === 'tool') request.onPhase('think');
+        if (event.type === 'start' || event.type === 'tool') {
+          request.onPhase('think');
+          if (event.toolCounts) request.onProgress?.({ toolCounts: event.toolCounts });
+        }
         else if (event.type === 'delta' && event.text) { text += event.text; request.onDelta(event.text); }
         else if (event.type === 'done') {
           if (!text && event.text) { text = event.text; request.onDelta(event.text); }
@@ -142,6 +145,9 @@
       if (event.type==='cancel') { currentContext=previousCaptureContext;previousCaptureContext=null; }
       window.RabbitCapture?.handleEvent(event);
       if (event.type==='cancel') { selectionSessionId=null;hideIfClosed(activeActivation?.activationId); }
+    });
+    bridge.onDismiss(activationId => {
+      if(activeActivation?.activationId===activationId)window.RabbitChat?.close();
     });
     bridge.onActivate(async activation => {
       activeActivation=activation;

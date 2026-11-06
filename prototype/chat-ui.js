@@ -41,10 +41,7 @@
     #rabbit-chat-root .chat-message a { color:var(--chat-accent);text-decoration-color:var(--chat-line);text-underline-offset:3px; }
     #rabbit-chat-root .chat-message .katex-display { overflow:auto;overflow-y:hidden;padding:2px 0; }
     #rabbit-chat-root .chat-message.is-streaming::after { content:'';display:inline-block;width:3px;height:11px;margin-left:3px;border-radius:2px;background:var(--chat-accent);animation:rb-chat-cursor .8s infinite; }
-    #rabbit-chat-root .chat-message.is-waiting { display:flex;align-items:center;gap:5px;height:24px; }
-    #rabbit-chat-root .chat-message.is-waiting .chat-answer { display:flex;align-items:center;gap:5px; }
-    #rabbit-chat-root .chat-message.is-waiting i { width:4px;height:4px;border-radius:50%;background:var(--chat-accent);animation:rb-chat-dot 1s infinite; }
-    #rabbit-chat-root .chat-message.is-waiting i:nth-child(2) { animation-delay:.12s; } #rabbit-chat-root .chat-message.is-waiting i:nth-child(3) { animation-delay:.24s; }
+    #rabbit-chat-root .chat-progress { margin-bottom:6px;color:var(--chat-muted);font-size:13px;line-height:1.6; }
     #rabbit-chat-root .chat-message.is-error { color:var(--chat-secondary);font-size:14px; }
     #rabbit-chat-root .chat-demo-label { display:block;margin-bottom:5px;color:var(--chat-muted);font-size:12px; }
     #rabbit-chat-root .chat-composer { position:absolute;left:0;right:0;bottom:0;height:55px;display:flex;align-items:center;gap:8px;padding:9px 10px 9px 13px;border:0;background:#fff;border-radius:28px; }
@@ -77,7 +74,6 @@
     #rabbit-chat-root .chat-file-input { display:none; }
     #rabbit-chat-root .chat-announcement { position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0; }
     @keyframes rb-message-arrive { from { opacity:0;transform:translateY(7px); } to { opacity:1;transform:translateY(0); } }
-    @keyframes rb-chat-dot { 0%,70%,100% { transform:translateY(0);opacity:.4; } 35% { transform:translateY(-2px);opacity:1; } }
     @keyframes rb-chat-cursor { 50% { opacity:0; } }
     @media(max-width:619px) { #rabbit-chat-root .chat-input { font-size:18px; } #rabbit-chat-root .chat-composer { gap:6px;padding-left:10px; } #rabbit-chat-root .chat-context-chip { max-width:58px;font-size:10px; } }
     @media(prefers-reduced-motion:reduce) { #rabbit-chat-root *,#rabbit-chat-root *::after { animation:none!important;transition-duration:.01ms!important; } }
@@ -272,9 +268,15 @@
     const paint=now=>{if(state.run!==run)return;if(now-run.lastPaint<42){run.renderFrame=requestAnimationFrame(paint);return;}paintRun(run);};
     run.renderFrame=requestAnimationFrame(paint);
   }
+  function updateProgress(run) {
+    if(state.run!==run)return;
+    const seconds=Math.floor((performance.now()-run.startedAt)/1000);
+    run.progress.textContent=['思考 '+seconds+' 秒',...Object.entries(run.toolCounts).map(([name,count])=>count+' 次'+name)].join(' · ');
+  }
+  function stopProgress(run) { clearTimeout(run.progressTimer);run.progress.remove(); }
   function abortGeneration() {
     const run=state.run;if(!run)return;
-    state.run=null;state.busy=false;run.controller.abort();cancelAnimationFrame(run.renderFrame);
+    state.run=null;state.busy=false;run.controller.abort();cancelAnimationFrame(run.renderFrame);stopProgress(run);
     run.message.element.classList.remove('is-waiting','is-streaming');
     if(run.text){run.message.content=run.text;run.message.status='cancelled';renderAssistant(run.message.body,run.text);}
     else {removeMessage(run.message);state.messages=state.messages.filter(message=>message!==run.message);}
@@ -301,21 +303,19 @@
     }
   }
   async function activate(context,options={}) {
-    const wasOpen=state.open;
+    abortGeneration();
     const version=++state.activation;
     const origin=activationPointer(options.anchor);
     state.activationId=options.activationId;state.opening=true;state.selecting=false;state.anchor=petAnchor(origin);
     cancelAnimationFrame(focusFrame);focusFrame=0;
     root.classList.remove('is-open','capture-suspended');shell.inert=true;panel.inert=true;panel.setAttribute('aria-hidden','true');input.blur();
     emit('focus',{bounds:null,active:false});
-    if(!wasOpen){
-      clearMessages();state.attachments=[];state.context=null;state.contextConsumed=false;state.conversationId=crypto.randomUUID();note.textContent='';
-    }
+    clearMessages();input.value='';state.attachments=[];state.context=null;state.contextConsumed=false;state.capture=null;state.conversationId=crypto.randomUUID();note.textContent='';drawContexts();
     setPresentation('compact');
     if(context!==undefined){
       state.contextConsumed=false;state.context=contextFrom(context);drawContexts();state.capture=null;
     }
-    else if(!wasOpen){state.capture=captureContext(version);}
+    else state.capture=captureContext(version);
     sync();
     // 飞行、开框和光效同时开始，输入不等待角色到位。
     window.RabbitBallDemo.approach({...state.petPosition});
@@ -357,9 +357,11 @@
   async function generate(message,{attachments=[],demo=false,regenerate=false}={}) {
     const turn=message.turn;
     message.copyAnimation?.cancel();message.actions?.remove();message.actions=null;message.content='';message.status='pending';
-    message.element.classList.remove('is-error','is-streaming');message.element.classList.add('is-waiting');message.body.innerHTML='<i></i><i></i><i></i>';
-    const run={controller:new AbortController(),message,text:'',lastPaint:0,renderFrame:0,demo};
+    message.element.classList.remove('is-error','is-streaming');message.element.classList.add('is-waiting');message.body.replaceChildren();
+    const progress=document.createElement('div');progress.className='chat-progress';message.element.prepend(progress);
+    const run={controller:new AbortController(),message,text:'',lastPaint:0,renderFrame:0,demo,progress,startedAt:performance.now(),toolCounts:{},progressTimer:0};
     state.run=run;state.busy=true;activity(turn.intent==='chat'?'think':'scan',true);sync();
+    const tick=()=>{if(state.run!==run)return;updateProgress(run);run.progressTimer=setTimeout(tick,1000);};tick();
     try {
       const activation=state.activation;
       if(!regenerate&&state.capture)await state.capture;
@@ -369,6 +371,7 @@
       if(!regenerate){state.context=null;state.contextConsumed=true;state.capture=null;drawContexts();}
       const request={conversationId:state.conversationId,turnId:turn.id,text:turn.text,intent:turn.intent,context,attachments,regenerate,signal:run.controller.signal,
         onDelta:chunk=>{if(state.run!==run||run.controller.signal.aborted)return;run.text+=chunk;schedulePaint(run);},
+        onProgress:({toolCounts})=>{if(state.run===run){run.toolCounts=toolCounts;updateProgress(run);}},
         onPhase:phase=>{if(state.run===run&&['scan','think','idle'].includes(phase))activity(phase,true);}};
       const result=await (service()&&service().send?service().send(request):localDemo(request));
       if(state.run!==run||run.controller.signal.aborted)return false;
@@ -381,6 +384,7 @@
       cancelAnimationFrame(run.renderFrame);message.element.classList.remove('is-waiting','is-streaming');message.element.classList.add('is-error');message.status='error';
       message.body.textContent=error.message||'暂时没有收到回复，请重试。';return false;
     } finally {
+      stopProgress(run);
       if(state.run===run){state.run=null;state.busy=false;activity('idle',false);sync();}
     }
   }
@@ -414,13 +418,15 @@
   }
   async function addAttachment(file) {
     if(!file)return;
+    const activation=state.activation;
     note.textContent='';
     try {
       const attachment={id:'attachment-'+Date.now(),name:file.name,mimeType:file.type||'text/plain'};
       if(file.type.startsWith('image/'))attachment.dataUrl=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('未能读取图片，请重新选择。'));reader.readAsDataURL(file);});
       else attachment.text=await file.text();
+      if(activation!==state.activation||!state.open)return;
       state.attachments=[attachment];drawContexts();sync();input.focus({preventScroll:true});
-    } catch(error){note.textContent=error.message;}
+    } catch(error){if(activation===state.activation)note.textContent=error.message;}
   }
   form.addEventListener('submit',event=>{event.preventDefault();if(state.busy){abortGeneration();finishDemo();}else send();});
   input.addEventListener('input',()=>{sync();focusBounds();});

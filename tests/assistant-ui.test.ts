@@ -18,6 +18,7 @@ function loadAssistant() {
   const chatCalls: Array<{ context: unknown; options: { activationId: number; anchor?: unknown } }> = [];
   let mainEpoch = 0, chatEpoch: number | undefined;
   let activationListener!: (activation: Activation) => Promise<void>;
+  let dismissListener!: (id: number) => void;
   let captureListener!: (event: unknown) => void;
   let suspendedListener!: (suspended: boolean) => void;
   let activateChat = async () => { ui.opening = false; ui.chat = true; };
@@ -47,6 +48,7 @@ function loadAssistant() {
   };
   const bridge = {
     onActivate(listener: typeof activationListener) { activationListener = listener; },
+    onDismiss(listener: typeof dismissListener) { dismissListener = listener; },
     onCaptureEvent(listener: typeof captureListener) { captureListener = listener; },
     onSuspended(listener: typeof suspendedListener) { suspendedListener = listener; },
     onCursor() {}, onPointerDown() {}, onSettingsChanged() {},
@@ -76,6 +78,7 @@ function loadAssistant() {
     ui, hides, appliedHides, focusCalls, chatCalls, chat, settings: window.RabbitSettings,
     assistant: window.RabbitAssistant,
     onSuspended(listener: (event: { detail: boolean }) => void) { events.on('desktop:suspended', listener); },
+    dismiss(id: number) { dismissListener(id); },
     suspend(value: boolean) { suspendedListener(value); },
     closeWithoutOwnership() { ui.chat = false; ui.opening = false; document.dispatchEvent({ type: 'chat:close', detail: {} }); },
     activate(activation: Activation) { mainEpoch = activation.activationId; return activationListener(activation); },
@@ -159,4 +162,17 @@ test('无所属轮次的聊天关闭不会借用最新 native 激活', async () 
   await app.activate({ activationId: 51, view: 'prompt' });
   app.closeWithoutOwnership();
   assert.deepEqual(app.hides, []);
+});
+
+
+test('再次激活的取消通知只关闭所属对话框，旧通知不能关闭新对话框', async () => {
+  const app = loadAssistant();
+  await app.activate({ activationId: 1, view: 'prompt' });
+  app.dismiss(1);
+  assert.equal(app.ui.chat, false);
+  await app.activate({ activationId: 2, view: 'prompt' });
+  app.dismiss(1);
+  assert.equal(app.ui.chat, true);
+  app.dismiss(2);
+  assert.equal(app.ui.chat, false);
 });

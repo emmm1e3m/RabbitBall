@@ -46,6 +46,7 @@ function browser() {
     removeAttribute(name: string) { delete this.attributes[name]; }
     appendChild(child: Element) { child.parentElement = this; this.children.push(child); return child; }
     append(...children: Element[]) { children.forEach(child => this.appendChild(child)); }
+    prepend(child: Element) { child.parentElement = this; this.children.unshift(child); }
     replaceChildren(...children: Element[]) { this.children = []; this.append(...children); }
     remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
     contains(child: Element): boolean { return child === this || this.children.some(node => node.contains(child)); }
@@ -406,7 +407,7 @@ test('组合触发时无关键取消整个按键序列，后续松键不打开�
   }
 });
 
-test('单字母启动键保存后，设置与聊天打开时保留正常文字输入', async () => {
+test('单字母启动键在设置中正常输入，在聊天中取消激活且长按不进入截图', async () => {
   const page = chat(); let captures = 0;
   Object.assign(page.window.RabbitAssistant, {
     demoCaptureStart: () => { captures++; return { sessionId: 'one', context: { images: [] }, backgroundImageDataUrl: 'demo' }; },
@@ -427,7 +428,8 @@ test('单字母启动键保存后，设置与聊天打开时保留正常文字�
   await page.api.activate({ id: 'window', images: [] });
   const chatKey = page.emit('keydown', { code: 'KeyK', key: 'k' }); page.tick(600);
   page.emit('keyup', { code: 'KeyK', key: 'k' }); await flush();
-  assert.equal(chatKey.defaultPrevented, false); assert.equal(captures, 0);
+  assert.equal(chatKey.defaultPrevented, true); assert.equal(captures, 0);
+  assert.equal(page.api.getSnapshot().open, false);
   assert.equal(page.window.RabbitCapture.getSnapshot().active, false);
 });
 
@@ -507,4 +509,58 @@ test('空输入先删除上传图片，再删除截图，并保留文字附件',
   assert.equal(page.api.getSnapshot().attachmentCount, 1, '删除截图不能带走文字附件');
   assert.equal(page.document.querySelectorAll('.chat-context-chip').length, 1);
   assert.equal(page.document.querySelector('.chat-context-chip').title, '保留.txt');
+});
+
+
+test('重新激活清空草稿、附件与消息并换新会话，同一次打开内追问仍沿用会话', async () => {
+  const page=chat(), requests: any[]=[];
+  page.window.RabbitAssistant.send=async(request: any)=>{requests.push(request);return {text:'回答'};};
+  const input=page.document.querySelector('.chat-input'),files=page.document.querySelector('.chat-file-input');
+  const submit=()=>page.document.querySelector('.chat-composer').handlers.get('submit')[0]({preventDefault(){}});
+  await page.api.activate({id:'old',images:[]});
+  input.value='第一问';submit();await flush();
+  input.value='追问';submit();await flush();
+  assert.equal(requests[0].conversationId,requests[1].conversationId);
+  assert.ok(page.api.getSnapshot().messageCount>0);
+  files.files=[{name:'旧.txt',type:'text/plain',text:async()=>'旧附件'}];
+  files.handlers.get('change')[0]();await flush();input.value='未发送草稿';
+  page.api.close();await page.api.activate({id:'new',images:[]});
+  assert.equal(input.value,'');assert.equal(page.api.getSnapshot().messageCount,0);
+  assert.equal(page.api.getSnapshot().attachmentCount,0);
+  assert.equal(page.api.getSnapshot().context.id,'new');
+  input.value='新问题';submit();await flush();
+  assert.notEqual(requests[2].conversationId,requests[0].conversationId);
+  assert.equal(requests[2].attachments.length,0);
+});
+
+test('上一轮未读完的附件不能进入重新激活的新对话', async () => {
+  const page=chat();let finish!: (text:string)=>void;
+  await page.api.activate({id:'old',images:[]});
+  const files=page.document.querySelector('.chat-file-input');
+  files.files=[{name:'旧.txt',type:'text/plain',text:()=>new Promise<string>(resolve=>finish=resolve)}];
+  files.handlers.get('change')[0]();
+  page.api.close();await page.api.activate({id:'new',images:[]});
+  finish('迟到附件');await flush();
+  assert.equal(page.api.getSnapshot().attachmentCount,0);
+});
+
+
+test('等待时每秒显示耗时，实际搜索后才显示计数，完成或取消后停止', async () => {
+  for (const cancel of [false,true]) {
+    const page=chat(), done=deferred<{text:string}>();let request:any;
+    page.window.RabbitAssistant.send=(value:any)=>{request=value;return done.promise;};
+    await page.api.activate({id:'progress',images:[]});
+    page.document.querySelector('.chat-input').value='问题';
+    page.document.querySelector('.chat-composer').handlers.get('submit')[0]({preventDefault(){}});
+    await flush();
+    const progress=page.document.querySelector('.chat-progress');
+    assert.equal(progress.textContent,'思考 0 秒');
+    page.tick(2100);assert.equal(progress.textContent,'思考 2 秒');
+    request.onProgress({toolCounts:{搜索:2}});assert.equal(progress.textContent,'思考 2 秒 · 2 次搜索');
+    request.onProgress({toolCounts:{搜索:2,读取文件:1}});assert.equal(progress.textContent,'思考 2 秒 · 2 次搜索 · 1 次读取文件');
+    if(cancel)page.api.close();
+    done.resolve({text:'回答'});await flush();
+    assert.equal(page.document.querySelector('.chat-progress'),null);
+    const stopped=progress.textContent;page.tick(3000);assert.equal(progress.textContent,stopped);
+  }
 });

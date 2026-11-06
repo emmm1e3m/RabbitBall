@@ -175,10 +175,7 @@ export class CaptureOverlays {
       type: 'frame', sessionId: this.sessionId,
       ...(physicalRect ? {
         rect: viewportRect(physicalRect, physicalBounds, bounds),
-        physicalSize: { width: physicalRect.width, height: physicalRect.height },
       } : {}),
-      showSize: end.x >= physicalBounds.x && end.x < physicalBounds.x + physicalBounds.width &&
-        end.y >= physicalBounds.y && end.y < physicalBounds.y + physicalBounds.height,
     });
   }
 }

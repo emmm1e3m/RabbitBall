@@ -78,7 +78,7 @@ function invalidateInput(): void {
 }
 
 function configureNative(shortcut = store.getPublic().activationShortcut): Promise<void> {
-  return windowsNative?.configure({ pauseOnFullscreen: store.getPublic().pauseOnFullscreen, inputEnabled: !suspended && !!window && !window.isDestroyed(), recording: shortcutRecording, shortcut: nativeShortcut(shortcut) }) ?? Promise.resolve();
+  return windowsNative?.configure({ pauseOnFullscreen: store.getPublic().pauseOnFullscreen, inputEnabled: !suspended && !!window && !window.isDestroyed(), allowOwnForeground: panelView !== 'settings', recording: shortcutRecording, shortcut: nativeShortcut(shortcut) }) ?? Promise.resolve();
 }
 
 function registerPlatformShortcut(shortcut: readonly string[]): void {
@@ -178,6 +178,7 @@ function showPanel(view: Activation['view'], context?: NativeCaptureContext): vo
   if (suspended && view !== 'settings') return;
   invalidateInput();
   panelView = view;
+  void configureNative().catch(() => {});
   interactive = view === 'settings';
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
@@ -241,6 +242,7 @@ function hidePanel(reason = 'renderer-hide'): void {
   // 关闭面板不撤销进行中的坐标同步；就绪后只恢复宠物，不恢复旧面板。
   if (petTransition === undefined) window.setOpacity(1);
   panelView = undefined;
+  void configureNative().catch(() => {});
   interactive = false;
   applyWindowMode();
   window.webContents.send('rabbit:cursor', { ...desktopCursor(), resetEntry: true });
@@ -339,7 +341,7 @@ async function captureForeground(signal: AbortSignal): Promise<CaptureSnapshot> 
     const y = (screenCursor.y - bounds.y) / bounds.height * size.height;
     const cursor: NonNullable<CaptureImage['cursor']> = { x: Math.round(x), y: Math.round(y), width: size.width, height: size.height, inside: x >= 0 && y >= 0 && x < size.width && y < size.height };
     const marked = markCaptureCursor(image, cursor, store.getPublic().eyeColor);
-    context.images = [{ id: randomUUID(), title: context.title, imageDataUrl: 'data:image/jpeg;base64,' + marked.toJPEG(88).toString('base64'), cursor }];
+    context.images = [{ id: randomUUID(), title: context.title, source: 'window', appName: foreground.appName, processName: foreground.processName, pixelSize: size, imageDataUrl: 'data:image/jpeg;base64,' + marked.toJPEG(88).toString('base64'), cursor }];
     snapshot.defaultClipboard = image;
   } catch (error) {
     const failure = error as { killed?: boolean };
@@ -369,7 +371,7 @@ function drainCaptureRegions(session: CaptureSession): void {
     const size = crop.getSize();
     const scale = Math.min(1, 1920 / size.width, 1200 / size.height);
     const modelImage = scale < 1 ? crop.resize({ width: Math.max(1, Math.round(size.width * scale)), height: Math.max(1, Math.round(size.height * scale)) }) : crop;
-    const image: CaptureImage = { id: randomUUID(), title: '选区 ' + (session.context.images.length + 1), imageDataUrl: 'data:image/jpeg;base64,' + modelImage.toJPEG(88).toString('base64') };
+    const image: CaptureImage = { id: randomUUID(), title: '选区 ' + (session.context.images.length + 1), source: 'region', pixelSize: size, imageDataUrl: 'data:image/jpeg;base64,' + modelImage.toJPEG(88).toString('base64') };
     session.context.images.push(image);
     copyScreenshot(session, crop);
     if (session.visible) captureOverlays?.image(rendererContext(session.context), rect);
@@ -480,9 +482,14 @@ function cancelCapture(notifyNative = true): void {
   }
 }
 
-function activatePrompt(): void {
+function activatePrompt(released = true, nativeId?: number): void {
+  if (panelView === 'prompt') {
+    window.webContents.send('rabbit:dismiss', activationEpoch);
+    hidePanel('shortcut-cancel');
+    return;
+  }
   cancelCapture();
-  beginCapture(true);
+  beginCapture(released, nativeId);
 }
 
 function validateAttachment(value: unknown): Attachment {
@@ -564,12 +571,21 @@ function registerIpc(): void {
   ipcMain.on('rabbit:open-settings', event => { if (trusted(event)) openSettings(); });
   ipcMain.on('rabbit:set-interactive', (event, enabled: unknown, owner: unknown) => { if (trusted(event) && !captureSession && typeof enabled === 'boolean' && (panelView === undefined || owner === activationEpoch)) { interactive = enabled; applyWindowMode(); debugWindow('interactive-' + enabled); } });
   ipcMain.on('rabbit:pet-position', (event, point: unknown) => { if (trusted(event)) followPetPosition(point); });
-  ipcMain.handle('rabbit:pet-viewport-ready', (event, id: unknown) => {
+  ipcMain.handle('rabbit:pet-viewport-ready', async (event, id: unknown) => {
     if (!trusted(event) || id !== petTransition || petTransition === undefined) return false;
+    // 保持原生透明且不可聚焦地挂回合成树，隐藏窗口可能不产出新帧。
+    if (quitting || window.isDestroyed()) return false;
+    window.showInactive();
+    // RAF 只保证 DOM 已更新；等待合成器产出新帧，避免显示上一次收起的缓存画面。
+    // 仅换屏时读取 1 像素，不编码、不保存，也不截取用户桌面。
+    await window.webContents.capturePage({ x: 0, y: 0, width: 1, height: 1 }, { stayHidden: true });
+    if (window.isDestroyed() || quitting || id !== petTransition) return false;
+    const reveal = !captureSession && (!suspended || panelView === 'settings');
+    if (!reveal) window.hide();
     petTransition = undefined;
     window.setOpacity(1);
     applyWindowMode();
-    if (!captureSession && !quitting && (!suspended || panelView === 'settings')) {
+    if (reveal) {
       window.showInactive();
       if (panelView === 'settings') activateWindow();
       else if (panelView === 'prompt' && promptActivation?.phase === 'ready') void focusInput(activationEpoch);
@@ -584,7 +600,7 @@ async function registerActivationKey(): Promise<void> {
     return;
   }
   const service = createWindowsNative({
-    onTriggerBegin(captureId) { beginCapture(false, captureId); },
+    onTriggerBegin(captureId) { activatePrompt(false, captureId); },
     onTriggerHold(captureId) { if (captureSession?.nativeId === captureId) holdCapture(captureSession); },
     onTriggerEnd(captureId) { if (captureSession?.nativeId === captureId) endCapture(); },
     onTriggerCancel(captureId) { if (captureSession?.nativeId === captureId) cancelCapture(false); },

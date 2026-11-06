@@ -17,7 +17,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboardResult: Promise<void> = Promise.resolve(), hasWindow = true) {
+function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboardResult: Promise<void> = Promise.resolve(), hasWindow = true, frameResult: Promise<void> = Promise.resolve()) {
   const calls: string[] = [];
   const sent: Array<{ channel: string; value: unknown }> = [];
   const clipboardWrites: unknown[] = [];
@@ -27,6 +27,12 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
   let bounds = { x: 0, y: 0, width: 1440, height: 900 };
   const webContents = {
     mainFrame: {},
+    capturePage(rect: unknown, options: unknown) {
+      calls.push('capture:frame');
+      assert.equal(JSON.stringify(rect), JSON.stringify({ x: 0, y: 0, width: 1, height: 1 }));
+      assert.equal(JSON.stringify(options), JSON.stringify({ stayHidden: true }));
+      return frameResult;
+    },
     focus() { calls.push('webContents.focus'); },
     send(channel: string, value: unknown) { sent.push({ channel, value }); },
   };
@@ -51,6 +57,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
     hide() { state.visible = false; calls.push('hide'); },
   };
   const native = {
+    configure(config: { allowOwnForeground: boolean }) { calls.push('native.ownForeground:' + config.allowOwnForeground); return Promise.resolve(); },
     cancelCapture() { calls.push('native.cancelCapture'); },
     cancelFocus() { calls.push('cancelFocus'); },
     focusWindow(handle: string) {
@@ -79,7 +86,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
     __window: window, __native: native,
     __store: { getPublic: () => settings },
     __overlays: { close() { calls.push('overlays.close'); }, show: async () => { calls.push('overlays.show'); }, frame() {}, image() {}, owns: () => false },
-    here: '.', path, randomUUID, imageCropRect, selectionRect, unionBounds,
+    here: '.', path, randomUUID, imageCropRect, selectionRect, unionBounds, nativeShortcut: (v: unknown) => v,
     markCaptureCursor: (value: unknown) => value,
     nativeImage: { createFromBuffer: () => image(), createFromBitmap: () => image(), createEmpty: () => ({ isEmpty: () => true }) },
     CaptureWorker: class {
@@ -113,6 +120,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
     },
     subject: undefined as undefined | {
       showPanel(view: PanelView): void;
+      activatePrompt(released?: boolean, nativeId?: number): void;
       focusInput(epoch: unknown): Promise<boolean>;
       hidePanel(reason?: string): void;
       view(): PanelView | undefined;
@@ -138,7 +146,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
     captureOverlays = __overlays;
     registerIpc();
     globalThis.subject = {
-      showPanel, focusInput, hidePanel, completeCapture, copyScreenshot, cancelCapture,
+      showPanel, activatePrompt, focusInput, hidePanel, completeCapture, copyScreenshot, cancelCapture,
       beginCapture, endCapture, holdCapture, selectionPointer,
       cursor: desktopCursor,
       session: () => captureSession,
@@ -164,7 +172,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
   };
 }
 
-test('鼠标跨屏只更新跟随目标，兔球物理中心进入新屏才切窗并同步视口', () => {
+test('鼠标跨屏只更新跟随目标，兔球物理中心进入新屏才切窗并同步视口', async () => {
   const app = desktop();
   const primary = { bounds: { x: 0, y: 0, width: 1440, height: 900 }, workArea: { x: 0, y: 0, width: 1440, height: 900 } };
   const secondary = { bounds: { x: 1440, y: -816, width: 2752, height: 1153 }, workArea: { x: 1440, y: -816, width: 2752, height: 1108 } };
@@ -189,13 +197,13 @@ test('鼠标跨屏只更新跟随目标，兔球物理中心进入新屏才切�
   const updated = app.sent.at(-1)!;
   assert.equal(updated.channel, 'rabbit:cursor');
   assert.deepEqual(JSON.parse(JSON.stringify((updated.value as any).viewport)), { x: 2880, y: -766, scale: 1.25 });
-  app.send('rabbit:pet-viewport-ready', (updated.value as any).transitionId - 1);
+  await app.send('rabbit:pet-viewport-ready', (updated.value as any).transitionId - 1);
   assert.equal(app.state.opacity, 0, '旧轮次就绪不能显示本次窗口');
-  app.send('rabbit:pet-viewport-ready', (updated.value as any).transitionId);
+  await app.send('rabbit:pet-viewport-ready', (updated.value as any).transitionId);
   assert.equal(app.state.opacity, 1);
 });
 
-test('中心经过屏间空隙时不提前切屏，打开面板后不接受迟到的位置回报', () => {
+test('中心经过屏间空隙时不提前切屏，打开面板后不接受迟到的位置回报', async () => {
   const app = desktop();
   const remote = { bounds: { x: 1800, y: 0, width: 1200, height: 900 }, workArea: { x: 1800, y: 0, width: 1200, height: 860 } };
   app.screen.getAllDisplays = () => [{ bounds: { x: 0, y: 0, width: 1440, height: 900 }, workArea: app.bounds() }, remote];
@@ -207,7 +215,7 @@ test('中心经过屏间空隙时不提前切屏，打开面板后不接受迟�
   app.subject.showPanel('settings');
   const transitionId = (app.sent.findLast(message => message.channel === 'rabbit:cursor')!.value as any).transitionId;
   assert.equal(app.state.opacity, 0, '跨屏尚未完成时打开面板仍需等待新坐标绘制');
-  app.send('rabbit:pet-viewport-ready', transitionId);
+  await app.send('rabbit:pet-viewport-ready', transitionId);
   assert.equal(app.state.opacity, 1);
   app.send('rabbit:pet-position', { x: 100, y: 100 });
   assert.equal(app.bounds().x, 1800);
@@ -232,9 +240,9 @@ test('关闭跟随的跨屏提问仍立即开框，但等新坐标就绪后才�
   assert.equal(await app.subject.focusInput(activation.activationId), false);
   assert.equal(app.calls.includes('native.focus'), false, '隐藏期间不尝试聚焦');
   const id = cursors[1].transitionId;
-  assert.equal(app.send('rabbit:pet-viewport-ready', id - 1), false);
+  assert.equal(await app.send('rabbit:pet-viewport-ready', id - 1), false);
   assert.equal(app.state.opacity, 0);
-  assert.equal(app.send('rabbit:pet-viewport-ready', id), true);
+  assert.equal(await app.send('rabbit:pet-viewport-ready', id), true);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.state.opacity, 1);
   assert.equal(app.state.visible, true);
@@ -252,7 +260,7 @@ test('跨屏激活在坐标就绪前取消，ACK只完成坐标同步并恢复�
   app.subject.hidePanel();
   assert.equal(app.state.visible, false, '取消面板也不能提前暴露正在换屏的旧画面');
   app.calls.length = 0;
-  assert.equal(app.send('rabbit:pet-viewport-ready', id), true);
+  assert.equal(await app.send('rabbit:pet-viewport-ready', id), true);
   assert.equal(app.subject.view(), undefined);
   assert.equal(app.state.opacity, 1, '取消后宠物不应永久透明');
   assert.equal(app.state.visible, true);
@@ -260,13 +268,13 @@ test('跨屏激活在坐标就绪前取消，ACK只完成坐标同步并恢复�
   assert.equal(app.calls.includes('native.focus'), false);
 });
 
-test('换屏就绪时若新截图已开始，不能把被隐藏的宠物窗口提前恢复', () => {
+test('换屏就绪时若新截图已开始，不能把被隐藏的宠物窗口提前恢复', async () => {
   const app = desktop();
   app.screen.getDisplayNearestPoint = () => ({ workArea: { x: 1800, y: 0, width: 1200, height: 900 } });
   app.subject.showPanel('prompt');
   const id = (app.sent.findLast(message => message.channel === 'rabbit:cursor')!.value as any).transitionId;
   app.subject.beginCapture(false, 2);
-  assert.equal(app.send('rabbit:pet-viewport-ready', id), true);
+  assert.equal(await app.send('rabbit:pet-viewport-ready', id), true);
   assert.equal(app.state.visible, false);
   assert.equal(app.calls.includes('native.focus'), false);
   app.subject.cancelCapture();
@@ -457,4 +465,56 @@ test('已取消的截图在复制队列执行前被跳过', async () => {
   await app.subject.clipboardIdle();
   assert.equal(session.controller.signal.aborted, true);
   assert.equal(app.clipboardWrites.length, 0);
+});
+
+
+test('渲染器就绪后仍等待合成帧，等待期间的新换屏使旧帧作废', async () => {
+  const frame = deferred<void>();
+  const app = desktop(Promise.resolve(false), Promise.resolve(), true, frame.promise);
+  app.screen.getDisplayNearestPoint = () => ({ workArea: { x: 1800, y: 0, width: 1200, height: 900 } });
+  app.subject.showPanel('prompt');
+  const id = (app.sent.findLast(message => message.channel === 'rabbit:cursor')!.value as any).transitionId;
+  const pending = app.send('rabbit:pet-viewport-ready', id);
+  assert.equal(app.calls.includes('capture:frame'), true);
+  assert.equal(app.state.visible, true, '先以原生透明状态挂回合成树');
+  assert.equal(app.state.opacity, 0);
+  app.screen.getDisplayNearestPoint = () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } });
+  app.subject.showPanel('prompt');
+  frame.resolve();
+  assert.equal(await pending, false);
+  assert.equal(app.state.visible, false, '旧合成结果不能显示新一轮窗口');
+  const next = (app.sent.findLast(message => message.channel === 'rabbit:cursor')!.value as any).transitionId;
+  assert.equal(await app.send('rabbit:pet-viewport-ready', next), true);
+  assert.equal(app.state.visible, true);
+});
+
+
+test('收起自己的输入面板后立即重新允许全局触发，不依赖前台切到别的应用', () => {
+  const app = desktop();
+  for (let index = 0; index < 4; index++) {
+    app.subject.showPanel('prompt');
+    assert.equal(app.calls.filter(call => call.startsWith('native.ownForeground:')).at(-1), 'native.ownForeground:true');
+    app.subject.hidePanel();
+    assert.equal(app.calls.filter(call => call.startsWith('native.ownForeground:')).at(-1), 'native.ownForeground:true');
+  }
+});
+
+
+test('对话框再次收到激活键立即取消，释放或长按不重新截图，下一次正常激活', async () => {
+  const app = desktop();
+  app.subject.showPanel('prompt');
+  const owner = app.activation().activationId;
+  app.subject.activatePrompt(false, 8);
+  assert.equal(app.subject.view(), undefined);
+  assert.equal(app.subject.captureActive(), false);
+  assert.equal(app.sent.findLast(message => message.channel === 'rabbit:dismiss')?.value, owner);
+  app.subject.endCapture();
+  assert.equal(app.calls.some(call => call.startsWith('capture:')), false);
+  app.subject.activatePrompt(false, 9);
+  assert.equal(app.subject.captureActive(), true);
+  app.subject.endCapture();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.subject.view(), 'prompt');
+  app.subject.showPanel('settings');
+  assert.equal(app.calls.filter(call => call.startsWith('native.ownForeground:')).at(-1), 'native.ownForeground:false');
 });

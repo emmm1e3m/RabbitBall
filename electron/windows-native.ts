@@ -8,6 +8,7 @@ import type { NativeShortcutKey } from './shortcut.js';
 export interface NativeConfiguration {
   pauseOnFullscreen: boolean;
   inputEnabled: boolean;
+  allowOwnForeground: boolean;
   recording: boolean;
   shortcut: NativeShortcutKey[];
 }

@@ -262,6 +262,17 @@ namespace RabbitBall {
                     $result.handle = $windowHandle.ToInt64().ToString([Globalization.CultureInfo]::InvariantCulture)
                     $result.title = $windowTitle.ToString()
                     $result.processId = [long]$windowProcessId
+                    # 元信息读取可能受进程权限或退出影响，不能因此丢掉可用的截图。
+                    $windowProcess = $null
+                    try {
+                        $windowProcess = [Diagnostics.Process]::GetProcessById([int]$windowProcessId)
+                        $result.processName = $windowProcess.ProcessName
+                        $description = $windowProcess.MainModule.FileVersionInfo.FileDescription
+                        if (-not [string]::IsNullOrWhiteSpace($description)) { $result.appName = $description }
+                    } catch {
+                    } finally {
+                        if ($null -ne $windowProcess) { $windowProcess.Dispose() }
+                    }
                     if ($Capture) {
                         # PrintWindow 包含完整边框，坐标与实际截图使用同一范围。
                         $captureResult = [RabbitBall.ForegroundWindowNative]::CaptureWindow($windowHandle)

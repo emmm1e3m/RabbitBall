@@ -39,6 +39,10 @@ export type SettingsPatch = Omit<Partial<SettingsFields>, 'prompts'> & { apiKey?
 export interface CaptureImage {
   id: string;
   title: string;
+  source?: 'window' | 'region';
+  appName?: string;
+  processName?: string;
+  pixelSize?: { width: number; height: number };
   imageDataUrl: string;
   cursor?: { x: number; y: number; width: number; height: number; inside: boolean };
 }
@@ -80,6 +84,7 @@ export interface AgentEvent {
   name?: string;
   message?: string;
   sources?: Array<{ title: string; url: string }>;
+  toolCounts?: Record<string, number>;
 }
 
 export interface Activation {
@@ -107,7 +112,7 @@ export interface PointerPoint {
 
 export type CaptureEvent =
   | { type: 'start'; sessionId: string; context: CaptureContext; backgroundImageDataUrl?: string; backgroundBitmap?: { data: Uint8Array; width: number; height: number }; width: number; height: number; dragStart?: PointerPoint; shortcut?: string[]; color?: string }
-  | { type: 'frame'; sessionId: string; rect?: { x: number; y: number; width: number; height: number }; physicalSize?: { width: number; height: number }; showSize: boolean }
+  | { type: 'frame'; sessionId: string; rect?: { x: number; y: number; width: number; height: number } }
   | { type: 'pointer'; sessionId: string; phase: 'down' | 'up'; x: number; y: number }
   | { type: 'image'; sessionId: string; context: CaptureContext; rect: { x: number; y: number; width: number; height: number } }
   | { type: 'end' | 'cancel'; sessionId: string };
@@ -119,6 +124,7 @@ export interface RabbitDesktop {
   sendMessage(request: AgentRequest): Promise<void>;
   cancelMessage(id: string): void;
   onActivate(listener: (activation: Activation) => void): () => void;
+  onDismiss(listener: (activationId: number) => void): () => void;
   onAgentEvent(listener: (event: AgentEvent) => void): () => void;
   onSettingsChanged(listener: (settings: PublicSettings) => void): () => void;
   onCursor(listener: (point: CursorPoint) => void): () => void;

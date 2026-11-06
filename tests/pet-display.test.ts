@@ -347,3 +347,17 @@ test('旧面板关闭不能清除新跨屏入场，只有主进程取消通知�
   assert.equal(app.state().viewportEntry, false);
   near(app.opacity(), 1);
 });
+
+
+test('取消面板仍在等待换屏合成时保持透明，不能提前恢复收起画面', async () => {
+  const app = animation();
+  app.cursor(500, 300, primary, { x: 0, y: 0, width: 1440, height: 900 });
+  app.cursor(500, 300, secondary, { x: 0, y: 0, width: 2752, height: 1154 }, 71);
+  app.resize(2752, 1154); app.tick(2);
+  app.cursor(500, 300, secondary, { x: 0, y: 0, width: 2752, height: 1154 }, 71, true);
+  app.tick(10);
+  assert.equal(app.state().viewportReady, false);
+  near(app.opacity(), 0);
+  app.acknowledge(71, true); await flush(); app.tick(20);
+  near(app.opacity(), 1);
+});

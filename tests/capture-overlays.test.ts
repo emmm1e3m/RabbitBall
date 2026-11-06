@@ -127,10 +127,6 @@ test('每屏背景和跨屏选框独立投影，混合 DPI 与负坐标不共用
     { x: 1130, y: 50, width: 250, height: 200 },
     { x: -300, y: 100, width: 500, height: 400 },
   ]);
-  assert.deepEqual(frames.map(event => event?.type === 'frame' ? event.showSize : null), [false, true]);
-  assert.deepEqual(frames.map(event => event?.type === 'frame' ? event.physicalSize : null), [
-    { width: 500, height: 400 }, { width: 500, height: 400 },
-  ]);
   app.overlays.frame(undefined, { x: -100, y: 100 });
   assert.equal(app.windows[0].sent.at(-1)?.type, 'frame');
   assert.equal((app.windows[0].sent.at(-1) as any).rect, undefined);
@@ -251,7 +247,6 @@ test('125% 系统舍入后按实际内容尺寸投影，背景和选框不相差
   assert.equal(frame?.type, 'frame');
   if (frame?.type !== 'frame') throw new Error('缺少 frame');
   assert.deepEqual(frame.rect, { x: 0, y: 0, width: 2048, height: 1154 });
-  assert.deepEqual(frame.physicalSize, { width: 2560, height: 1442 });
   app.overlays.close();
 });
 

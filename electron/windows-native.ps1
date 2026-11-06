@@ -32,6 +32,7 @@ namespace RabbitBall {
             public string requestId;
             public bool pauseOnFullscreen = true;
             public bool inputEnabled;
+            public bool allowOwnForeground;
             public bool recording;
             public ShortcutMember[] shortcut = new ShortcutMember[0];
         }
@@ -77,8 +78,8 @@ namespace RabbitBall {
                 held[KeyId(raw)] = new HeldKey { Raw = raw, Order = ++order, Route = KeyRoute.Passed, Seeded = true };
                 blocked = true;
             }
-            public void SeedButton(int button) { buttons.Add(button); blocked = true; }
-            void DrainFinished() { if (held.Count == 0 && buttons.Count == 0) blocked = false; }
+            public void SeedButton(int button) { buttons.Add(button); }
+            void DrainFinished() { if (held.Count == 0) blocked = false; }
             public void ReleaseSeededKeys(Func<uint, bool> isDown) {
                 List<int> released = null;
                 foreach (KeyValuePair<int, HeldKey> entry in held) {
@@ -124,7 +125,7 @@ namespace RabbitBall {
             }
             void Cancel(Decision decision) {
                 if (active) { active = false; decision.Cancel = true; }
-                blocked = held.Count != 0 || buttons.Count != 0;
+                blocked = held.Count != 0;
             }
             bool Exact() {
                 int count = 0;
@@ -162,7 +163,7 @@ namespace RabbitBall {
                     foreach (HeldKey key in held.Values)
                         if (key.Route == KeyRoute.Buffered) key.Route = KeyRoute.Consumed;
                     decision.Replay.AddRange(OwnedReleases());
-                    blocked = held.Count != 0 || buttons.Count != 0;
+                    blocked = held.Count != 0;
                 }
                 config = next;
                 // 启动前已按住的无关普通键不阻塞新快捷键；真实 down、配置键和修饰键继续配对。
@@ -231,7 +232,7 @@ namespace RabbitBall {
                 if (!Armed) { blocked = true; return decision; }
                 ShortcutMember member = Member(simulatedAltGr ? 0x138 : id);
                 bool exact = Exact();
-                bool candidate = !blocked && buttons.Count == 0 && member != null &&
+                bool candidate = !blocked && member != null &&
                     (member.modifier ? ModifierPrefix() : exact);
                 if (candidate && gate()) {
                     current.Route = KeyRoute.Buffered;
@@ -275,11 +276,11 @@ namespace RabbitBall {
                         return decision;
                     }
                 }
-                if ((down || wheel) && Armed && (active || HasSwallowed())) {
+                // 完整触发已拥有按键，鼠标不再撤销或回放它；未完成的修饰前缀仍保留原鼠标组合。
+                if ((down || wheel) && Armed && !active && HasSwallowed()) {
                     Cancel(decision);
                     ReplayHeld(decision, Stroke.Mouse(button, false, flags, data));
                 }
-                if (down || wheel) blocked = true;
                 DrainFinished();
                 return decision;
             }
@@ -365,15 +366,15 @@ namespace RabbitBall {
         [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int length);
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
-        [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out Rect rect, uint size);
+        [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr window, out Rect rect);
+        [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window, ref Point point);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern uint GetWindowStyle(IntPtr window, int index);
         [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
 
         static TriggerState state;
         static IntPtr keyboardHook, mouseHook;
         static HookProc keyboardCallback, mouseCallback;
-        static NativeConfig configuration = new NativeConfig();
         static readonly ConcurrentQueue<NativeConfig> pendingConfigurations = new ConcurrentQueue<NativeConfig>();
         static uint hookThread;
         static int ignoreProcessId, ownIntegrity, captureId;
@@ -544,11 +545,13 @@ namespace RabbitBall {
         }
 
         static bool CanStartTrigger() {
+            IntPtr foreground = GetForegroundWindow();
             uint foregroundOwner;
-            if (GetWindowThreadProcessId(GetForegroundWindow(), out foregroundOwner) == 0 ||
-                (ignoreProcessId > 0 && foregroundOwner == (uint)ignoreProcessId)) return false;
-            if (configuration.pauseOnFullscreen && ReadFullscreen() == true) return false;
-            return CanInjectForeground();
+            if (GetWindowThreadProcessId(foreground, out foregroundOwner) == 0) return false;
+            if (ignoreProcessId > 0 && foregroundOwner == (uint)ignoreProcessId)
+                return state.Config.allowOwnForeground;
+            if (state.Config.pauseOnFullscreen && ReadFullscreen(foreground) == true) return false;
+            return CanInjectForeground(foregroundOwner);
         }
 
         static bool KeyIsDown(uint key) { return GetAsyncKeyState((int)key) < 0; }
@@ -617,18 +620,15 @@ namespace RabbitBall {
             }
         }
 
-        static bool CanInjectForeground() {
+        static bool CanInjectForeground(uint processId) {
             // UIPI 禁止向更高权限进程回放：提前完整旁路，保留其 Alt 组合键。
-            uint processId;
-            if (GetWindowThreadProcessId(GetForegroundWindow(), out processId) == 0) return false;
             IntPtr process = OpenProcess(0x1000, false, processId);
             if (process == IntPtr.Zero) return false;
             try { int level = ReadIntegrity(process); return level >= 0 && level <= ownIntegrity; }
             finally { CloseHandle(process); }
         }
 
-        static bool? ReadFullscreen() {
-            IntPtr window = GetForegroundWindow();
+        static bool? ReadFullscreen(IntPtr window) {
             if (window == IntPtr.Zero || !IsWindow(window) || IsIconic(window)) return false;
             uint processId;
             if (GetWindowThreadProcessId(window, out processId) == 0) return false;
@@ -638,20 +638,30 @@ namespace RabbitBall {
             string className = name.ToString();
             if (className == "Progman" || className == "WorkerW" || className == "Shell_TrayWnd" || className == "Shell_SecondaryTrayWnd") return false;
             Rect rect;
-            if (DwmGetWindowAttribute(window, 9, out rect, (uint)Marshal.SizeOf(typeof(Rect))) != 0 && !GetWindowRect(window, out rect)) return false;
-            if (rect.Right <= rect.Left || rect.Bottom <= rect.Top) return false;
+            if (!GetClientRect(window, out rect)) return false;
+            Point origin = new Point();
+            if (!ClientToScreen(window, ref origin)) return false;
+            rect.Left += origin.X; rect.Right += origin.X;
+            rect.Top += origin.Y; rect.Bottom += origin.Y;
             IntPtr monitor = MonitorFromWindow(window, 2);
             if (monitor == IntPtr.Zero) return false;
             MonitorInfo info = new MonitorInfo();
             info.Size = (uint)Marshal.SizeOf(typeof(MonitorInfo));
             if (!GetMonitorInfo(monitor, ref info)) return false;
+            return FullscreenSurface(rect, info.Monitor, GetWindowStyle(window, -16));
+        }
+
+        static bool FullscreenSurface(Rect client, Rect monitor, uint style) {
+            // 最大化外框可能覆盖整屏（尤其自动隐藏任务栏）；全屏要求无标题/缩放边框且客户区铺满屏幕。
+            const uint frame = 0x00C00000u | 0x00040000u;
             const int tolerance = 2;
-            return rect.Left <= info.Monitor.Left + tolerance && rect.Top <= info.Monitor.Top + tolerance &&
-                rect.Right >= info.Monitor.Right - tolerance && rect.Bottom >= info.Monitor.Bottom - tolerance;
+            return (style & frame) == 0 && client.Right > client.Left && client.Bottom > client.Top &&
+                client.Left <= monitor.Left + tolerance && client.Top <= monitor.Top + tolerance &&
+                client.Right >= monitor.Right - tolerance && client.Bottom >= monitor.Bottom - tolerance;
         }
 
         static void PollFullscreen() {
-            bool? fullscreen = !configuration.pauseOnFullscreen ? false : ReadFullscreen();
+            bool? fullscreen = !state.Config.pauseOnFullscreen ? false : ReadFullscreen(GetForegroundWindow());
             if (!fullscreen.HasValue && !previousFullscreen.HasValue) fullscreen = false;
             if (fullscreen.HasValue && fullscreen != previousFullscreen) {
                 previousFullscreen = fullscreen;
@@ -660,14 +670,15 @@ namespace RabbitBall {
         }
 
         static NativeConfig ParseConfiguration(Dictionary<string, object> command, JavaScriptSerializer serializer) {
-            object request, pause, enabled, recording, shortcut;
+            object request, pause, enabled, ownForeground, recording, shortcut;
             if (!command.TryGetValue("requestId", out request) || !(request is string) || !ValidRequestId((string)request) ||
                 !command.TryGetValue("pauseOnFullscreen", out pause) || !(pause is bool) ||
                 !command.TryGetValue("inputEnabled", out enabled) || !(enabled is bool) ||
+                !command.TryGetValue("allowOwnForeground", out ownForeground) || !(ownForeground is bool) ||
                 !command.TryGetValue("recording", out recording) || !(recording is bool) ||
                 !command.TryGetValue("shortcut", out shortcut)) throw new InvalidOperationException("原生助手配置格式无效。");
             NativeConfig config = new NativeConfig { requestId = (string)request, pauseOnFullscreen = (bool)pause,
-                inputEnabled = (bool)enabled, recording = (bool)recording,
+                inputEnabled = (bool)enabled, allowOwnForeground = (bool)ownForeground, recording = (bool)recording,
                 shortcut = serializer.ConvertToType<ShortcutMember[]>(shortcut) };
             if (config.shortcut == null || config.shortcut.Length < 1 || config.shortcut.Length > 5)
                 throw new InvalidOperationException("快捷键配置无效。");
@@ -686,7 +697,6 @@ namespace RabbitBall {
             NativeConfig next;
             while (pendingConfigurations.TryDequeue(out next)) {
                 Decision decision = state.Apply(next);
-                configuration = next;
                 EmitTrigger(decision);
                 if (!ExecuteReplay(decision)) return;
                 PollFullscreen();
@@ -854,6 +864,18 @@ namespace RabbitBall {
             // 本入口只运行纯状态机和数据序列化，不安装 hook，也不调用焦点或截图 API。
             TriggerState state;
             Decision decision;
+            Rect monitor = new Rect { Left = -1920, Top = -1080, Right = 0, Bottom = 0 };
+            Assert(FullscreenSurface(monitor, monitor, 0x80000000u));
+            Assert(!FullscreenSurface(monitor, monitor, 0x00CF0000u));
+            Assert(!FullscreenSurface(monitor, monitor, 0x00040000u));
+            Assert(!FullscreenSurface(new Rect { Left = -1920, Top = -1050, Right = 0, Bottom = 0 }, monitor, 0));
+            Assert(!FullscreenSurface(new Rect { Left = -1920, Top = -1080, Right = 0, Bottom = -48 }, monitor, 0));
+            Assert(!FullscreenSurface(new Rect(), monitor, 0));
+            // 自身窗口的前台许可只决定下一次候选，不取消已消费的按压或重解释其释放。
+            state = Configured(Mod(0x38));
+            Assert(Down(state, 0x38).Begin);
+            NativeConfig ownForeground = TestConfig(Mod(0x38)); ownForeground.allowOwnForeground = true;
+            Assert(!state.Apply(ownForeground).Cancel && state.Hold(500).Hold && Up(state, 0x38, 501).Suppress);
             // CUA 等系统注入可只给 VK，零扫描码的 down/up 必须与真实物理事件配对。
             foreach (int[] entry in new int[][] {
                 new int[] { 0x12, 0x30, 0x38, 1 }, new int[] { 0xA4, 0x10, 0x38, 1 },
@@ -1006,7 +1028,7 @@ namespace RabbitBall {
                 state.ReleaseSeededKeys(delegate(uint key) { return false; });
                 Assert(Down(state, 0x38, 2).Begin && Up(state, 0x38, 3).End);
             }
-            // 纠偏不能查询或删除运行期真实按键，也不能解除仍按住鼠标造成的阻塞。
+            // 纠偏不能查询或删除运行期真实按键；鼠标按住不构成触发阻塞。
             state = Configured(Mod(0x38));
             Down(state, 0x1D);
             int runtimeQueries = 0;
@@ -1019,7 +1041,7 @@ namespace RabbitBall {
             state = Configured(Mod(0x38));
             state.SeedButton(1);
             state.ReleaseSeededKeys(delegate(uint key) { return false; });
-            Assert(!Down(state, 0x38).Begin);
+            Assert(Down(state, 0x38).Begin);
             Up(state, 0x38, 1); Button(state, 1, false, 2);
             Assert(Down(state, 0x38, 3).Begin);
             // 启动时无关普通键即使一直按住，也不能永久禁用全部快捷键。
@@ -1160,11 +1182,9 @@ namespace RabbitBall {
                 Assert(Down(state, 0x38).Begin);
                 decision = Button(state, 1, true, elapsed);
                 if (elapsed < 500) {
-                    Assert(decision.Cancel && !decision.SelectionDown);
-                    ReplayIs(decision, 0x38, 0x1001);
-                    Commit(state, decision);
+                    Assert(!decision.Cancel && !decision.SelectionDown && !decision.Suppress && decision.Replay.Count == 0);
                     Assert(!Button(state, 1, false, elapsed + 1).Suppress);
-                    Assert(!Up(state, 0x38, elapsed + 2).Suppress);
+                    Assert(Up(state, 0x38, elapsed + 2).Suppress);
                 } else {
                     Assert(decision.Hold && decision.SelectionDown && decision.Suppress && decision.Replay.Count == 0);
                     Assert(Button(state, 1, false, elapsed + 1).SelectionUp);
@@ -1190,7 +1210,29 @@ namespace RabbitBall {
             Assert(Down(state, 0x38, 2000).Begin && !state.Hold(2001).Hold && state.Hold(2500).Hold);
             state = Configured(Mod(0x38));
             state.SeedButton(1);
-            Assert(!Down(state, 0x38).Begin && !Button(state, 1, false, 1).Suppress);
+            Assert(Down(state, 0x38).Begin && !Button(state, 1, false, 1).Suppress);
+            Assert(Up(state, 0x38, 2).Suppress);
+            // 各鼠标键先按/后按都不阻断完整快捷键，按住鼠标时可重复触发。
+            foreach (int button in new int[] { 1, 2, 3, 4, 5 }) {
+                state = Configured(Mod(0x38));
+                Assert(!Button(state, button, true, 0).Suppress);
+                for (int index = 0; index < 3; index++) {
+                    Assert(Down(state, 0x38, index * 10 + 1).Begin);
+                    decision = Up(state, 0x38, index * 10 + 2);
+                    Assert(decision.End && decision.Suppress && decision.Replay.Count == 0);
+                }
+                Assert(!Button(state, button, false, 40).Suppress);
+                Assert(Down(state, 0x38, 50).Begin);
+                decision = Button(state, button, true, 51);
+                Assert(!decision.Cancel && decision.Replay.Count == 0);
+                Assert(!Button(state, button, false, 52).Suppress);
+                Assert(Up(state, 0x38, 53).Suppress);
+            }
+            state = Configured(Mod(0x38));
+            Down(state, 0x38);
+            decision = state.Mouse(0, false, true, 1, 0x800, 120);
+            Assert(!decision.Cancel && decision.Replay.Count == 0 && !decision.Suppress);
+            Assert(Up(state, 0x38, 2).Suppress);
             // 先配置才 armed；配置相同不取消，修改/录制/禁用将旧 held 留在 drain。
             state = new TriggerState();
             Assert(!Down(state, 0x38).Suppress);
@@ -1278,9 +1320,9 @@ namespace RabbitBall {
             Dictionary<string, object> focusJson = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(FocusResultJson(escapedId, true));
             Assert(Object.Equals(focusJson["requestId"], escapedId) && Object.Equals(focusJson["focused"], true));
             JavaScriptSerializer serializer = new JavaScriptSerializer();
-            Dictionary<string, object> configJson = serializer.Deserialize<Dictionary<string, object>>("{\"type\":\"configure\",\"requestId\":\"barrier-1\",\"pauseOnFullscreen\":true,\"inputEnabled\":true,\"recording\":false,\"shortcut\":[{\"code\":\"F8\",\"key\":66,\"modifier\":false}]}");
+            Dictionary<string, object> configJson = serializer.Deserialize<Dictionary<string, object>>("{\"type\":\"configure\",\"requestId\":\"barrier-1\",\"pauseOnFullscreen\":true,\"inputEnabled\":true,\"allowOwnForeground\":true,\"recording\":false,\"shortcut\":[{\"code\":\"F8\",\"key\":66,\"modifier\":false}]}");
             NativeConfig parsed = ParseConfiguration(configJson, serializer);
-            Assert(parsed.requestId == "barrier-1" && parsed.shortcut.Length == 1 && parsed.shortcut[0].key == 66 && !parsed.recording);
+            Assert(parsed.requestId == "barrier-1" && parsed.shortcut.Length == 1 && parsed.shortcut[0].key == 66 && parsed.allowOwnForeground && !parsed.recording);
             Console.Out.WriteLine("{\"type\":\"validated\",\"tests\":" + assertions + "}");
         }
     }
