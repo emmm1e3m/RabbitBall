@@ -1,13 +1,13 @@
 node_modules/
 dist-electron/
 release/
-prototype/vendor/
-prototype/shortcut.js
+windows/prototype/vendor/
+windows/prototype/shortcut.js
 *.log
 .env*
 
 # 本地调试记录和旧版验收截图不随源码发布。
-docs/ai_notes.md
-docs/user_notes.md
-prototype/*-preview.png
-prototype/preview.jpg
+windows/docs/ai_notes.md
+windows/docs/user_notes.md
+windows/prototype/*-preview.png
+windows/prototype/preview.jpg

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="4 50 352 352" fill="none" stroke="none" role="img" aria-labelledby="rabbit-title rabbit-description">
+  <title id="rabbit-title">果冻兔球</title>
+  <desc id="rabbit-description">粗白圆边、粉色本体、等大的淡粉短耳、红色眼睛与右侧白色高光。</desc>
+  <defs>
+    <radialGradient id="sphere-fill" gradientUnits="userSpaceOnUse" cx="224" cy="178" r="236">
+      <stop offset="0" stop-color="#FFD9E6"/>
+      <stop offset=".32" stop-color="#FFB7CF"/>
+      <stop offset=".68" stop-color="#F79ABB"/>
+      <stop offset=".9" stop-color="#EF86AE"/>
+      <stop offset="1" stop-color="#F3A1BE"/>
+    </radialGradient>
+    <rect id="ear-pill" x="-20" y="-65" width="40" height="70" rx="20" fill="#FFD7E3"/>
+  </defs>
+  <g id="rabbit-art">
+    <g id="body-layer">
+      <circle cx="180" cy="240" r="137" fill="#FFFFFF"/>
+      <circle cx="180" cy="240" r="123" fill="url(#sphere-fill)"/>
+    </g>
+    <g id="ear-left" transform="translate(144 140) rotate(15)"><use href="#ear-pill"/></g>
+    <g id="ear-right" transform="translate(216 145) rotate(30)"><use href="#ear-pill"/></g>
+    <g id="face-layer">
+      <g id="eye-left">
+        <rect class="eye-open" x="107" y="181.5" width="22" height="35" rx="11" fill="#F90040"/>
+        <path class="eye-squeezed" d="m109 187 15 12-15 12" fill="none" stroke="#F90040" stroke-width="11.5" stroke-linecap="round" stroke-linejoin="round" opacity="0"/>
+        <path class="eye-sleep" d="M108 199Q118 207 128 199" fill="none" stroke="#F90040" stroke-width="11.5" stroke-linecap="round" opacity="0"/>
+      </g>
+      <g id="eye-right">
+        <rect class="eye-open" x="161" y="183.5" width="22" height="35" rx="11" fill="#F90040"/>
+        <path class="eye-squeezed" d="m181 189-15 12 15 12" fill="none" stroke="#F90040" stroke-width="11.5" stroke-linecap="round" stroke-linejoin="round" opacity="0"/>
+        <path class="eye-sleep" d="M162 201Q172 209 182 201" fill="none" stroke="#F90040" stroke-width="11.5" stroke-linecap="round" opacity="0"/>
+      </g>
+      <rect id="expression-mouth" x="138" y="216" width="17" height="7" rx="3.5" fill="#F90040" opacity="0"/>
+    </g>
+    <g id="shine-layer">
+      <path d="M285.419 251.08A106 106 0 0 1 242.305 325.756" fill="none" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round"/>
+      <ellipse cx="283" cy="216" rx="7" ry="9" transform="rotate(15 283 216)" fill="#FFFFFF"/>
+    </g>
+  </g>
+</svg>

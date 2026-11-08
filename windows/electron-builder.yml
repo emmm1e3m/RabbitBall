@@ -1,0 +1,24 @@
+appId: com.rabbitball.desktop
+productName: RabbitBall
+directories:
+  output: release
+files:
+  - dist-electron/**/*
+  - prototype/index.html
+  - prototype/capture.html
+  - prototype/capture-host.js
+  - prototype/capture-ui.js
+  - prototype/shortcut.js
+  - prototype/fonts.css
+  - prototype/fonts/**/*
+  - prototype/vendor/**/*
+  - resources/icons/**/*
+  - package.json
+asar: true
+win:
+  icon: resources/icons/rabbitball.ico
+  target:
+    - target: zip
+      arch:
+        - x64
+artifactName: ${productName}-${version}-win-${arch}.${ext}

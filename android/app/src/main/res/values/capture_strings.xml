@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="capture_accessibility_description">当你打开兔球或通过快捷方式唤起时，读取一次当前屏幕供你框选和提问。截图仅留在内存中，不写入相册；只有你发送问题后，才连同问题发送给所配置的模型服务。兔球不读取界面文字节点，不监听操作，也不会代你点击。</string>
+</resources>

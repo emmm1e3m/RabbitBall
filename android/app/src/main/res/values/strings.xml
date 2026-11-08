@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">兔球</string>
+    <string name="shortcut_search">看一眼，问兔球</string>
+    <string name="shortcut_settings">兔球设置</string>
+</resources>
