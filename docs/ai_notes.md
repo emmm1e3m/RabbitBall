@@ -75,4 +75,4 @@
 - 三个快捷功能与历史按钮保留 32×32 圆形背景；生产 BrowserWindow 统一使用 resources/icons/rabbitball.ico。外观 useBuiltinFont 默认 false，主界面及截图界面使用系统字体，开启后使用内置字体；KaTeX 字体独立不变。
 - historyLimit 支持 0：保存时裁剪全部持久历史、撤销旧 run 保存权，新 run 不创建文件，主进程跳过历史缩略图编码；当前内存会话仍支持多轮与重生成。UI 预览及保存均隐藏历史按钮、关闭历史浮层并作废迟到读取，恢复正数后启用后续记录保存。
 - 用户偏好：本地修改完成后自动重新打包并启动更新版，保留设置和历史，未经批准不改版本。start:win 按本项目 release 绝对路径识别旧进程，通过 --rabbitball-quit 正常退出并等待保存后启动正式 RabbitBall.exe；打包前可用 --quit-only。
-- Windows 0.1.3 类型检查、171/171 项测试与原生 ValidateOnly 371 项状态断言通过。两端 0.1.3 均已获用户批准，当前准备发布，尚未发布。
+- Windows 0.1.3 类型检查、171/171 项测试与原生 ValidateOnly 371 项状态断言通过。两端 0.1.3 均已获用户批准并发布至 GitHub v0.1.3，标签对应源码提交 672c2a94ced0956f50f355ae474febf7ecc5012d；Windows ZIP 与 Android APK 均已上传。Android 仍为 versionCode 7，构建、Lint、签名及对齐验证通过。Windows 最终 asar 无插件与诊断代码，正式 RabbitBall.exe 0.1.3 及原生辅助已启动。
