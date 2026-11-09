@@ -27,6 +27,8 @@ import com.rabbitball.app.AppConfig
 import com.rabbitball.app.AppearanceConfig
 import com.rabbitball.app.PromptCatalog
 import com.rabbitball.app.PromptKey
+import com.rabbitball.app.R
+import com.rabbitball.app.RabbitVoiceService
 import kotlin.math.roundToInt
 
 class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : FrameLayout(context) {
@@ -42,6 +44,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
     private val reasoning: Selector
     private val rounds: EditText
     private val accessValue: TextView
+    private val assistantValue: TextView
     private val error: TextView
     private val models = mutableListOf("deepseek-flash", "deepseek-v4-pro")
     private val modelPage = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -96,7 +99,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
                     selectPage(index)
                     for (i in 0 until tabs.childCount) {
                         (tabs.getChildAt(i) as TextView).setTextColor(if (i == index) Palette.accent else Palette.muted)
-                        tabs.getChildAt(i).background = if (i == index) Palette.round(context, Palette.blush, 12f) else null
+                        tabs.getChildAt(i).background = if (i == index) Palette.round(context, Palette.blush, Palette.cornerSmall) else null
                     }
                 }
                 tabs.addView(this, LinearLayout.LayoutParams(0, d(42), 1f).apply { if(index>0) leftMargin=d(8) })
@@ -109,7 +112,9 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
         tabPages.forEach { pages.addView(it, LayoutParams(-1, -2)) }
 
         val initialModel = initial.model
-        key = field(modelPage, "API Key", initialModel.apiKey, "填写 API Key", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+        key = field(modelPage, "API Key", initialModel.apiKey, "填写 API Key", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD).apply {
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+        }
         if (initialModel.model !in models) models.add(initialModel.model)
         label(modelPage, "模型")
         model = Selector("模型", models.map { when(it) { "deepseek-flash" -> "DeepSeek Flash"; "deepseek-v4-pro" -> "DeepSeek V4 Pro"; else -> it } }).apply {
@@ -128,11 +133,16 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
 
         buildAppearance()
         historyLimit = field(generalPage, "历史记录保留条数", initial.historyLimit.toString(), "10", InputType.TYPE_CLASS_NUMBER)
+        generalPage.addView(Palette.text(context, context.getString(R.string.capture_entry_choice_hint), 12f, Palette.muted).apply {
+            setPadding(0, d(18), 0, d(4))
+        })
         val access = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
-        access.addView(Palette.text(context, "即开即选", 14f), LinearLayout.LayoutParams(0, d(58), 1f))
+        access.addView(Palette.text(context, "即开即选（无障碍）", 14f), LinearLayout.LayoutParams(0, d(58), 1f))
         accessValue = button("开启", false) { onAccessibility?.invoke() }
         access.addView(accessValue, LinearLayout.LayoutParams(d(84), d(40)))
         generalPage.addView(access)
+        generalPage.addView(Palette.text(context, context.getString(R.string.capture_accessibility_hint), 12f, Palette.muted),
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
         val petSwitch = Switch(context).apply {
             text = "屏幕边缘陪伴"; textSize = 14f; setTextColor(Palette.ink); minimumHeight=d(58)
             isChecked = context.getSharedPreferences("rabbitball_ui", Context.MODE_PRIVATE).getBoolean("edge_pet", true)
@@ -142,7 +152,10 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
             }
         }
         generalPage.addView(petSwitch)
-        generalPage.addView(button("系统数字助理  ›", false) { onAssistant?.invoke() }, LinearLayout.LayoutParams(-1, d(50)).apply { topMargin=d(8) })
+        assistantValue = button("设为系统助理  ›", false) { onAssistant?.invoke() }
+        generalPage.addView(assistantValue, LinearLayout.LayoutParams(-1, d(50)).apply { topMargin=d(8) })
+        generalPage.addView(Palette.text(context, context.getString(R.string.capture_assistant_hint), 12f, Palette.muted),
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
         if (!firstRun) generalPage.addView(button("最近对话  ›", false) { onHistory?.invoke() }, LinearLayout.LayoutParams(-1, d(50)).apply { topMargin=d(8) })
         buildPrompts()
         error = Palette.text(context, "", 12f, Palette.error).apply { visibility = GONE; setPadding(0,d(8),0,d(8)) }
@@ -201,7 +214,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
         label(appearancePage, title)
         val row = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
         val swatch = View(context).apply {
-            background = Palette.round(context, initial, 12f, Palette.line)
+            background = Palette.round(context, initial, Palette.cornerSmall, Palette.line)
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         row.addView(swatch, LinearLayout.LayoutParams(d(36), d(36)).apply { rightMargin = d(12) })
@@ -211,7 +224,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
             textSize = 14f
             setTextColor(Palette.ink)
             setPadding(d(14), 0, d(14), 0)
-            background = Palette.round(context, Color.WHITE, 14f, Palette.line)
+            background = Palette.round(context, Color.WHITE, Palette.cornerControl, Palette.line)
             importantForAutofill = IMPORTANT_FOR_AUTOFILL_NO
             contentDescription = title
             filters = arrayOf(InputFilter.LengthFilter(7))
@@ -224,7 +237,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
                     val value = text.toString()
                     if (HEX_COLOR.matches(value)) {
                         val color = Color.parseColor(value)
-                        swatch.background = Palette.round(context, color, 12f, Palette.line)
+                        swatch.background = Palette.round(context, color, Palette.cornerSmall, Palette.line)
                         changed(color)
                     }
                 }
@@ -261,7 +274,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
             textSize = 14f
             setTextColor(Palette.ink)
             setPadding(d(14), d(12), d(14), d(12))
-            background = Palette.round(context, Color.WHITE, 14f, Palette.line)
+            background = Palette.round(context, Color.WHITE, Palette.cornerControl, Palette.line)
             filters = arrayOf(InputFilter.LengthFilter(20_000))
             contentDescription = "提示词内容"
             importantForAutofill = IMPORTANT_FOR_AUTOFILL_NO
@@ -424,6 +437,9 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
             authorized -> "即开即选已授权，点击重新连接"
             else -> "开启即开即选"
         }
+        val assistantEnabled = RabbitVoiceService.isDefault(context)
+        assistantValue.text = if (assistantEnabled) "系统助理 · 已设置  ›" else "设为系统助理  ›"
+        assistantValue.contentDescription = if (assistantEnabled) "兔球已设为系统助理，点击更改" else "将兔球设为系统助理"
     }
     fun showError(message: String) { error.text = message; error.visibility = VISIBLE }
     private fun label(parent: LinearLayout, title: String) {
@@ -434,7 +450,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
         return EditText(context).apply {
             inputType=type; setText(value); hint=placeholder; textSize=14f
             setTextColor(Palette.ink); setHintTextColor(Palette.muted); setSingleLine(true)
-            setPadding(d(14),0,d(14),0); background=Palette.round(context,Color.WHITE,14f,Palette.line)
+            setPadding(d(14),0,d(14),0); background=Palette.round(context,Color.WHITE,Palette.cornerControl,Palette.line)
             importantForAutofill=View.IMPORTANT_FOR_AUTOFILL_NO
             parent.addView(this, LinearLayout.LayoutParams(-1,d(48)))
         }
@@ -480,7 +496,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
         }
 
         private fun updateBorder() {
-            background = Palette.ripple(context, Color.WHITE, 9f, if (isActivated || isFocused) Palette.accent else Palette.line)
+            background = Palette.ripple(context, Color.WHITE, Palette.cornerControl, if (isActivated || isFocused) Palette.accent else Palette.line)
         }
 
         private fun openOptions() {
@@ -496,7 +512,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
                 val row = LinearLayout(context).apply {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(d(10), 0, d(10), 0)
-                    background = Palette.ripple(context, if (selected) Palette.blush else Color.WHITE, 8f)
+                    background = Palette.ripple(context, if (selected) Palette.blush else Color.WHITE, Palette.cornerSmall)
                     isClickable = true
                     isFocusable = true
                     contentDescription = label
@@ -509,7 +525,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
                         }
                     }
                     setOnFocusChangeListener { _, focused ->
-                        background = Palette.ripple(context, if (selected || focused) Palette.blush else Color.WHITE, 8f)
+                        background = Palette.ripple(context, if (selected || focused) Palette.blush else Color.WHITE, Palette.cornerSmall)
                     }
                     setOnClickListener {
                         setSelection(index)
@@ -529,7 +545,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
             }
             // 白底细边与柔粉选中态沿用 PC 设置和浮层菜单，不使用系统 Spinner 皮肤。
             popup = PopupWindow(options, width, LayoutParams.WRAP_CONTENT, true).apply {
-                setBackgroundDrawable(Palette.round(context, Color.WHITE, 13f, Palette.line))
+                setBackgroundDrawable(Palette.round(context, Color.WHITE, Palette.cornerControl, Palette.line))
                 elevation = d(8).toFloat()
                 isOutsideTouchable = true
                 inputMethodMode = PopupWindow.INPUT_METHOD_NOT_NEEDED
@@ -582,7 +598,7 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
 
     private fun button(label: String, primary: Boolean, action: () -> Unit): TextView = Palette.text(context,label,14f,if(primary) Color.WHITE else Palette.accent,primary).apply {
         gravity=Gravity.CENTER
-        background=Palette.ripple(context,if(primary) Palette.accent else Color.TRANSPARENT,14f)
+        background=Palette.ripple(context,if(primary) Palette.accent else Color.TRANSPARENT,Palette.cornerControl)
         isClickable=true; isFocusable=true; setOnClickListener { action() }
     }
 }

@@ -16,7 +16,6 @@ import android.view.View
 import com.rabbitball.app.AppSettings
 import com.rabbitball.app.AppearanceConfig
 import kotlin.math.PI
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -44,6 +43,7 @@ class RabbitView @JvmOverloads constructor(
     private var appearance = AppSettings(context).loadAppearance()
     private var colors = RabbitColors.from(appearance)
     internal val heartColors: IntArray get() = colors.hearts
+    internal val signalColor: Int get() = colors.signal
     private var bodyFill = RadialGradient(
         224f, 178f, 236f,
         colors.sphere,
@@ -75,12 +75,6 @@ class RabbitView @JvmOverloads constructor(
         private set
     internal var artworkOffsetY = 0f
         private set
-
-    var thinking: Boolean = false
-        set(value) {
-            field = value
-            invalidate()
-        }
 
     var onPetClick: (() -> Unit)? = null
 
@@ -224,7 +218,6 @@ class RabbitView @JvmOverloads constructor(
         val animationsEnabled = ValueAnimator.areAnimatorsEnabled()
         val tucked = if (animationsEnabled) tuck.position.coerceIn(0f, 1f) else dockAmount
         val seconds = SystemClock.uptimeMillis() / 1000.0
-        val wave = if (animationsEnabled) sin(seconds * 2.0 * PI / 4.8).toFloat() else 0f
         // 不同周期的平滑叠加提供自然漂移；位置不依赖重复动画的进度归零。
         val driftX = if (animationsEnabled) {
             (sin(seconds * 0.83) * 7.0 + sin(seconds * 1.29 + 1.7) * 3.0).toFloat() * (1f - tucked)
@@ -296,15 +289,6 @@ class RabbitView @JvmOverloads constructor(
         canvas.restore()
         canvas.restore()
 
-        if (thinking) {
-            val scanY = 177f + (phase * 2f % 1f) * 75f
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 3f
-            paint.color = colors.signal
-            paint.alpha = (75f + abs(wave) * 65f).toInt()
-            canvas.drawLine(100f, scanY, 204f, scanY, paint)
-            paint.style = Paint.Style.FILL
-        }
         canvas.restore()
     }
 

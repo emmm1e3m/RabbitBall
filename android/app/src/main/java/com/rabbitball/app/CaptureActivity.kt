@@ -63,9 +63,9 @@ class CaptureActivity : Activity() {
         }
         val error = when {
             service != null -> "截图服务暂时没有响应，请再试一次。"
-            RabbitAccessibilityService.isEnabled(this) -> "即开即选需要重新连接。轻点屏幕中央的图标打开设置。"
-            RabbitVoiceService.isDefault(this) -> "可用系统助理手势唤起兔球；轻点中央图标开启即开即选后，也能直接打开框选。"
-            else -> "轻点中央图标开启即开即选，之后打开兔球就能框选屏幕。"
+            RabbitAccessibilityService.isEnabled(this) -> "直接打开时的截图服务需要重新连接。轻点中央图标打开无障碍设置。"
+            RabbitVoiceService.isDefault(this) -> "已设为系统助理，可用助理手势或按键唤起。直接打开时截图需单独开启无障碍，可按需选择。"
+            else -> "直接打开时截图需开启无障碍；也可设为系统助理，用助理手势或按键唤起。两项可独立使用。"
         }
         acceptCapture(CaptureResult(null, error))
     }

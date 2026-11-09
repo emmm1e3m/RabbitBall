@@ -3,7 +3,7 @@
   const messages = document.getElementById('messages');
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const activeAnimations = new Set(), visible = new Set(), leaving = new Set();
-  const entryAnimations = new WeakMap(), shiftAnimations = new WeakMap();
+  const shiftAnimations = new WeakMap();
   const observer = new IntersectionObserver(entries => {
     for (const entry of entries) {
       if (entry.isIntersecting) visible.add(entry.target);
@@ -12,6 +12,9 @@
   });
   let current = null, raw = '', busy = false, follow = true, resizing = false, interacting = false;
   let scrollMotion = null, scrollFrame = 0, paintFrame = 0, pendingPaint = null, lastPaint = 0;
+  let progressRun = null, activityVisible = true;
+  const bodyOf = node => node.querySelector('.bubble-content');
+  const surfaceOf = node => node.querySelector('.bubble-surface');
   const selected = () => !window.getSelection().isCollapsed;
   const maximumScroll = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
   const atBottom = () => window.scrollY >= maximumScroll() - 8;
@@ -34,15 +37,14 @@
     return animation;
   };
   const arrive = (node, assistant = false) => {
-    const content = node.firstElementChild, distance = assistant ? 14 : 32, scale = assistant ? .96 : .88;
-    const animation = animate(content, 'rabbit-message-arrive', frames(450, progress => ({
+    const content = surfaceOf(node), distance = assistant ? 14 : 32, scale = assistant ? .96 : .88;
+    animate(content, 'rabbit-message-arrive', frames(450, progress => ({
       opacity:Math.max(0, Math.min(1, progress * 1.5)),
       transform:`translate3d(${(assistant ? -4 : 10) * (1 - progress)}px,${distance * (1 - progress)}px,0) scale(${scale + (1 - scale) * progress})`
     })), 450, assistant ? 70 : 0);
-    if (animation) entryAnimations.set(content, animation);
   };
-  const arriving = body => body.getAnimations().some(animation => animation.playState === 'running' &&
-    (animation.id === 'rabbit-message-arrive' || animation.id === 'rabbit-first-token'));
+  const arriving = body => [body.parentElement, body].some(node => node.getAnimations().some(animation =>
+    animation.playState === 'running' && (animation.id === 'rabbit-message-arrive' || animation.id === 'rabbit-first-token')));
   const positions = () => reducedMotion.matches || selected() ? new Map() :
     new Map(Array.from(visible).filter(node => node.isConnected && !leaving.has(node)).map(node => [node, node.getBoundingClientRect().top]));
   const shift = before => {
@@ -113,16 +115,66 @@
     node.dataset.role = role;
     node.dataset.source = content;
     node.setAttribute('aria-label', (role === 'user' ? '我：' : '兔球：') + content);
+    const surface = document.createElement('div');
+    surface.className = 'bubble-surface';
     const body = document.createElement('div');
     body.className = 'bubble-content';
-    node.appendChild(body);
+    surface.appendChild(body);
+    node.appendChild(surface);
     if (role === 'user') body.textContent = content;
     else window.RabbitRender.render(body, content);
     messages.appendChild(node);
     observer.observe(node);
     return node;
   };
+  const suspendProgress = () => {
+    if (!progressRun) return;
+    clearTimeout(progressRun.timer);
+    progressRun.timer = 0;
+    progressRun.progress?.remove();
+    progressRun.progress = null;
+  };
+  const clearProgress = (keepSurface = false) => {
+    if (keepSurface) clearTimeout(progressRun?.timer);
+    else suspendProgress();
+    progressRun = null;
+  };
+  // 与 PC 相同，时间覆盖整个请求；搜索数只由真实工具调用事件更新。
+  const syncProgress = () => {
+    if (!activityVisible || document.hidden) leaving.forEach(remove);
+    const run = progressRun;
+    if (!run) return;
+    clearTimeout(run.timer);
+    run.timer = 0;
+    if (!busy || run.node !== current || !current?.isConnected) { clearProgress(); return; }
+    if (!activityVisible || document.hidden) { suspendProgress(); return; }
+    const seconds = Math.floor((performance.now() - run.startedAt) / 1000);
+    const text = '思考 ' + seconds + ' 秒' + (run.searchCount ? ' · ' + run.searchCount + ' 次搜索' : '');
+    const entering = !run.progress;
+    update(() => {
+      if (entering) {
+        run.progress = document.createElement('div');
+        run.progress.className = 'bubble-progress';
+        run.progress.setAttribute('aria-live', 'off');
+        surfaceOf(run.node).prepend(run.progress);
+      }
+      run.progress.textContent = text;
+    }, { flow:entering });
+    run.timer = setTimeout(() => { if (progressRun === run) syncProgress(); }, 1000);
+  };
+  const setSearchCount = count => {
+    if (!busy || !progressRun) return;
+    progressRun.searchCount = Math.max(0, Math.floor(Number(count) || 0));
+    syncProgress();
+  };
+  const setActivityVisible = value => {
+    const visible = Boolean(value);
+    if (activityVisible === visible) return;
+    activityVisible = visible;
+    syncProgress();
+  };
   const reset = () => {
+    clearProgress();
     cancelScroll();
     cancelAnimationFrame(paintFrame);
     paintFrame = 0; pendingPaint = null;
@@ -133,6 +185,8 @@
   };
   const beginTurn = text => {
     flushResponse();
+    clearProgress();
+    busy = false;
     update(() => {
       leaving.forEach(remove);
       if (current && !raw) remove(current);
@@ -168,7 +222,9 @@
       current.dataset.source = raw;
       current.dataset.state = paint.error ? 'error' : busy ? 'streaming' : 'complete';
       current.setAttribute('aria-label', '兔球：' + raw);
-      const body = current.firstElementChild;
+      const body = bodyOf(current);
+      body.hidden = false;
+      if (paint.error) clearProgress();
       window.RabbitRender.render(body, raw);
       const entering = arriving(body);
       if (first && !entering) {
@@ -196,25 +252,46 @@
   const setBusy = value => {
     const wasBusy = busy;
     busy = Boolean(value);
-    if (busy) return;
+    if (busy) {
+      if (!current) return;
+      if (!progressRun || progressRun.node !== current) {
+        clearProgress();
+        progressRun = { node:current, startedAt:performance.now(), searchCount:0, timer:0, progress:null };
+      }
+      if (!raw) {
+        const body = bodyOf(current);
+        body.textContent = '';
+        body.hidden = true;
+        current.setAttribute('aria-label', '兔球正在思考');
+      }
+      syncProgress();
+      return;
+    }
     flushResponse();
     if (wasBusy && current && !raw) {
-      const node = current;
+      const node = current, surface = surfaceOf(node);
       current = null;
+      clearProgress(true);
       leaving.add(node);
       node.dataset.state = 'cancelled';
       node.setAttribute('aria-hidden', 'true');
-      const body = node.firstElementChild, visual = getComputedStyle(body);
+      const visual = getComputedStyle(surface);
       const from = { opacity:visual.opacity, transform:visual.transform };
-      entryAnimations.get(body)?.cancel();
-      animate(body, 'rabbit-response-settle', [
+      surface.getAnimations({ subtree:true }).forEach(animation => animation.cancel());
+      const finish = () => update(() => remove(node), { flow:true });
+      if (!activityVisible || document.hidden || !surface.querySelector('.bubble-progress')) finish();
+      else animate(surface, 'rabbit-message-leave', [
         from,
-        { opacity:0, transform:'translateY(4px) scale(.97)' }
-      ], 130, 0, () => { if (node.isConnected) update(() => remove(node), { flow:true }); });
-    } else if (wasBusy && current) {
+        { opacity:0, transform:'translate3d(0,-4px,0) scale(.96)' }
+      ], 130, 0, finish);
+      return;
+    }
+    update(clearProgress, { flow:wasBusy });
+    if (wasBusy && current) {
       current.dataset.state = current.classList.contains('error') ? 'error' : 'complete';
-      if (!arriving(current.firstElementChild)) {
-        animate(current.firstElementChild, 'rabbit-response-settle', [{ opacity:.92 }, { opacity:1 }], 160);
+      const body = bodyOf(current);
+      if (!arriving(body)) {
+        animate(body, 'rabbit-response-settle', [{ opacity:.92 }, { opacity:1 }], 160);
       }
     }
   };
@@ -250,6 +327,8 @@
     leaving.forEach(remove);
     if (follow) bottom(true); else cancelScroll();
   });
-  window.RabbitConversation = Object.freeze({ reset, beginTurn, restore, showResponse, setBusy });
+  document.addEventListener('visibilitychange', syncProgress);
+  window.addEventListener('pagehide', () => { clearProgress(); leaving.forEach(remove); });
+  window.RabbitConversation = Object.freeze({ reset, beginTurn, restore, showResponse, setBusy, setSearchCount, setActivityVisible });
   document.documentElement.dataset.ready = 'true';
 })();

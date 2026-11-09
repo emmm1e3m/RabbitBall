@@ -42,7 +42,7 @@ npm test
 npm run dist:win
 ```
 
-输出为 `release/RabbitBall-0.1.0-win-x64.zip`，解压即可使用；`release/win-unpacked/RabbitBall.exe` 是可直接运行的目录版。也可运行 `npm run pack:win` 只生成目录版。
+输出为 `release/RabbitBall-0.1.2-win-x64.zip`，解压即可使用；`release/win-unpacked/RabbitBall.exe` 是可直接运行的目录版。也可运行 `npm run pack:win` 只生成目录版。
 
 配置使用 Electron `safeStorage` 加密敏感字段。开发依赖、用户配置、调试记录与构建输出不纳入仓库。
 

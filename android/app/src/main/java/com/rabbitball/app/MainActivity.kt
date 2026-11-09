@@ -255,14 +255,14 @@ class MainActivity : Activity() {
             onDone = { response ->
                 view.showResponse(response)
                 view.setBusy(false)
-                view.completeSubmission()
                 turns.add(ChatTurn("user", userText))
                 turns.add(ChatTurn("assistant", response))
                 try {
                     conversationId = history.save(conversationId, turns.first().content.take(36), turns).id
                 } catch (_: java.io.IOException) { view.setStatus("回答已完成，本次历史未能保存。") }
             },
-            onError = { view.showResponse(it, true); view.setBusy(false) })
+            onError = { view.showResponse(it, true); view.setBusy(false) },
+            onSearchCount = view::setSearchCount)
     }
 
     private fun showSettings() {
@@ -347,6 +347,7 @@ class MainActivity : Activity() {
     }
 
     private fun handleBack() {
+        if (settingsView == null && search?.dismissPhotoMenu() == true) return
         if (settingsView == null && search?.closeCamera() == true) return
         if (settingsView != null && settings.setupComplete) showSearch() else finishSearch()
     }

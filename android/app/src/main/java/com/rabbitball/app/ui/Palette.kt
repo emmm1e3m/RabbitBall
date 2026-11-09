@@ -10,6 +10,11 @@ import android.view.Gravity
 import android.widget.TextView
 
 object Palette {
+    // 小型操作、常规控件、大型承载面使用统一的三级圆角。
+    const val cornerSmall = 10f
+    const val cornerControl = 16f
+    const val cornerSurface = 24f
+
     val ink = Color.rgb(81, 57, 67)
     val muted = Color.rgb(148, 120, 135)
     val accent = Color.rgb(198, 84, 129)
@@ -19,14 +24,14 @@ object Palette {
     val error = Color.rgb(180, 55, 78)
 
     fun dp(context: Context, value: Float): Int = (value * context.resources.displayMetrics.density + .5f).toInt()
-    fun round(context: Context, color: Int, radius: Float = 20f, border: Int? = null): GradientDrawable =
+    fun round(context: Context, color: Int, radius: Float = cornerControl, border: Int? = null): GradientDrawable =
         GradientDrawable().apply {
             setColor(color)
             cornerRadius = dp(context, radius).toFloat()
             if (border != null) setStroke(dp(context, 1f), border)
         }
 
-    fun ripple(context: Context, color: Int = Color.WHITE, radius: Float = 20f, border: Int? = null): RippleDrawable =
+    fun ripple(context: Context, color: Int = Color.WHITE, radius: Float = cornerControl, border: Int? = null): RippleDrawable =
         RippleDrawable(ColorStateList.valueOf(0x22C65481), round(context, color, radius, border), round(context, Color.WHITE, radius))
 
     fun text(context: Context, value: String = "", size: Float = 14f, color: Int = ink, bold: Boolean = false): TextView =

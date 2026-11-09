@@ -45,7 +45,7 @@ object UiContractChecks {
         dockRemembersViewPosition(instrumentation)
         settingsPagesKeepDrafts(instrumentation)
         inputFocusPreservesPetSide(instrumentation)
-        draftsSurviveUnsuccessfulSubmission(instrumentation)
+        submissionClearsSentText(instrumentation)
         conversationDomAndMarkdown(instrumentation)
         keyboardPreservesScreenshotViewport(instrumentation)
         selectionMaskAndGestures(instrumentation)
@@ -58,6 +58,8 @@ object UiContractChecks {
         val original = context.getSharedPreferences("rabbit_settings", Context.MODE_PRIVATE).all.toMap()
         val initial = AppConfig(model = ModelConfig(prompts = mapOf(PromptKey.SYSTEM to "初始系统草稿")))
         val view = SettingsView(context, initial, false)
+        val keyInput = descendants(view).filterIsInstance<EditText>().first()
+        check(keyInput.transformationMethod is android.text.method.PasswordTransformationMethod) { "设置页未遮挡 API Key" }
         val labels = listOf("模型", "外观", "常规", "提示词")
         val tabs = labels.map { title -> descendants(view).filterIsInstance<TextView>().single { it.isClickable && it.text.toString() == title } }
         check(tabs.map { (it.parent as ViewGroup).indexOfChild(it) } == listOf(0, 1, 2, 3)) { "设置四页缺失或顺序与 PC 不一致" }
@@ -254,56 +256,71 @@ object UiContractChecks {
         }
     }
 
-    private fun draftsSurviveUnsuccessfulSubmission(instrumentation: Instrumentation) = withMainSearch(instrumentation) { view ->
+    private fun submissionClearsSentText(instrumentation: Instrumentation) = withMainSearch(instrumentation) { view ->
         layout(view, 400, 600)
         val input = descendants(view).filterIsInstance<EditText>().single { it.contentDescription == "输入问题" }
         val send = descendants(view).single { it.contentDescription == "发送问题" }
         val sent = mutableListOf<Pair<String, String>>()
-        val actions = listOf("搜索", "提取文字", "翻译", "拍照", "历史记录")
-        check(descendants(view).mapNotNull { it.contentDescription?.toString() }.filter { it in actions } == actions) {
-            "五个快捷按钮缺失或顺序错误"
+        val actions = listOf("搜索", "提取文字", "翻译", "历史记录")
+        check(descendants(view).mapNotNull { it.contentDescription?.toString() }.filter { it in actions } == actions &&
+            descendants(view).none { it.contentDescription == "拍照" }) {
+            "圈选功能栏顺序错误，或仍保留旧拍照按钮"
         }
+        val imageSource = descendants(view).single { it.contentDescription == "拍照或上传照片" }
+        check(imageSource.visibility == View.VISIBLE)
+        var picked = false
+        var requested = false
+        view.onPickImageRequested = { picked = true }
+        view.onCameraRequested = { requested = true }
+        check(imageSource.performClick() && !picked && !requested) { "图片菜单未经选择便打开了图片来源" }
+        val inputBeforeChat = input.left
 
-        // 未配置 Key 的回调会直接显示错误；发送动作自身必须保留草稿。
-        input.setText("  未配置模型时的草稿  ")
+        // 发送立即消费当前输入，错误和停止都不把已发文本放回输入框。
+        input.setText("  未配置模型时的消息  ")
         view.onSend = { text, action ->
             sent += text to action
             view.beginTurn(text)
             view.showResponse("请先填写 API Key。", true)
         }
         check(send.performClick())
-        check(sent.last() == ("未配置模型时的草稿" to "ask"))
-        check(input.text.toString() == "  未配置模型时的草稿  ") { "未配置 Key 时丢失了草稿" }
+        check(sent.last() == ("未配置模型时的消息" to "ask"))
+        check(input.text.isEmpty()) { "用户气泡发出后没有立即清空输入" }
+        layout(view, 400, 600)
+        check(imageSource.visibility == View.GONE && input.left < inputBeforeChat) {
+            "对话开始后未隐藏图片入口或收回输入空间"
+        }
 
-        input.setText("网络错误时的草稿")
+        input.setText("发生网络错误的消息")
         view.onSend = { text, action -> sent += text to action; view.beginTurn(text); view.setBusy(true) }
         send.performClick()
+        check(input.text.isEmpty()) { "等待回答期间仍留着已发文本" }
         view.showResponse("网络连接中断，请重试。", true)
         view.setBusy(false)
-        check(input.text.toString() == "网络错误时的草稿") { "请求失败时丢失了草稿" }
+        check(input.text.isEmpty()) { "请求失败恢复了已发文本" }
 
-        input.setText("取消时的草稿")
+        input.setText("用户稍后停止的消息")
         var cancelled = false
         view.onCancelRequest = { cancelled = true; view.setBusy(false); view.setStatus("已停止") }
         send.performClick()
-        check(send.contentDescription == "停止回答")
+        check(send.contentDescription == "停止回答" && input.text.isEmpty())
+        input.setText("停止前输入的新草稿")
         send.performClick()
-        check(cancelled && input.text.toString() == "取消时的草稿") { "取消时丢失了草稿" }
+        check(cancelled && input.text.toString() == "停止前输入的新草稿") { "停止回答改动了用户的新草稿" }
 
-        input.setText("成功时的草稿")
+        input.setText("成功回答的消息")
         send.performClick()
+        check(input.text.isEmpty())
         view.showResponse("回答完成")
-        view.completeSubmission()
         view.setBusy(false)
-        check(input.text.isEmpty()) { "成功后未清除仍与发送内容相同的草稿" }
+        check(input.text.isEmpty()) { "回答完成后恢复了已发文本" }
 
         input.setText("已经发送的问题")
         send.performClick()
+        check(input.text.isEmpty())
         input.setText("等待期间编辑的新草稿")
-        view.showResponse("回答完成")
-        view.completeSubmission()
+        view.showResponse("网络错误", true)
         view.setBusy(false)
-        check(input.text.toString() == "等待期间编辑的新草稿") { "成功回调覆盖了用户新编辑的草稿" }
+        check(input.text.toString() == "等待期间编辑的新草稿") { "失败回调覆盖了用户新编辑的草稿" }
         check(sent.size == 5) { "取消按钮触发了额外发送" }
     }
 
@@ -322,6 +339,12 @@ object UiContractChecks {
                 val image = view.selectionView.displayedImageBounds
                 gesture(view.selectionView, point(image, .2f, .2f), point(image, .5f, .5f), point(image, .8f, .75f))
                 val selected = RectF(view.selection ?: error("聊天前选区未生成"))
+                var historyOpened = false
+                view.onHistory = { historyOpened = true }
+                val historyButton = descendants(view).single { it.contentDescription == "历史记录" }
+                check((historyButton.parent as View).visibility == View.VISIBLE && historyButton.performClick() && historyOpened) {
+                    "圈选阶段的历史记录入口不可用"
+                }
                 view.beginTurn("第一轮问题")
                 view.setBusy(true); view.showResponse("第一轮回答"); view.setBusy(false)
                 check(view.selectionView.visibility != View.VISIBLE)
@@ -329,6 +352,7 @@ object UiContractChecks {
                 view.beginTurn("第二轮问题")
                 view.setBusy(true); view.showResponse("第二轮流式片段")
                 layout(view, 400, 600)
+                checkChatPresentation(view)
             }
             awaitSources(instrumentation, web, listOf("第一轮问题", "第一轮回答", "第二轮问题", "第二轮流式片段"))
             onMain(instrumentation) { view.showResponse("第二轮完整回答"); view.setBusy(false) }
@@ -336,14 +360,12 @@ object UiContractChecks {
             val history = listOf(ChatTurn("user", "历史问题一"), ChatTurn("assistant", "历史回答一"),
                 ChatTurn("user", "历史问题二"), ChatTurn("assistant", "历史回答二"))
             onMain(instrumentation) {
-                var historyOpened = false
-                view.onHistory = { historyOpened = true }
-                descendants(view).single { it.contentDescription == "历史记录" }.performClick()
-                check(historyOpened)
                 val input = descendants(view).filterIsInstance<EditText>().single()
                 input.setText("历史切换前的草稿")
                 view.restoreConversation(history)
+                layout(view, 400, 600)
                 check(input.text.isEmpty()) { "恢复历史未清理旧草稿" }
+                checkChatPresentation(view)
             }
             awaitSources(instrumentation, web, history.map { it.content })
             onMain(instrumentation) {
@@ -351,15 +373,17 @@ object UiContractChecks {
                 input.setText("拍照前保留的草稿")
                 val selection = RectF(view.selection ?: error("相机打开前选区丢失"))
                 var picked = false
+                var requested = false
                 view.onPickImageRequested = { picked = true }
+                view.onCameraRequested = { requested = true; view.openCamera() }
                 view.setBusy(true)
-                descendants(view).single { it.contentDescription == "添加照片" }.performClick()
-                check(picked && input.text.toString() == "拍照前保留的草稿") { "选图入口不可用或取消前清空了草稿" }
+                check(descendants(view).single { it.contentDescription == "拍照或上传照片" }.visibility == View.GONE)
+                // 模拟宿主已取得的图片结果；聊天中隐藏的入口不参与点击。
+                view.onPickImageRequested?.invoke()
+                check(picked && input.text.toString() == "拍照前保留的草稿") { "选图取消前清空了草稿" }
                 checkBounds(view.selection ?: error("选图取消前清空了选区"), selection)
                 view.setBusy(false)
-                var requested = false
-                view.onCameraRequested = { requested = true; view.openCamera() }
-                descendants(view).single { it.contentDescription == "拍照" }.performClick()
+                view.onCameraRequested?.invoke()
                 check(requested && descendants(view).filterIsInstance<CameraView>().size == 1)
                 val camera = descendants(view).filterIsInstance<CameraView>().single()
                 val switch = descendants(camera).single { it.contentDescription == "切换前后摄像头" }
@@ -381,6 +405,8 @@ object UiContractChecks {
                 check(!view.closeCamera() && descendants(view).none { it is CameraView })
                 check(input.text.toString() == "拍照前保留的草稿") { "取消拍照清空了草稿" }
                 checkBounds(view.selection ?: error("取消拍照清空了选区"), selection)
+                layout(view, 400, 600)
+                checkChatPresentation(view)
             }
             awaitSources(instrumentation, web, history.map { it.content })
             onMain(instrumentation) {
@@ -394,6 +420,10 @@ object UiContractChecks {
                 layout(view, 400, 600)
                 check(descendants(view).none { it is CameraView })
                 check(view.selectionView.visibility == View.VISIBLE && !view.selectionView.displayedImageBounds.isEmpty)
+                check((descendants(view).single { it.contentDescription == "历史记录" }.parent as View).visibility == View.VISIBLE &&
+                    descendants(view).single { it.contentDescription == "拍照或上传照片" }.visibility == View.VISIBLE) {
+                    "新照片没有恢复圈选功能栏和图片入口"
+                }
                 check(view.selection == null)
                 check(input.text.toString() == "拍照前保留的草稿") { "新照片丢失了提问草稿" }
                 val photoBounds = view.selectionView.displayedImageBounds
@@ -403,7 +433,11 @@ object UiContractChecks {
             }
             awaitSources(instrumentation, web, emptyList())
             onMain(instrumentation) {
-                view.beginTurn("导图前问题"); view.showResponse("导图前回答")
+                view.beginTurn("导图前问题")
+                val input = descendants(view).filterIsInstance<EditText>().single()
+                check(input.text.isEmpty()) { "直接发出用户气泡后没有清空已发输入" }
+                input.setText("导图期间输入的新草稿")
+                view.showResponse("导图前回答")
             }
             awaitSources(instrumentation, web, listOf("导图前问题", "导图前回答"))
             onMain(instrumentation) {
@@ -411,12 +445,17 @@ object UiContractChecks {
                 view.onPickImageRequested = {
                     view.setPhoto(Bitmap.createBitmap(300, 600, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) })
                 }
-                descendants(view).single { it.contentDescription == "添加照片" }.performClick()
+                check(descendants(view).single { it.contentDescription == "拍照或上传照片" }.visibility == View.GONE)
+                view.onPickImageRequested?.invoke()
                 layout(view, 400, 600)
                 val input = descendants(view).filterIsInstance<EditText>().single()
-                check(input.text.toString() == "拍照前保留的草稿") { "导图丢失了提问草稿" }
+                check(input.text.toString() == "导图期间输入的新草稿") { "导图丢失了发送后新写的草稿" }
                 val imported = view.selectionView.displayedImageBounds
                 check(view.selectionView.visibility == View.VISIBLE && abs(imported.width() / imported.height() - .5f) < .005f)
+                check((descendants(view).single { it.contentDescription == "历史记录" }.parent as View).visibility == View.VISIBLE &&
+                    descendants(view).single { it.contentDescription == "拍照或上传照片" }.visibility == View.VISIBLE) {
+                    "导入图片没有恢复圈选功能栏和图片入口"
+                }
                 gesture(view.selectionView, point(imported, .15f, .2f), point(imported, .5f, .5f), point(imported, .9f, .8f))
                 checkBounds(view.selection ?: error("导入图片无法圈选"), RectF(.15f, .2f, .9f, .8f))
             }
@@ -470,10 +509,82 @@ object UiContractChecks {
                     performance.getEntriesByType('resource').every(r => r.name.startsWith(location.origin + '/conversation/'));
                 })()
             """.trimIndent(), "Markdown、四种公式、安全来源图标或外部资源约束未满足")
+            responseProgressLifecycle(instrumentation, view, web)
             messageMotionSemantics(instrumentation, view, web)
         } finally {
             onMain(instrumentation) { view.setScreenshot(null); view.release() }
         }
+    }
+
+    private fun responseProgressLifecycle(instrumentation: Instrumentation, view: SearchView, web: ConversationWebView) {
+        onMain(instrumentation) {
+            view.restoreConversation(emptyList())
+            view.beginTurn("进度问题")
+            view.setBusy(true)
+            // 未挂载视图由宿主生命周期保持暂停；这里驱动真实页面的前后台入口。
+            web.setActivityVisible(true)
+            view.setSearchCount(2)
+        }
+        awaitJavascript(instrumentation, web, """
+            (() => {
+              const nodes = document.querySelectorAll('.bubble-progress');
+              const match = nodes[0]?.textContent.match(/^思考 (\d+) 秒 · 2 次搜索$/);
+              if (nodes.length !== 1 || !match || Number(match[1]) < 1) return false;
+              window.__rabbitQaProgressSeconds = Number(match[1]);
+              return true;
+            })()
+        """.trimIndent(), "思考计时没有推进，或没有显示实际搜索次数")
+        onMain(instrumentation) { web.setActivityVisible(false) }
+        awaitJavascript(instrumentation, web, "!document.querySelector('.bubble-progress')",
+            "离开前台后仍显示思考进度")
+        Thread.sleep(1_100)
+        onMain(instrumentation) { web.setActivityVisible(true) }
+        awaitJavascript(instrumentation, web, """
+            (() => {
+              const match = document.querySelector('.bubble-progress')?.textContent.match(/^思考 (\d+) 秒 · 2 次搜索$/);
+              return !!match && Number(match[1]) >= window.__rabbitQaProgressSeconds + 1;
+            })()
+        """.trimIndent(), "回到前台后丢失搜索次数或重新开始计时")
+        onMain(instrumentation) { view.showResponse("仍在生成的回答") }
+        awaitSources(instrumentation, web, listOf("进度问题", "仍在生成的回答"))
+        awaitJavascript(instrumentation, web,
+            "!!document.querySelector('.bubble-progress') && document.querySelector('.bubble.assistant .bubble-content')?.textContent.trim() === '仍在生成的回答'",
+            "首段回答覆盖了进度，或进度替代了回答内容")
+        onMain(instrumentation) { view.setBusy(false); view.setSearchCount(99) }
+        awaitJavascript(instrumentation, web, "!document.querySelector('.bubble-progress')",
+            "回答完成或晚到搜索事件仍保留进度")
+        onMain(instrumentation) {
+            view.beginTurn("新一轮")
+            view.setBusy(true)
+            web.setActivityVisible(true)
+        }
+        awaitJavascript(instrumentation, web,
+            "Array.from(document.querySelectorAll('.bubble-progress')).length === 1 && /^思考 \\d+ 秒$/.test(document.querySelector('.bubble-progress').textContent)",
+            "新一轮沿用了旧搜索次数")
+        onMain(instrumentation) { view.showResponse("请求失败", true); view.setBusy(false) }
+        awaitSources(instrumentation, web, listOf("进度问题", "仍在生成的回答", "新一轮", "请求失败"))
+        awaitJavascript(instrumentation, web, "!document.querySelector('.bubble-progress')",
+            "请求失败后残留思考进度")
+        onMain(instrumentation) {
+            view.beginTurn("历史切换前的请求")
+            view.setBusy(true)
+            web.setActivityVisible(true)
+            view.setSearchCount(3)
+            view.restoreConversation(listOf(ChatTurn("assistant", "恢复的回答")))
+        }
+        awaitSources(instrumentation, web, listOf("恢复的回答"))
+        awaitJavascript(instrumentation, web, "!document.querySelector('.bubble-progress')",
+            "恢复历史带入了上一请求的进度")
+        onMain(instrumentation) {
+            view.beginTurn("重置前的请求")
+            view.setBusy(true)
+            web.setActivityVisible(true)
+            view.setSearchCount(4)
+            web.reset()
+        }
+        awaitJavascript(instrumentation, web, "!document.querySelector('.bubble-progress') && !document.querySelector('.bubble')",
+            "重置对话后残留请求气泡或进度")
+        onMain(instrumentation) { view.setBusy(false) }
     }
 
     private fun messageMotionSemantics(instrumentation: Instrumentation, view: SearchView, web: ConversationWebView) {
@@ -610,17 +721,51 @@ object UiContractChecks {
             val tools = historyButton.parent as View
             val toolsBounds = Rect(0, 0, tools.width, tools.height)
             view.offsetDescendantRectToMyCoords(tools, toolsBounds)
-            val top = if (chat) descendants(view).filterIsInstance<ConversationWebView>().single().bottom else statusBar
-            check(mascot.visibility == View.VISIBLE && mascot.left >= 0 && mascot.right <= view.width && mascot.top >= top &&
+            if (chat) checkChatPresentation(view, statusBar)
+            else check(tools.visibility == View.VISIBLE && mascot.visibility == View.VISIBLE &&
+                mascot.left >= 0 && mascot.right <= view.width && mascot.top >= statusBar &&
                 mascot.bottom <= toolsBounds.top && mascot.bottom <= view.height - keyboard) {
-                "键盘弹出后兔球越出活动区或遮挡聊天、快捷操作"
+                "键盘弹出后兔球越出活动区或遮挡圈选快捷操作"
             }
         }
         checkMascot(false)
         view.beginTurn("键盘布局问题")
         layout(view, 400, 600)
         checkMascot(true)
+        layout(view, 400, 1000)
+        checkChatPresentation(view, statusBar, requirePet = true)
         view.setScreenshot(null)
+    }
+
+    private fun checkChatPresentation(view: SearchView, topInset: Int = 0, requirePet: Boolean = false) {
+        val historyButton = descendants(view).single { it.contentDescription == "历史记录" }
+        val tools = historyButton.parent as View
+        check(tools.visibility == View.GONE &&
+            descendants(view).single { it.contentDescription == "拍照或上传照片" }.visibility == View.GONE) {
+            "对话开始或恢复后仍显示圈选功能栏或图片入口"
+        }
+        val web = descendants(view).filterIsInstance<ConversationWebView>().single()
+        val mascot = descendants(view).filterIsInstance<RabbitView>().single()
+        val input = descendants(view).filterIsInstance<EditText>().single { it.contentDescription == "输入问题" }
+        val sheet = (input.parent as View).parent as View
+        val sheetBounds = Rect(0, 0, sheet.width, sheet.height)
+        view.offsetDescendantRectToMyCoords(sheet, sheetBounds)
+        check(web.visibility == View.VISIBLE && web.height > 0 && web.top >= topInset && web.bottom <= sheetBounds.top) {
+            "聊天视口没有延伸至输入栏上方，或覆盖输入区域"
+        }
+        val density = view.resources.displayMetrics.density
+        val petTop = topInset + (8f * density).roundToInt()
+        val gap = (12f * density).roundToInt()
+        val minimumMessages = (48f * density).roundToInt()
+        val petFits = web.bottom - petTop - mascot.measuredHeight - gap >= minimumMessages
+        if (requirePet) check(petFits) { "大视口未能为兔球和消息保留足够空间" }
+        if (petFits) {
+            check(mascot.visibility == View.VISIBLE && mascot.left >= 0 && mascot.right <= view.width &&
+                mascot.top >= topInset && mascot.bottom <= web.top) {
+                "聊天兔球没有位于顶部安全带，或遮挡消息"
+            }
+            check(mascot.left < mascot.width) { "开始对话后兔球没有移到左上角" }
+        } else check(mascot.visibility != View.VISIBLE) { "空间不足时兔球仍遮挡消息区" }
     }
 
     private fun selectionMaskAndGestures(instrumentation: Instrumentation) {

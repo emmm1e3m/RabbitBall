@@ -150,7 +150,7 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
     init {
         contentDescription = "相机取景器"
         setBackgroundColor(Color.TRANSPARENT)
-        viewport.background = Palette.round(context, 0xFF201B1F.toInt(), 24f)
+        viewport.background = Palette.round(context, 0xFF201B1F.toInt(), Palette.cornerSurface)
         viewport.clipToOutline = true
         viewport.addView(texture, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         frozenPhoto.scaleType = ImageView.ScaleType.CENTER_CROP
@@ -209,11 +209,11 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
         errorPanel.orientation = LinearLayout.VERTICAL
         errorPanel.gravity = Gravity.CENTER
         errorPanel.setPadding(dp(20f), dp(16f), dp(20f), dp(12f))
-        errorPanel.background = Palette.round(context, 0xF2FFFFFF.toInt(), 18f)
+        errorPanel.background = Palette.round(context, 0xF2FFFFFF.toInt(), Palette.cornerControl)
         errorText.gravity = Gravity.CENTER
         errorPanel.addView(errorText, LinearLayout.LayoutParams(-1, -2))
         retry.gravity = Gravity.CENTER
-        retry.background = Palette.ripple(context, Color.TRANSPARENT, 10f)
+        retry.background = Palette.ripple(context, Color.TRANSPARENT, Palette.cornerControl)
         retry.setOnClickListener { stop(); start() }
         errorPanel.addView(retry, LinearLayout.LayoutParams(-1, dp(44f)).apply { topMargin = dp(8f) })
         errorPanel.visibility = GONE
@@ -681,7 +681,7 @@ private class CameraControl(context: Context, private val switch: Boolean, side:
 
     fun setSide(side: Float) {
         icon.layoutParams = icon.layoutParams.apply { width = side.roundToInt(); height = side.roundToInt() }
-        icon.background = Palette.ripple(context, 0xFFF4F4F6.toInt(), side / resources.displayMetrics.density * 9f / 32f)
+        icon.background = Palette.ripple(context, 0xFFF4F4F6.toInt(), side / resources.displayMetrics.density * Palette.cornerSmall / 32f)
         icon.invalidate()
     }
 

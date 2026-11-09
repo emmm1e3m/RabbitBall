@@ -29,6 +29,7 @@ class AiSmokeInstrumentation : Instrumentation() {
         try {
             wholeScreenshotAndStream()
             deepSeekSearchAndConversation()
+            searchProgressCountsRealCalls()
             errorsAndCancellation()
             encryptedSettingsAndTextHistory()
             promptOverridesAndSession()
@@ -88,6 +89,7 @@ class AiSmokeInstrumentation : Instrumentation() {
             val first = runRequest(server, action = "search", client = client, visual = visual)
             check(first.error == null && first.text!!.contains("查到了") && first.text.contains("https://example.com/one")
                 && first.text.contains("https://example.com/two")) { first.error.orEmpty() }
+            check(first.searchCounts == listOf(1, 2)) { "搜索进度没有对应实际执行的两次搜索" }
             val initial = server.requests[0].body
             check(userText(initial).contains("相机拍摄的照片") && !userText(initial).contains("屏幕截图")) {
                 "相机照片被描述成了屏幕截图"
@@ -109,7 +111,7 @@ class AiSmokeInstrumentation : Instrumentation() {
             check(finalMessages.getJSONObject(5).getString("tool_call_id") == "call-2")
             val second = runRequest(server, previous = listOf(ChatTurn("user", "测试问题"), ChatTurn("assistant", first.text!!)),
                 client = client, visual = visual)
-            check(second.error == null && second.text == "继续回答")
+            check(second.error == null && second.text == "继续回答" && second.searchCounts.isEmpty())
             val preserved = server.requests[5].body.getJSONArray("messages")
             check(preserved.length() == 8 && preserved.getJSONObject(2).getJSONArray("tool_calls").getJSONObject(0).getString("id") == "call-1") {
                 "后续提问丢失了工具消息前缀"
@@ -117,6 +119,37 @@ class AiSmokeInstrumentation : Instrumentation() {
             check(imageCount(server.requests[5].body) == 1) { "同一会话后续提问重复追加了原图" }
             client.cancel()
             bitmap.recycle()
+        }
+    }
+
+    private fun searchProgressCountsRealCalls() {
+        val empty = Reply("{\"results\":[]}", contentType = "application/json")
+        val calls = JSONArray().apply {
+            for (index in 0..1) put(JSONObject().put("index", index).put("id", "parallel-$index")
+                .put("function", JSONObject().put("name", "search_web")
+                    .put("arguments", JSONObject().put("query", "同轮查询$index").toString())))
+        }
+        val paired = "data: " + JSONObject().put("choices", JSONArray().put(JSONObject()
+            .put("delta", JSONObject().put("tool_calls", calls)).put("finish_reason", "tool_calls"))) + "\n\ndata: [DONE]\n\n"
+        MockServer(listOf(Reply(paired), empty, empty, Reply(answer("同轮两次搜索")),
+            Reply(tool("next-turn", "下一轮查询", "规划")), empty, Reply(answer("新轮一次搜索")))).use { server ->
+            val client = AiClient()
+            val config = ModelConfig(maxToolRounds = 1)
+            try {
+                val first = runRequest(server, action = "search", client = client, config = config)
+                check(first.error == null && first.searchCounts == listOf(1, 2)) {
+                    "搜索次数按工具轮数计数，遗漏同一轮的第二次调用"
+                }
+                val second = runRequest(server, action = "search", client = client, config = config,
+                    previous = listOf(ChatTurn("user", "测试问题"), ChatTurn("assistant", first.text!!)))
+                check(second.error == null && second.searchCounts == listOf(1)) { "新回答沿用了上一回答的搜索次数" }
+                check(server.requests.count { it.path == "/v1/tools/search" } == 3)
+            } finally { client.cancel() }
+        }
+        MockServer(listOf(Reply(answer("翻译结果")))).use { server ->
+            val translated = runRequest(server, action = "translate")
+            check(translated.error == null && translated.searchCounts.isEmpty() &&
+                server.requests.none { it.path == "/v1/tools/search" }) { "翻译操作报告了并未执行的搜索" }
         }
     }
 
@@ -131,6 +164,23 @@ class AiSmokeInstrumentation : Instrumentation() {
             val output = runRequest(server)
             check(output.error?.contains("HTTP 401") == true && output.error.contains("secret-key").not())
         }
+        MockServer(listOf(Reply(tool("cancel-progress", "已开始的搜索", "规划")),
+            Reply("{\"results\":[]}", contentType = "application/json"), Reply(answer("不应交付的旧回答")))).use { server ->
+            val client = AiClient()
+            val late = CountDownLatch(1)
+            val reachedSearch = AtomicReference(false)
+            runOnMainSync {
+                client.request(ModelConfig(endpoint = server.endpoint, apiKey = "mock-key"), "旧问题", "search", null, null,
+                    emptyList(), { late.countDown() }, { late.countDown() }, { late.countDown() },
+                    onSearchCount = { late.countDown() })
+                // 工作线程已经发出真实搜索，主线程尚未处理排队的进度事件。
+                reachedSearch.set(server.searchReceived.await(4, TimeUnit.SECONDS))
+                client.cancel()
+            }
+            check(reachedSearch.get()) { "未能进入真实搜索，取消进度测试无效" }
+            check(!late.await(250, TimeUnit.MILLISECONDS)) { "取消后交付了排队中的搜索进度或回答" }
+        }
+
         val cancelledClient = AiClient()
         val cancelledBitmap = Bitmap.createBitmap(12, 8, Bitmap.Config.ARGB_8888)
         val cancelledVisual = VisualContext(cancelledBitmap, VisualSource.SCREEN)
@@ -260,7 +310,7 @@ class AiSmokeInstrumentation : Instrumentation() {
         }
     }
 
-    private data class Output(val text: String?, val error: String?, val deltas: List<String>)
+    private data class Output(val text: String?, val error: String?, val deltas: List<String>, val searchCounts: List<Int>)
     private fun runRequest(server: MockServer, action: String = "ask", bitmap: Bitmap? = null,
         selection: RectF? = null, previous: List<ChatTurn> = emptyList(), client: AiClient = AiClient(),
         visual: VisualContext? = bitmap?.let { VisualContext(it, VisualSource.SCREEN) },
@@ -269,10 +319,12 @@ class AiSmokeInstrumentation : Instrumentation() {
         val response = AtomicReference<String?>()
         val failure = AtomicReference<String?>()
         val deltas = mutableListOf<String>()
+        val searchCounts = mutableListOf<Int>()
         client.request(config.copy(endpoint = server.endpoint, apiKey = "mock-key"), text, action, visual, selection,
-            previous, { deltas.add(it) }, { response.set(it); done.countDown() }, { failure.set(it); done.countDown() })
+            previous, { deltas.add(it) }, { response.set(it); done.countDown() }, { failure.set(it); done.countDown() },
+            onSearchCount = { searchCounts.add(it) })
         check(done.await(8, TimeUnit.SECONDS)) { "模型回调超时" }
-        return Output(response.get(), failure.get(), deltas.toList())
+        return Output(response.get(), failure.get(), deltas.toList(), searchCounts.toList())
     }
 
     private fun imageCount(body: JSONObject): Int {
@@ -328,6 +380,7 @@ class AiSmokeInstrumentation : Instrumentation() {
         private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
         val requests = CopyOnWriteArrayList<Received>()
         val received = CountDownLatch(1)
+        val searchReceived = CountDownLatch(1)
         val release = CountDownLatch(1)
         val endpoint = "http://127.0.0.1:${server.localPort}/v1"
 
@@ -359,6 +412,7 @@ class AiSmokeInstrumentation : Instrumentation() {
                             while (offset < length) { val count = stream.read(bytes, offset, length - offset); check(count > 0); offset += count }
                             requests.add(Received(path, JSONObject(String(bytes, Charsets.UTF_8))))
                             received.countDown()
+                            if (path == "/v1/tools/search") searchReceived.countDown()
                             if (stall) release.await(5, TimeUnit.SECONDS)
                             val data = reply.text.toByteArray(Charsets.UTF_8)
                             val header = "HTTP/1.1 ${reply.status} Test\r\nContent-Type: ${reply.contentType}; charset=utf-8\r\nContent-Length: ${data.size}\r\nConnection: close\r\n\r\n"

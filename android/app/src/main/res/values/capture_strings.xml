@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="capture_accessibility_description">当你打开兔球或通过快捷方式唤起时，读取一次当前屏幕供你框选和提问。截图仅留在内存中，不写入相册；只有你发送问题后，才连同问题发送给所配置的模型服务。兔球不读取界面文字节点，不监听操作，也不会代你点击。</string>
+    <string name="capture_entry_choice_hint">按唤起方式选择，两项可独立开启。</string>
+    <string name="capture_accessibility_hint">直接打开 App 时读取一次屏幕；也用于屏幕边缘陪伴。</string>
+    <string name="capture_assistant_hint">用系统助理手势或按键唤起时，由系统提供截图。</string>
+    <string name="capture_accessibility_description">用于直接打开兔球时读取一次当前屏幕，以及显示屏幕边缘兔球。无需同时设为系统助理；系统助理是独立的手势或按键唤起入口。仅在你主动唤起时截图，截图留在内存，不写入相册；发送问题后才交给所配置的模型。兔球不读取界面文字节点，不监听操作，也不会代你点击。</string>
 </resources>

@@ -102,6 +102,8 @@ class ConversationWebView(context: Context) : WebView(context) {
     fun beginTurn(userText: String) = call("beginTurn", JSONObject.quote(userText))
     fun showResponse(value: String, error: Boolean = false) = call("showResponse", JSONObject.quote(value), error.toString())
     fun setBusy(value: Boolean) = call("setBusy", value.toString())
+    fun setSearchCount(count: Int) = call("setSearchCount", count.toString())
+    fun setActivityVisible(value: Boolean) = call("setActivityVisible", value.toString())
     fun restoreConversation(turns: List<ChatTurn>) {
         val messages = JSONArray()
         turns.forEach { messages.put(JSONObject().put("role", it.role).put("content", it.content)) }

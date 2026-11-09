@@ -13,6 +13,10 @@ import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.InputType
+import android.transition.ChangeBounds
+import android.transition.Fade
+import android.transition.TransitionManager
+import android.transition.TransitionSet
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -51,6 +55,7 @@ class SearchView(context: Context) : FrameLayout(context) {
     private val mascotGap = dp(12f)
     private val blur = BlurBackgroundView(context)
     private val sheet = LinearLayout(context)
+    private val composer = LinearLayout(context)
     private val input = EditText(context)
     private val send = ActionIcon(context, "send")
     private val mascot = RabbitView(context)
@@ -59,6 +64,9 @@ class SearchView(context: Context) : FrameLayout(context) {
     private val conversation = ConversationWebView(context)
     private val status = Palette.text(context, "", 12f, Palette.muted)
     private val recapture = ActionIcon(context, "capture")
+    private lateinit var photoButton: View
+    private var photoMenu: PhotoSourceMenu? = null
+    private var pendingChatFlight: PointF? = null
     private var busy = false
     private var photoLoading = false
     private var hasScreenshot = false
@@ -70,7 +78,7 @@ class SearchView(context: Context) : FrameLayout(context) {
     private var mascotPosition: PointF? = null
     private var mascotDragging = false
     private var petFlight: ValueAnimator? = null
-    private var submittedDraft: String? = null
+    private var activityVisible = true
     private var cameraView: CameraView? = null
     private var cameraClosing = false
     private var cameraEntryPending = false
@@ -162,7 +170,7 @@ class SearchView(context: Context) : FrameLayout(context) {
             isFocusable = false
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
             isDuplicateParentStateEnabled = true
-            background = Palette.ripple(context, if (embedded) Color.TRANSPARENT else 0xFFF4F4F6.toInt(), 9f)
+            background = Palette.ripple(context, if (embedded) Color.TRANSPARENT else 0xFFF4F4F6.toInt(), Palette.cornerSmall)
         }
         addView(icon, LayoutParams(dp(32f), dp(if (embedded) 32f else 30f), Gravity.CENTER))
         setOnTouchListener { _, event ->
@@ -175,13 +183,75 @@ class SearchView(context: Context) : FrameLayout(context) {
             }
             false
         }
-        setOnClickListener { action(this) }
+        setOnClickListener { if (!chatMode) action(this) }
+    }
+
+    private fun togglePhotoMenu() {
+        val existing = photoMenu
+        if (existing?.isShowing == true) {
+            existing.dismiss()
+            return
+        }
+        if (!photoButton.isAttachedToWindow || photoButton.windowToken == null) return
+        val menu = PhotoSourceMenu(context,
+            onCamera = { onCameraRequested?.invoke() },
+            onUpload = { onPickImageRequested?.invoke() })
+        photoMenu = menu
+        menu.setOnDismissListener { if (photoMenu === menu) photoMenu = null }
+        menu.show(photoButton, sheet)
+    }
+
+    fun dismissPhotoMenu(): Boolean {
+        val menu = photoMenu ?: return false
+        if (!menu.isShowing) return false
+        menu.dismiss()
+        return true
+    }
+
+    private fun closePhotoMenuImmediately() {
+        photoMenu?.dismissImmediately()
+        photoMenu = null
+    }
+
+    private fun updateControlsPresentation(covered: Boolean = false, animate: Boolean = false) {
+        if (chatMode) closePhotoMenuImmediately()
+        photoButton.isEnabled = !chatMode && !covered
+        photoButton.importantForAccessibility = if (chatMode) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        val photoVisibility = if (chatMode) GONE else VISIBLE
+        TransitionManager.endTransitions(composer)
+        if (photoButton.visibility != photoVisibility && animate && composer.isLaidOut &&
+            isAttachedToWindow && ValueAnimator.areAnimatorsEnabled()) {
+            // 相机入口淡出时让输入区域同步收回宽度，过渡只作用于输入条内部。
+            val transition = TransitionSet().setOrdering(TransitionSet.ORDERING_TOGETHER)
+                .addTransition(Fade().addTarget(photoButton).setDuration(160))
+                .addTransition(ChangeBounds().addTarget(input).setDuration(220))
+                .setInterpolator(DecelerateInterpolator(1.6f))
+            TransitionManager.beginDelayedTransition(composer, transition)
+        }
+        photoButton.visibility = photoVisibility
+
+        shortcuts.importantForAccessibility = if (chatMode) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        shortcuts.animate().cancel()
+        shortcuts.alpha = 1f
+        shortcuts.translationY = 0f
+        if (chatMode && animate && !covered && shortcuts.visibility == VISIBLE &&
+            isAttachedToWindow && ValueAnimator.areAnimatorsEnabled()) {
+            shortcuts.animate().alpha(0f).translationY(dp(6f).toFloat()).setDuration(160)
+                .withEndAction {
+                    if (chatMode) {
+                        shortcuts.visibility = GONE
+                        shortcuts.alpha = 1f
+                        shortcuts.translationY = 0f
+                        requestLayout()
+                    }
+                }.start()
+        } else shortcuts.visibility = if (chatMode) GONE else if (covered) INVISIBLE else VISIBLE
     }
 
     private fun buildSheet() {
         sheet.orientation = LinearLayout.VERTICAL
         sheet.setPadding(dp(8f), dp(6f), dp(8f), dp(6f))
-        sheet.background = Palette.round(context, 0xCCFFFFFF.toInt(), 24f, 0x88FFFFFF.toInt())
+        sheet.background = Palette.round(context, 0xCCFFFFFF.toInt(), Palette.cornerSurface, 0x88FFFFFF.toInt())
         sheet.elevation = dp(8f).toFloat()
         sheet.outlineAmbientShadowColor = 0x326C5260
         sheet.outlineSpotShadowColor = 0x326C5260
@@ -190,7 +260,6 @@ class SearchView(context: Context) : FrameLayout(context) {
         for ((action, description) in listOf("search" to "搜索", "extract" to "提取文字", "translate" to "翻译")) {
             shortcuts.addView(shortcut(action, description) { dispatch(action) }, LinearLayout.LayoutParams(dp(37f), dp(44f)))
         }
-        shortcuts.addView(shortcut("camera", "拍照") { onCameraRequested?.invoke() }, LinearLayout.LayoutParams(dp(37f), dp(44f)))
         shortcuts.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
         shortcuts.addView(shortcut("history", "历史记录") { onHistory?.invoke() }, LinearLayout.LayoutParams(dp(37f), dp(44f)))
         addView(shortcuts, LayoutParams(LayoutParams.MATCH_PARENT, dp(44f)).apply {
@@ -198,12 +267,11 @@ class SearchView(context: Context) : FrameLayout(context) {
             rightMargin = dp(24f)
         })
 
-        val composer = LinearLayout(context).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(3f), 0, dp(3f), 0)
-        }
-        composer.addView(shortcut("plus", "添加照片", true) { onPickImageRequested?.invoke() },
-            LinearLayout.LayoutParams(dp(44f), dp(44f)))
+        composer.gravity = Gravity.CENTER_VERTICAL
+        composer.minimumHeight = dp(44f)
+        composer.setPadding(dp(3f), 0, dp(3f), 0)
+        photoButton = shortcut("camera", "拍照或上传照片", true) { togglePhotoMenu() }
+        composer.addView(photoButton, LinearLayout.LayoutParams(dp(44f), dp(44f)))
         input.setTextColor(Palette.ink)
         input.setHintTextColor(Palette.muted)
         input.textSize = 15f
@@ -244,6 +312,7 @@ class SearchView(context: Context) : FrameLayout(context) {
 
     private fun dispatch(action: String) {
         if (busy || photoLoading) return
+        closePhotoMenuImmediately()
         val value = input.text.toString().trim()
         if (action == "ask" && value.isBlank()) {
             input.requestFocus()
@@ -252,17 +321,11 @@ class SearchView(context: Context) : FrameLayout(context) {
         }
         context.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(windowToken, 0)
         input.clearFocus()
-        submittedDraft = input.text.toString()
         onSend?.invoke(value, action)
     }
 
-    fun completeSubmission() {
-        val submitted = submittedDraft ?: return
-        if (input.text.toString() == submitted) input.text.clear()
-        submittedDraft = null
-    }
-
     fun openCamera() {
+        closePhotoMenuImmediately()
         if (cameraView != null) return
         val camera = CameraView(context).apply { applyPetSize(mascotWidth, mascotHeight) }
         camera.isClickable = true
@@ -280,7 +343,7 @@ class SearchView(context: Context) : FrameLayout(context) {
         mascot.translationX = 0f
         mascot.translationY = 0f
         mascot.rotation = 0f
-        mascot.thinking = false
+        updateProcessingVisibility()
         mascot.elevation = dp(20f).toFloat()
         petEffects.elevation = dp(24f).toFloat()
         camera.onClose = { closeCamera() }
@@ -300,7 +363,6 @@ class SearchView(context: Context) : FrameLayout(context) {
             if (cameraView !== camera || cameraClosing) photo.recycle()
             else {
                 cameraPhotoPending = false
-                submittedDraft = null
                 onPhotoCaptured?.invoke(photo) ?: photo.recycle()
                 closeCamera()
             }
@@ -325,6 +387,9 @@ class SearchView(context: Context) : FrameLayout(context) {
     fun closeCamera(): Boolean = dismissCamera(true)
 
     fun pauseCamera() {
+        activityVisible = false
+        updateProcessingVisibility()
+        closePhotoMenuImmediately()
         if (cameraClosing) {
             dismissCamera(false)
             return
@@ -338,6 +403,8 @@ class SearchView(context: Context) : FrameLayout(context) {
     }
 
     fun resumeCamera() {
+        activityVisible = true
+        updateProcessingVisibility()
         if (!cameraClosing && isAttachedToWindow && windowVisibility == VISIBLE) {
             cameraView?.start()
             if (cameraEntryPending) requestLayout()
@@ -366,7 +433,7 @@ class SearchView(context: Context) : FrameLayout(context) {
                 petEffects.elevation = 0f
                 mascot.isEnabled = true
                 mascot.alpha = 1f
-                mascot.thinking = busy
+                updateProcessingVisibility()
                 applySystemBarContrast()
                 requestLayout()
             }
@@ -397,7 +464,7 @@ class SearchView(context: Context) : FrameLayout(context) {
         selectionView.visibility = if (chatMode) GONE else if (covered) INVISIBLE else VISIBLE
         recapture.visibility = if (!covered && !chatMode && !hasScreenshot) VISIBLE else GONE
         sheet.visibility = if (covered) INVISIBLE else VISIBLE
-        shortcuts.visibility = if (covered) INVISIBLE else VISIBLE
+        updateControlsPresentation(covered = covered)
         status.visibility = if (status.text.isBlank()) GONE else if (covered) INVISIBLE else VISIBLE
     }
 
@@ -452,13 +519,16 @@ class SearchView(context: Context) : FrameLayout(context) {
     fun setPhoto(bitmap: Bitmap) = displayImage(bitmap, true)
 
     private fun displayImage(bitmap: Bitmap?, photo: Boolean) {
+        closePhotoMenuImmediately()
+        pendingChatFlight = null
         val fromCamera = cameraView != null
+        if (!fromCamera) stopPetMotion()
         selectionView.animate().cancel()
         selectionView.alpha = 1f
         selectionView.scaleX = 1f
         selectionView.scaleY = 1f
-        submittedDraft = null
         chatMode = false
+        updateControlsPresentation(covered = fromCamera, animate = !fromCamera)
         conversation.reset()
         conversation.visibility = GONE
         selectionView.visibility = VISIBLE
@@ -486,7 +556,12 @@ class SearchView(context: Context) : FrameLayout(context) {
     }
 
     private fun enterConversation() {
+        val entering = !chatMode
+        if (entering && hasAnimated && isLaidOut && cameraView == null) {
+            pendingChatFlight = PointF(mascot.x, mascot.y)
+        }
         chatMode = true
+        updateControlsPresentation(animate = entering)
         selectionView.visibility = GONE
         recapture.visibility = GONE
         conversation.visibility = VISIBLE
@@ -497,16 +572,19 @@ class SearchView(context: Context) : FrameLayout(context) {
     fun beginTurn(userText: String) {
         enterConversation()
         conversation.beginTurn(userText)
+        input.text.clear()
     }
 
     fun restoreConversation(turns: List<ChatTurn>) {
+        setBusy(false)
         input.text.clear()
-        submittedDraft = null
         enterConversation()
         conversation.restoreConversation(turns)
     }
 
     fun release() {
+        setBusy(false)
+        closePhotoMenuImmediately()
         dismissCamera(false)
         removeView(conversation)
         conversation.release()
@@ -515,12 +593,22 @@ class SearchView(context: Context) : FrameLayout(context) {
     fun setBusy(value: Boolean) {
         busy = value
         conversation.setBusy(value)
-        mascot.thinking = value && cameraView == null
+        updateProcessingVisibility()
         send.kind = if (value) "stop" else "send"
         send.contentDescription = if (value) "停止回答" else "发送问题"
         updateSubmissionAvailability()
         if (value && !photoLoading) setStatus("")
         send.invalidate()
+    }
+
+    fun setSearchCount(value: Int) {
+        if (busy) conversation.setSearchCount(value)
+    }
+
+    private fun updateProcessingVisibility() {
+        val visible = activityVisible && isAttachedToWindow && windowVisibility == VISIBLE
+        conversation.setActivityVisible(visible && cameraView == null)
+        petEffects.setThinking(mascot, visible && busy && cameraView == null && mascot.isShown)
     }
 
     fun setPhotoLoading(value: Boolean) {
@@ -570,12 +658,12 @@ class SearchView(context: Context) : FrameLayout(context) {
         status.layout(dp(24f), statusBottom - statusHeight, width - dp(24f), statusBottom)
         val toolsBottom = if (statusHeight > 0) status.top - dp(4f) else sheet.top - dp(8f)
         shortcuts.layout(dp(24f), toolsBottom - dp(44f), width - dp(24f), toolsBottom)
-        val chatTop = topInset + dp(8f)
-        val chatBottom = (shortcuts.top - mascotHeight - 2 * mascotGap - dp(8f)).coerceAtLeast(chatTop)
-        val chatWidth = (width - dp(32f)).coerceAtLeast(0)
+        val chatTop = if (chatMode && canShowChatPet()) chatPetTop() + mascotHeight + mascotGap else topInset + dp(8f)
+        val chatBottom = chatContentBottom().coerceAtLeast(chatTop)
+        val chatWidth = sheet.width
         conversation.measure(MeasureSpec.makeMeasureSpec(chatWidth, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(chatBottom - chatTop, MeasureSpec.EXACTLY))
-        conversation.layout(dp(16f), chatTop, width - dp(16f), chatBottom)
+        conversation.layout(sheet.left, chatTop, sheet.right, chatBottom)
         val keyboardOffset = (bottomInset - navigationInset).coerceAtLeast(0)
         // 键盘只平移原图，保留弹出前的视口尺寸与选区坐标。
         if (keyboardOffset == 0 || screenshotBottomInset == null) {
@@ -592,23 +680,58 @@ class SearchView(context: Context) : FrameLayout(context) {
             }
             cameraPetPosition?.let { placeMascot(it.x, it.y) }
         } else {
-            val position = mascotPosition ?: PointF((width - mascotWidth).toFloat(), defaultY)
-            placeMascot(position.x, position.y)
+            val start = pendingChatFlight
+            if (start != null) {
+                pendingChatFlight = null
+                if (canShowChatPet()) {
+                    placeMascot(start.x, start.y, arriving = true)
+                    animatePetTo(::chatPetTarget, dp(24f).toFloat(), initialPosition = start)
+                } else {
+                    stopPetMotion()
+                    val target = chatPetTarget()
+                    mascotPosition = target
+                    placeMascot(target.x, target.y)
+                }
+            } else {
+                if (chatMode && (!hasAnimated || mascotPosition == null)) mascotPosition = chatPetTarget()
+                val position = mascotPosition ?: PointF((width - mascotWidth).toFloat(), defaultY)
+                placeMascot(position.x, position.y)
+            }
         }
         updatePetGaze()
+        updateProcessingVisibility()
         animateEntranceIfNeeded()
     }
 
-    private fun normalPetMinimumY() =
-        if (chatMode) (shortcuts.top - mascotHeight - 2 * mascotGap).coerceAtLeast(topInset) else topInset
+    private fun chatPetTop() = topInset + dp(8f)
 
-    private fun normalPetMaximumY() = shortcuts.top - mascotHeight - mascotGap
+    private fun chatContentBottom(): Int = when {
+        chatMode && shortcuts.visibility == VISIBLE -> shortcuts.top - dp(8f)
+        status.visibility != GONE -> status.top - dp(8f)
+        else -> sheet.top - dp(8f)
+    }
 
-    private fun placeMascot(x: Float, y: Float) {
+    private fun canShowChatPet() = chatContentBottom() - chatPetTop() - mascotHeight - mascotGap >= dp(48f)
+
+    private fun chatPetTarget() = PointF(dp(16f).coerceAtMost((width - mascotWidth).coerceAtLeast(0)).toFloat(), chatPetTop().toFloat())
+
+    private fun normalPetMinimumY() = if (chatMode) chatPetTop() else topInset
+
+    private fun normalPetMaximumY() = if (chatMode) {
+        if (canShowChatPet()) chatPetTop() else topInset - 1
+    } else shortcuts.top - mascotHeight - mascotGap
+
+    private fun placeMascot(x: Float, y: Float, arriving: Boolean = false) {
         val cameraFlight = cameraView != null && (!cameraClosing || petFlight?.isRunning == true)
-        val minimumY = if (cameraFlight) topInset else normalPetMinimumY()
-        val maximumY = if (cameraFlight) height - navigationInset - mascotHeight - dp(12f) else normalPetMaximumY()
-        mascot.visibility = if (maximumY >= minimumY) VISIBLE else INVISIBLE
+        val chatArrival = chatMode && cameraView == null && (arriving || petFlight?.isRunning == true)
+        val minimumY = if (cameraFlight || chatArrival) topInset else normalPetMinimumY()
+        val maximumY = when {
+            cameraFlight -> height - navigationInset - mascotHeight - dp(12f)
+            chatArrival -> sheet.top - mascotHeight - mascotGap
+            else -> normalPetMaximumY()
+        }
+        val hasSpace = maximumY >= minimumY && (!chatMode || cameraView != null || canShowChatPet())
+        mascot.visibility = if (hasSpace) VISIBLE else INVISIBLE
         val boundedX = x.toInt().coerceIn(0, (width - mascotWidth).coerceAtLeast(0))
         val boundedY = y.toInt().coerceIn(minimumY, maximumY.coerceAtLeast(minimumY))
         mascot.layout(boundedX, boundedY, boundedX + mascotWidth, boundedY + mascotHeight)
@@ -624,14 +747,15 @@ class SearchView(context: Context) : FrameLayout(context) {
         mascot.setDockPose(petDock.left, 0f)
     }
 
-    /** 相机往返共用飞行与取消契约，目标随布局变化。 */
+    /** 角色飞行共用取消与收尾契约，目标随布局变化。 */
     private fun animatePetTo(
         target: () -> PointF,
         arcHeight: Float,
         animated: Boolean = true,
+        initialPosition: PointF? = null,
         finished: () -> Unit = {}
     ) {
-        val start = cameraPetPosition ?: PointF(mascot.x, mascot.y)
+        val start = initialPosition ?: cameraPetPosition ?: PointF(mascot.x, mascot.y)
         stopPetMotion()
         fun place(x: Float, y: Float) {
             placeMascot(x, y)
@@ -664,6 +788,8 @@ class SearchView(context: Context) : FrameLayout(context) {
             override fun onAnimationEnd(animation: Animator) {
                 if (petFlight === animation) petFlight = null
                 if (!cancelled) {
+                    val destination = target()
+                    place(destination.x, destination.y)
                     mascot.rotation = 0f
                     updateCameraShutter()
                     finished()
@@ -780,6 +906,15 @@ class SearchView(context: Context) : FrameLayout(context) {
         requestLayout()
     }
 
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        updateProcessingVisibility()
+        if (visibility != VISIBLE) {
+            closePhotoMenuImmediately()
+            updateControlsPresentation(covered = cameraView != null)
+        }
+    }
+
     private fun animateEntranceIfNeeded() {
         if (hasAnimated || !isAttachedToWindow || width == 0 || height == 0) return
         hasAnimated = true
@@ -812,6 +947,15 @@ class SearchView(context: Context) : FrameLayout(context) {
     }
 
     override fun onDetachedFromWindow() {
+        closePhotoMenuImmediately()
+        pendingChatFlight = null
+        shortcuts.animate().cancel()
+        shortcuts.alpha = 1f
+        shortcuts.translationY = 0f
+        shortcuts.visibility = if (chatMode) GONE else if (cameraView != null) INVISIBLE else VISIBLE
+        TransitionManager.endTransitions(composer)
+        photoButton.alpha = 1f
+        photoButton.visibility = if (chatMode) GONE else VISIBLE
         sheet.animate().cancel()
         sheet.alpha = 1f
         sheet.translationY = 0f
@@ -821,12 +965,13 @@ class SearchView(context: Context) : FrameLayout(context) {
         selectionView.scaleY = 1f
         pauseCamera()
         stopPetMotion()
+        if (chatMode && cameraView == null) mascotPosition = chatPetTarget()
         super.onDetachedFromWindow()
     }
 }
 
 /** 路径沿用桌面版 chat-ui.js 的 search、type、translate、send。 */
-private class ActionIcon(context: Context, var kind: String) : View(context) {
+internal class ActionIcon(context: Context, var kind: String) : View(context) {
     var lineWidth = 2.25f
     var inkColor = Palette.accent
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -852,7 +997,6 @@ private class ActionIcon(context: Context, var kind: String) : View(context) {
         path.reset()
         when (kind) {
             "send" -> { path.moveTo(12f, 19f); path.lineTo(12f, 5f); path.moveTo(6f, 11f); path.lineTo(12f, 5f); path.lineTo(18f, 11f) }
-            "plus" -> { path.moveTo(12f, 5f); path.lineTo(12f, 19f); path.moveTo(5f, 12f); path.lineTo(19f, 12f) }
             "stop" -> { paint.style = Paint.Style.FILL; canvas.drawRoundRect(6f, 6f, 18f, 18f, 2f, 2f, paint) }
             "search" -> { canvas.drawCircle(10.5f, 10.5f, 6.5f, paint); path.moveTo(15.5f, 15.5f); path.lineTo(20.5f, 20.5f) }
             "camera" -> {
@@ -861,6 +1005,12 @@ private class ActionIcon(context: Context, var kind: String) : View(context) {
                 path.quadTo(22f, 21f, 20f, 21f); path.lineTo(4f, 21f)
                 path.quadTo(2f, 21f, 2f, 19f); path.lineTo(2f, 8f); path.quadTo(2f, 6f, 4f, 6f); path.close()
                 canvas.drawCircle(12f, 13f, 3.5f, paint)
+            }
+            "photo" -> {
+                path.addRoundRect(3f, 3f, 21f, 21f, 3f, 3f, Path.Direction.CW)
+                canvas.drawCircle(8f, 8f, 1.5f, paint)
+                path.moveTo(3f, 16f); path.lineTo(9f, 11f); path.lineTo(14f, 16f)
+                path.moveTo(12f, 14f); path.lineTo(16f, 10f); path.lineTo(21f, 15f)
             }
             "history" -> {
                 path.addArc(3f, 3f, 21f, 21f, 180f, -315f)

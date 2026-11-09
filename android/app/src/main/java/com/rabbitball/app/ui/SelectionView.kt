@@ -128,7 +128,7 @@ class SelectionView @JvmOverloads constructor(context: Context, attrs: Attribute
         paint.color = Color.WHITE
         paint.clearShadowLayer()
         clipping.reset()
-        clipping.addRoundRect(imageBounds, dp(12f), dp(12f), Path.Direction.CW)
+        clipping.addRoundRect(imageBounds, dp(Palette.cornerSurface), dp(Palette.cornerSurface), Path.Direction.CW)
         canvas.save()
         canvas.clipPath(clipping)
         canvas.drawBitmap(image, null, imageBounds, paint)
@@ -201,7 +201,7 @@ class SelectionView @JvmOverloads constructor(context: Context, attrs: Attribute
         canvas.drawPath(path, paint)
     }
 
-    private fun radius(region: RectF) = min(dp(16f), min(region.width(), region.height()) / 3f)
+    private fun radius(region: RectF) = min(dp(Palette.cornerControl), min(region.width(), region.height()) / 3f)
 
     private fun toViewBounds(chosen: RectF) = RectF(
         imageBounds.left + chosen.left * imageBounds.width(),

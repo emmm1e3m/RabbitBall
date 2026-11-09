@@ -63,7 +63,8 @@ class AiClient {
         previousTurns: List<ChatTurn>,
         onDelta: (String) -> Unit,
         onDone: (String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onSearchCount: (Int) -> Unit = {}
     ) {
         cancel()
         val request = Request()
@@ -101,6 +102,7 @@ class AiClient {
                 // 已完成会话的首轮保留图片前缀，追问不重复编码、追加同一张图。
                 messages.put(inputMessage(text, action, if (previous == null) visual else null, region, prompts))
                 val sources = linkedMapOf<String, String>()
+                var searchCount = 0
                 val canSearch = action != "extract" && action != "translate"
                 var answer = ""
                 var separate = false
@@ -152,6 +154,8 @@ class AiClient {
                             ?: throw UserError("模型生成的搜索参数格式有误，请重试。")
                         val query = (args.opt("query") as? String)?.trim().orEmpty()
                         if (query.isBlank() || query.codePointCount(0, query.length) > 128) throw UserError("搜索词应为1至128个字符，请缩短问题后重试。")
+                        val requestedSearches = ++searchCount
+                        deliver { onSearchCount(requestedSearches) }
                         val result = search(query, config, request, sources)
                         active(request)
                         messages.put(JSONObject().put("role", "tool").put("tool_call_id", call.getString("id")).put("content", result))
