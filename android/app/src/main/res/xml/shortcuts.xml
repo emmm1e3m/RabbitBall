@@ -1,8 +1,8 @@
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
-    <shortcut android:shortcutId="capture" android:enabled="true" android:icon="@drawable/ic_rabbit" android:shortcutShortLabel="@string/shortcut_search">
+    <shortcut android:shortcutId="capture" android:enabled="true" android:icon="@drawable/ic_shortcut_search" android:shortcutShortLabel="@string/shortcut_search">
         <intent android:action="com.rabbitball.app.CAPTURE" android:targetPackage="com.rabbitball.app" android:targetClass="com.rabbitball.app.CaptureActivity" />
     </shortcut>
-    <shortcut android:shortcutId="settings" android:enabled="true" android:icon="@drawable/ic_rabbit" android:shortcutShortLabel="@string/shortcut_settings">
+    <shortcut android:shortcutId="settings" android:enabled="true" android:icon="@drawable/ic_shortcut_settings" android:shortcutShortLabel="@string/shortcut_settings">
         <intent android:action="com.rabbitball.app.SETTINGS" android:targetPackage="com.rabbitball.app" android:targetClass="com.rabbitball.app.MainActivity" />
     </shortcut>
 </shortcuts>

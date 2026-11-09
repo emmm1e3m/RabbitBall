@@ -13,8 +13,11 @@ data class SavedChat(val id: String, val title: String, val updatedAt: Long, val
 class ChatHistory(context: Context) {
     // 历史只保存文字；完整截图及标记图始终留在本次会话内存中。
     private val file = AtomicFile(File(context.filesDir, "chat_history.json"))
+    private val settings = AppSettings(context)
 
-    @Synchronized fun list(): List<SavedChat> = runCatching {
+    @Synchronized fun list(): List<SavedChat> = readEntries().take(settings.historyLimit)
+
+    private fun readEntries(): List<SavedChat> = runCatching {
         if (!file.baseFile.exists()) return emptyList()
         val array = file.openRead().bufferedReader(Charsets.UTF_8).use { JSONArray(it.readText()) }
         (0 until array.length()).map { index ->
@@ -25,12 +28,23 @@ class ChatHistory(context: Context) {
                     val turn = turns.getJSONObject(turnIndex)
                     ChatTurn(turn.getString("role"), turn.getString("content"))
                 })
-        }.sortedByDescending { it.updatedAt }.take(10)
+        }.sortedByDescending { it.updatedAt }
     }.getOrDefault(emptyList())
 
     @Synchronized fun save(id: String?, title: String, turns: List<ChatTurn>): SavedChat {
         val chat = SavedChat(id ?: UUID.randomUUID().toString(), title.take(80), System.currentTimeMillis(), turns.toList())
-        val entries = (listOf(chat) + list().filter { it.id != chat.id }).take(10)
+        val entries = (listOf(chat) + list().filter { it.id != chat.id }).take(settings.historyLimit)
+        persist(entries)
+        return chat
+    }
+
+    /** 保存设置后立即裁减文件，之后调大上限也不会重新出现已删除的记录。 */
+    @Synchronized fun trim() {
+        val entries = readEntries()
+        if (entries.size > settings.historyLimit) persist(entries.take(settings.historyLimit))
+    }
+
+    private fun persist(entries: List<SavedChat>) {
         val array = JSONArray()
         entries.forEach { entry ->
             val messages = JSONArray()
@@ -46,6 +60,5 @@ class ChatHistory(context: Context) {
             file.failWrite(stream)
             throw error
         }
-        return chat
     }
 }

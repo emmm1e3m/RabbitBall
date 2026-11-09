@@ -51,11 +51,10 @@ private class RabbitSession(context: Context) : VoiceInteractionSession(context)
     private fun launch(image: Bitmap?, message: String?) {
         if (launched || cancelled) return
         launched = true
-        CaptureStore.bitmap = image
-        CaptureStore.error = message
+        CaptureStore.store(CaptureResult(image, message))
         // Bitmap 不经 Intent 序列化，避免整屏图像触及 Binder 大小限制。
         startAssistantActivity(Intent(context, MainActivity::class.java)
-            .setAction("com.rabbitball.app.CAPTURED")
+            .setAction(MainActivity.ACTION_CAPTURED)
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
     }
 

@@ -28,6 +28,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import com.rabbitball.app.ChatTurn
+import com.rabbitball.app.AppSettings
 import kotlin.math.max
 import kotlin.math.min
 
@@ -44,8 +45,9 @@ class SearchView(context: Context) : FrameLayout(context) {
     val selection: RectF? get() = selectionView.selection?.let { RectF(it) }
 
     private fun dp(value: Float) = Palette.dp(context, value)
-    private val mascotWidth = dp(96f)
-    private val mascotHeight = dp(108f)
+    private val petDock = PetDock(context)
+    private var mascotWidth = petDock.viewWidth
+    private var mascotHeight = petDock.viewHeight
     private val mascotGap = dp(12f)
     private val blur = BlurBackgroundView(context)
     private val sheet = LinearLayout(context)
@@ -217,10 +219,7 @@ class SearchView(context: Context) : FrameLayout(context) {
         input.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND) { dispatch("ask"); true } else false
         }
-        input.setOnFocusChangeListener { _, focused ->
-            if (focused && !mascotDragging) flyToInputSide()
-            updatePetGaze()
-        }
+        input.setOnFocusChangeListener { _, _ -> updatePetGaze() }
         composer.addView(input, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         send.contentDescription = "发送问题"
         send.background = Palette.ripple(context, Palette.blush, 20f)
@@ -265,7 +264,7 @@ class SearchView(context: Context) : FrameLayout(context) {
 
     fun openCamera() {
         if (cameraView != null) return
-        val camera = CameraView(context)
+        val camera = CameraView(context).apply { applyPetSize(mascotWidth, mascotHeight) }
         camera.isClickable = true
         camera.elevation = dp(16f).toFloat()
         cameraReturnPosition = PointF(mascot.x, mascot.y)
@@ -346,7 +345,7 @@ class SearchView(context: Context) : FrameLayout(context) {
         applySystemBarContrast()
     }
 
-    private fun dismissCamera(animated: Boolean): Boolean {
+    private fun dismissCamera(animated: Boolean, revealed: () -> Unit = {}): Boolean {
         val camera = cameraView ?: return false
         if (cameraClosing && animated) return true
         cameraClosing = true
@@ -374,6 +373,7 @@ class SearchView(context: Context) : FrameLayout(context) {
         }
         val reveal: () -> Unit = {
             coverVisualContext(false)
+            revealed()
             if (animated && isAttachedToWindow && ValueAnimator.areAnimatorsEnabled()) {
                 camera.animate().alpha(0f).scaleX(.985f).scaleY(.985f).setDuration(240)
                     .setInterpolator(DecelerateInterpolator(1.6f)).withEndAction(finish).start()
@@ -414,45 +414,10 @@ class SearchView(context: Context) : FrameLayout(context) {
     }
 
     private fun flyCameraPet(returning: Boolean, animated: Boolean, finished: () -> Unit = {}) {
-        petFlight?.cancel()
-        petFlight = null
-        val start = cameraPetPosition ?: PointF(mascot.x, mascot.y)
-        if (!animated || !ValueAnimator.areAnimatorsEnabled()) {
-            val target = cameraPetTarget(returning)
-            placeMascot(target.x, target.y)
-            cameraPetPosition = PointF(mascot.left.toFloat(), mascot.top.toFloat())
+        animatePetTo({ cameraPetTarget(returning) }, dp(24f).toFloat(), animated) {
             if (returning) mascotPosition = cameraPetPosition?.let { PointF(it.x, it.y) }
-            updateCameraShutter()
             finished()
-            return
         }
-        val flight = ValueAnimator.ofFloat(0f, 1f)
-        petFlight = flight
-        flight.duration = 600L
-        flight.interpolator = AccelerateDecelerateInterpolator()
-        flight.addUpdateListener {
-            val progress = it.animatedValue as Float
-            val target = cameraPetTarget(returning)
-            val arc = kotlin.math.sin(progress * Math.PI).toFloat() * dp(24f)
-            placeMascot(start.x + (target.x - start.x) * progress, start.y + (target.y - start.y) * progress - arc)
-            cameraPetPosition = PointF(mascot.left.toFloat(), mascot.top.toFloat())
-            mascot.rotation = kotlin.math.sin(progress * Math.PI).toFloat() * if (target.x > start.x) 6f else -6f
-        }
-        flight.addListener(object : AnimatorListenerAdapter() {
-            private var cancelled = false
-            override fun onAnimationCancel(animation: Animator) { cancelled = true }
-            override fun onAnimationEnd(animation: Animator) {
-                if (petFlight === animation) petFlight = null
-                if (!cancelled) {
-                    mascot.rotation = 0f
-                    if (returning) mascotPosition = cameraPetPosition?.let { PointF(it.x, it.y) }
-                    updateCameraShutter()
-                    finished()
-                }
-            }
-        })
-        flight.start()
-        updateCameraShutter()
     }
 
     private fun updateCameraShutter() {
@@ -461,6 +426,25 @@ class SearchView(context: Context) : FrameLayout(context) {
         val ready = !cameraClosing && !cameraPhotoPending && !flying && camera.isReady
         mascot.isEnabled = ready
         mascot.alpha = if (cameraClosing || cameraPhotoPending || flying || ready) 1f else .6f
+    }
+
+    /** 保存外观后更新现有角色，保留选区、草稿、消息和滚动位置。 */
+    fun refreshAppearance() {
+        val centerX = mascot.x + mascotWidth * .5f
+        val centerY = mascot.y + mascotHeight * .6f
+        stopPetMotion()
+        petDock.refreshAppearance()
+        mascotWidth = petDock.viewWidth
+        mascotHeight = petDock.viewHeight
+        mascot.layoutParams = mascot.layoutParams.apply { width = mascotWidth; height = mascotHeight }
+        mascot.applyAppearance(AppSettings(context).loadAppearance())
+        if (cameraView != null) {
+            cameraView?.applyPetSize(mascotWidth, mascotHeight)
+            cameraEntryPending = !cameraClosing
+        } else if (hasAnimated) {
+            mascotPosition = PointF(centerX - mascotWidth * .5f, centerY - mascotHeight * .6f)
+        }
+        requestLayout()
     }
 
     fun setScreenshot(bitmap: Bitmap?) = displayImage(bitmap, false)
@@ -485,22 +469,19 @@ class SearchView(context: Context) : FrameLayout(context) {
         updateSystemBarContrast(bitmap)
         recapture.visibility = if (hasScreenshot) GONE else VISIBLE
         setStatus("")
-        if (fromCamera) dismissCamera(true)
-        if (photo) {
-            if (ValueAnimator.areAnimatorsEnabled()) {
+        val revealImage: () -> Unit = {
+            if (bitmap != null && ValueAnimator.areAnimatorsEnabled()) {
                 selectionView.alpha = 0f
-                selectionView.scaleX = .96f
-                selectionView.scaleY = .96f
-                selectionView.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(380)
-                    .setInterpolator(OvershootInterpolator(.45f)).start()
+                val scale = if (photo) .96f else 1.025f
+                selectionView.scaleX = scale
+                selectionView.scaleY = scale
+                selectionView.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                    .setDuration(if (photo) 380L else 400L)
+                    .setInterpolator(if (photo) OvershootInterpolator(.45f) else DecelerateInterpolator(1.6f)).start()
             }
-        } else if (bitmap != null && ValueAnimator.areAnimatorsEnabled()) {
-            selectionView.alpha = 0f
-            selectionView.scaleX = 1.025f
-            selectionView.scaleY = 1.025f
-            selectionView.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(400)
-                .setInterpolator(DecelerateInterpolator(1.6f)).start()
         }
+        // 照片到达的动效与取景器退出衔接，避免在兔球返程时被完全遮住。
+        if (fromCamera) dismissCamera(true, revealImage) else revealImage()
         requestLayout()
     }
 
@@ -576,6 +557,12 @@ class SearchView(context: Context) : FrameLayout(context) {
         status.visibility = if (message.isBlank()) GONE else if (cameraView != null && !cameraClosing) INVISIBLE else VISIBLE
     }
 
+    fun petScreenPosition(): PointF? {
+        if (!mascot.isShown || mascot.width == 0 || mascot.height == 0) return null
+        mascot.getLocationOnScreen(mascotLocation)
+        return PointF(mascotLocation[0].toFloat(), mascotLocation[1].toFloat())
+    }
+
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
         val statusHeight = if (status.visibility != GONE) status.measuredHeight else 0
@@ -609,6 +596,7 @@ class SearchView(context: Context) : FrameLayout(context) {
             placeMascot(position.x, position.y)
         }
         updatePetGaze()
+        animateEntranceIfNeeded()
     }
 
     private fun normalPetMinimumY() =
@@ -626,40 +614,64 @@ class SearchView(context: Context) : FrameLayout(context) {
         mascot.layout(boundedX, boundedY, boundedX + mascotWidth, boundedY + mascotHeight)
     }
 
-    private fun flyToInputSide() {
-        if (width == 0 || mascotDragging) return
+    private fun stopPetMotion() {
         petFlight?.cancel()
-        val startX = mascot.x
-        val startY = mascot.y
-        mascot.animate().cancel()
+        petFlight = null
+        mascot.animate().setUpdateListener(null).cancel()
         mascot.translationX = 0f
         mascot.translationY = 0f
         mascot.rotation = 0f
-        placeMascot(startX, startY)
-        val destinationX = if (startX + mascot.width / 2f >= width / 2f) 0f else (width - mascot.width).toFloat()
-        fun targetY() = (shortcuts.top - mascotHeight - mascotGap).coerceAtLeast(topInset).toFloat()
-        if (!ValueAnimator.areAnimatorsEnabled()) {
-            placeMascot(destinationX, targetY())
-            mascotPosition = PointF(mascot.left.toFloat(), mascot.top.toFloat())
+        mascot.setDockPose(petDock.left, 0f)
+    }
+
+    /** 相机往返共用飞行与取消契约，目标随布局变化。 */
+    private fun animatePetTo(
+        target: () -> PointF,
+        arcHeight: Float,
+        animated: Boolean = true,
+        finished: () -> Unit = {}
+    ) {
+        val start = cameraPetPosition ?: PointF(mascot.x, mascot.y)
+        stopPetMotion()
+        fun place(x: Float, y: Float) {
+            placeMascot(x, y)
+            val position = PointF(mascot.left.toFloat(), mascot.top.toFloat())
+            if (cameraView != null) cameraPetPosition = position else mascotPosition = position
             updatePetGaze()
+        }
+        if (!animated || !ValueAnimator.areAnimatorsEnabled()) {
+            val destination = target()
+            place(destination.x, destination.y)
+            updateCameraShutter()
+            finished()
             return
         }
-        var destinationY = targetY()
-        petFlight = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 600L
-            interpolator = AccelerateDecelerateInterpolator()
-            addUpdateListener {
-                val progress = it.animatedValue as Float
-                // 目标随键盘位置平滑靠近，飞行本身沿轻弧线完成一次横移。
-                destinationY += (targetY() - destinationY) * .22f
-                val arc = kotlin.math.sin(progress * Math.PI).toFloat() * dp(if (chatMode) 6f else 34f)
-                placeMascot(startX + (destinationX - startX) * progress, startY + (destinationY - startY) * progress - arc)
-                mascotPosition = PointF(mascot.left.toFloat(), mascot.top.toFloat())
-                mascot.rotation = kotlin.math.sin(progress * Math.PI).toFloat() * if (destinationX > startX) 6f else -6f
-                updatePetGaze()
-            }
-            start()
+        val flight = ValueAnimator.ofFloat(0f, 1f)
+        petFlight = flight
+        flight.duration = 600L
+        flight.interpolator = AccelerateDecelerateInterpolator()
+        flight.addUpdateListener {
+            val progress = it.animatedValue as Float
+            val destination = target()
+            val bend = kotlin.math.sin(progress * Math.PI).toFloat()
+            place(start.x + (destination.x - start.x) * progress,
+                start.y + (destination.y - start.y) * progress - bend * arcHeight)
+            mascot.rotation = bend * if (destination.x > start.x) 6f else -6f
         }
+        flight.addListener(object : AnimatorListenerAdapter() {
+            private var cancelled = false
+            override fun onAnimationCancel(animation: Animator) { cancelled = true }
+            override fun onAnimationEnd(animation: Animator) {
+                if (petFlight === animation) petFlight = null
+                if (!cancelled) {
+                    mascot.rotation = 0f
+                    updateCameraShutter()
+                    finished()
+                }
+            }
+        })
+        flight.start()
+        updateCameraShutter()
     }
 
     private fun updatePetGaze() {
@@ -696,12 +708,7 @@ class SearchView(context: Context) : FrameLayout(context) {
                     downX = event.rawX
                     downY = event.rawY
                     mascotDragging = false
-                    petFlight?.cancel()
-                    petFlight = null
-                    mascot.animate().cancel()
-                    mascot.translationX = 0f
-                    mascot.translationY = 0f
-                    mascot.rotation = 0f
+                    stopPetMotion()
                     placeMascot(startX, startY)
                     updatePetGaze()
                     false
@@ -770,28 +777,50 @@ class SearchView(context: Context) : FrameLayout(context) {
         requestApplyInsets()
         applySystemBarContrast()
         resumeCamera()
-        if (!hasAnimated) {
-            hasAnimated = true
-            if (ValueAnimator.areAnimatorsEnabled()) {
-                sheet.translationY = dp(24f).toFloat()
-                sheet.alpha = 0f
-                sheet.animate().translationY(0f).alpha(1f).setDuration(380).setInterpolator(OvershootInterpolator(.35f)).start()
-                mascot.translationX = dp(100f).toFloat()
-                mascot.translationY = dp(-18f).toFloat()
-                mascot.rotation = -18f
-                mascot.animate().translationX(0f).translationY(0f).rotation(0f)
-                    .setStartDelay(30).setDuration(433).setInterpolator(OvershootInterpolator(.7f))
-                    .setUpdateListener { updatePetGaze() }.start()
-            }
+        requestLayout()
+    }
+
+    private fun animateEntranceIfNeeded() {
+        if (hasAnimated || !isAttachedToWindow || width == 0 || height == 0) return
+        hasAnimated = true
+        if (cameraView != null) return
+        val docked = petDock.enabled
+        val left = petDock.left
+        if (!ValueAnimator.areAnimatorsEnabled()) {
+            mascot.setDockPose(left, 0f)
+            return
         }
+        sheet.translationY = dp(24f).toFloat()
+        sheet.alpha = 0f
+        sheet.animate().translationY(0f).alpha(1f).setDuration(380).setInterpolator(OvershootInterpolator(.35f)).start()
+        // 首次布局后再求真实停靠点；设置暂离和更换照片不重播入场。
+        val origin = if (docked) petDock.position(width, height, topInset, navigationInset)
+            else PointF(width.toFloat(), mascot.top - dp(18f).toFloat())
+        mascot.translationX = origin.x - mascot.left
+        mascot.translationY = origin.y - mascot.top
+        mascot.rotation = if (origin.x < mascot.left) 18f else -18f
+        mascot.setDockPose(left, if (docked) 1f else 0f, snap = true)
+        mascot.animate().translationX(0f).translationY(0f).rotation(0f)
+            .setStartDelay(30).setDuration(433).setInterpolator(OvershootInterpolator(.7f))
+            .setUpdateListener {
+                if (docked) mascot.setDockPose(left, 1f - it.animatedFraction)
+                updatePetGaze()
+            }.withEndAction {
+                mascot.setDockPose(left, 0f)
+                mascot.animate().setUpdateListener(null)
+            }.start()
     }
 
     override fun onDetachedFromWindow() {
         sheet.animate().cancel()
-        mascot.animate().setUpdateListener(null).cancel()
+        sheet.alpha = 1f
+        sheet.translationY = 0f
+        selectionView.animate().cancel()
+        selectionView.alpha = 1f
+        selectionView.scaleX = 1f
+        selectionView.scaleY = 1f
         pauseCamera()
-        petFlight?.cancel()
-        petFlight = null
+        stopPetMotion()
         super.onDetachedFromWindow()
     }
 }

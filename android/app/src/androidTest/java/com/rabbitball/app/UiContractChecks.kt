@@ -1,10 +1,14 @@
 package com.rabbitball.app
 
 import android.app.Instrumentation
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Insets
+import android.graphics.PointF
 import android.graphics.Rect
 import android.graphics.RectF
 import android.hardware.camera2.CameraCharacteristics
@@ -17,12 +21,15 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.EditText
+import android.widget.TextView
 import com.rabbitball.app.ui.CameraView
 import com.rabbitball.app.ui.CameraOrientation
 import com.rabbitball.app.ui.ConversationWebView
 import com.rabbitball.app.ui.RabbitView
+import com.rabbitball.app.ui.PetDock
 import com.rabbitball.app.ui.SearchView
 import com.rabbitball.app.ui.SelectionView
+import com.rabbitball.app.ui.SettingsView
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -34,12 +41,143 @@ import kotlin.math.roundToInt
 /** 在未挂载的真实视图上验证交互，不启动页面或向系统发送输入。 */
 object UiContractChecks {
     fun run(instrumentation: Instrumentation) {
+        captureResultOwnership(instrumentation)
+        dockRemembersViewPosition(instrumentation)
+        settingsPagesKeepDrafts(instrumentation)
+        inputFocusPreservesPetSide(instrumentation)
         draftsSurviveUnsuccessfulSubmission(instrumentation)
         conversationDomAndMarkdown(instrumentation)
         keyboardPreservesScreenshotViewport(instrumentation)
         selectionMaskAndGestures(instrumentation)
         cameraOrientationAndPixels()
         imageImportMemoryFixtures(instrumentation)
+    }
+
+    private fun settingsPagesKeepDrafts(instrumentation: Instrumentation) = onMain(instrumentation) {
+        val context = instrumentation.targetContext
+        val original = context.getSharedPreferences("rabbit_settings", Context.MODE_PRIVATE).all.toMap()
+        val initial = AppConfig(model = ModelConfig(prompts = mapOf(PromptKey.SYSTEM to "初始系统草稿")))
+        val view = SettingsView(context, initial, false)
+        val labels = listOf("模型", "外观", "常规", "提示词")
+        val tabs = labels.map { title -> descendants(view).filterIsInstance<TextView>().single { it.isClickable && it.text.toString() == title } }
+        check(tabs.map { (it.parent as ViewGroup).indexOfChild(it) } == listOf(0, 1, 2, 3)) { "设置四页缺失或顺序与 PC 不一致" }
+        val editor = descendants(view).filterIsInstance<EditText>().single { it.contentDescription == "提示词内容" }
+        val purpose = descendants(view).single { it.contentDescription?.toString()?.startsWith("用途：") == true }
+        fun selectPurpose(index: Int) {
+            // 未挂载窗口无法打开 PopupWindow，直接驱动同一选择器的选择动作。
+            purpose.javaClass.getDeclaredMethod("setSelection", Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(purpose, index)
+        }
+        fun click(title: String) = descendants(view).filterIsInstance<TextView>().single { it.isClickable && it.text.toString() == title }.performClick()
+        var saved: AppConfig? = null
+        view.onSave = { config, first -> check(!first); saved = config }
+        check(tabs[3].performClick() && (editor.parent as View).visibility == View.VISIBLE)
+        check(editor.text.toString() == "初始系统草稿")
+        editor.setText("修改系统草稿")
+        selectPurpose(1)
+        check(editor.text.toString() == PromptCatalog.defaults.getValue(PromptKey.FALLBACK))
+        editor.setText("附件草稿")
+        selectPurpose(0)
+        check(editor.text.toString() == "修改系统草稿") { "切换提示词用途后丢失草稿" }
+        check(tabs[1].performClick() && tabs[2].performClick() && tabs[3].performClick())
+        check(editor.text.toString() == "修改系统草稿") { "切换设置页面后丢失提示词草稿" }
+        check(click("保存"))
+        check(saved?.model?.prompts == mapOf(PromptKey.SYSTEM to "修改系统草稿", PromptKey.FALLBACK to "附件草稿"))
+        check(click("恢复这项默认") && editor.text.toString() == PromptCatalog.defaults.getValue(PromptKey.SYSTEM))
+        check(click("保存") && saved?.model?.prompts == mapOf(PromptKey.FALLBACK to "附件草稿")) { "恢复当前项修改了其它提示词" }
+        check(click("全部恢复默认") && click("保存") && saved?.model?.prompts?.isEmpty() == true)
+        check(context.getSharedPreferences("rabbit_settings", Context.MODE_PRIVATE).all == original) {
+            "设置草稿或预览在保存回调之外写入了持久配置"
+        }
+    }
+
+    private fun inputFocusPreservesPetSide(instrumentation: Instrumentation) {
+        lateinit var view: SearchView
+        lateinit var mascot: RabbitView
+        var before = 0f
+        onMain(instrumentation) {
+            view = SearchView(instrumentation.targetContext)
+            layout(view, 400, 600)
+            mascot = descendants(view).filterIsInstance<RabbitView>().single()
+            before = mascot.x
+            val input = descendants(view).filterIsInstance<EditText>().single { it.contentDescription == "输入问题" }
+            input.requestFocus()
+        }
+        try {
+            // 超过原横飞时长，确认输入焦点只改变视线，不触发另一侧移动。
+            Thread.sleep(700)
+            onMain(instrumentation) { check(abs(mascot.x - before) < 1f) { "开始输入仍触发兔球横飞" } }
+        } finally { onMain(instrumentation) { view.release() } }
+    }
+
+    private fun captureResultOwnership(instrumentation: Instrumentation) = onMain(instrumentation) {
+        val original = CaptureStore.take()
+        val first = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        val second = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        val third = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        try {
+            CaptureStore.store(CaptureResult(first))
+            val pending = CaptureResult(second)
+            CaptureStore.store(pending)
+            check(first.isRecycled && !second.isRecycled) { "覆盖未消费截图没有释放旧图，或提前释放了新图" }
+            check(CaptureStore.take() === pending && CaptureStore.take() == null) { "截图结果没有一次消费" }
+            CaptureStore.clear()
+            check(!second.isRecycled) { "清理缓存回收了已交付消费者的截图" }
+            CaptureStore.store(CaptureResult(null, "测试错误"))
+            check(!second.isRecycled && CaptureStore.take()?.error == "测试错误" && CaptureStore.take() == null)
+            CaptureStore.store(CaptureResult(third))
+            CaptureStore.clear()
+            check(third.isRecycled && CaptureStore.take() == null) { "清理没有回收仍未消费的截图" }
+        } finally {
+            CaptureStore.clear()
+            listOf(first, second, third).forEach { if (!it.isRecycled) it.recycle() }
+            if (original != null) CaptureStore.store(original)
+        }
+    }
+
+    private fun dockRemembersViewPosition(instrumentation: Instrumentation) = onMain(instrumentation) {
+        val preferences = instrumentation.targetContext.getSharedPreferences("pet_dock_fixture", Context.MODE_PRIVATE)
+        preferences.edit().clear().commit()
+        val context = object : ContextWrapper(instrumentation.targetContext) {
+            override fun getSharedPreferences(name: String, mode: Int): SharedPreferences = preferences
+        }
+        try {
+            val dock = PetDock(context)
+            val density = context.resources.displayMetrics.density
+            val width = (400 * density).roundToInt()
+            val height = (800 * density).roundToInt()
+            val top = (24 * density).roundToInt()
+            val bottom = (32 * density).roundToInt()
+            val wanted = PointF(0f, 200f * density)
+            dock.remember(wanted, width, height, top, bottom)
+            val saved = PetDock(context)
+            val left = saved.position(width, height, top, bottom)
+            check(saved.left && abs(left.y - wanted.y) < 1f) { "停靠高度未按视图左上角记忆" }
+            check(left.x < 0f && left.x + dock.viewWidth > 0f && left.x + dock.viewWidth < dock.viewWidth * .4f) {
+                "左停靠没有留下可见薄球帽"
+            }
+            val taller = saved.position(width, height * 3 / 2, top, bottom)
+            check(taller.y > left.y)
+            saved.remember(taller, width, height * 3 / 2, top, bottom)
+            check(abs(PetDock(context).position(width, height, top, bottom).y - left.y) < 1f) { "窗口高度变化后丢失了相对停靠高度" }
+
+            val rightWanted = PointF((width - dock.viewWidth).toFloat(), height * .6f)
+            saved.remember(rightWanted, width, height, top, bottom)
+            val restored = PetDock(context)
+            val right = restored.position(width, height, top, bottom)
+            check(!restored.left && abs(right.y - rightWanted.y) < 1f)
+            check(right.x < width && right.x + dock.viewWidth > width && width - right.x < dock.viewWidth * .4f) {
+                "右停靠没有留下可见薄球帽"
+            }
+            restored.remember(PointF(0f, -height.toFloat()), width, height, top, bottom)
+            val safeTop = restored.position(width, height, top, bottom)
+            restored.remember(PointF(0f, height * 2f), width, height, top, bottom)
+            val safeBottom = restored.position(width, height, top, bottom)
+            check(safeTop.y < safeBottom.y)
+            check(abs(restored.constrain(PointF(0f, -height.toFloat()), width, height, top, bottom).y - safeTop.y) < 1f &&
+                abs(restored.constrain(PointF(0f, height * 2f), width, height, top, bottom).y - safeBottom.y) < 1f) {
+                "极端记忆位置与拖动安全高度约束不一致"
+            }
+        } finally { preferences.edit().clear().commit() }
     }
 
     private fun imageImportMemoryFixtures(instrumentation: Instrumentation) {

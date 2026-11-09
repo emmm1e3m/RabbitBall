@@ -26,6 +26,8 @@ class PetEffectsView(context: Context) : View(context) {
     private val hearts = Array(14) { Heart() }
     private var nextHeart = 0
     private var sourcePet: RabbitView? = null
+    private val petLocation = IntArray(2)
+    private val effectLocation = IntArray(2)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val shape = Path().apply {
         moveTo(0f, 6f)
@@ -33,8 +35,6 @@ class PetEffectsView(context: Context) : View(context) {
         cubicTo(10f, -22f, 19f, -7f, 0f, 6f)
         close()
     }
-    // PC CSS 的三色覆盖节点 fill：默认 body=#F58DAA、eye=#F90040。
-    private val colors = intArrayOf(0xFFDD6283.toInt(), 0xFFF8B1C5.toInt(), 0xFFF75782.toInt())
 
     init {
         isClickable = false
@@ -67,12 +67,15 @@ class PetEffectsView(context: Context) : View(context) {
             return
         }
         val pet = sourcePet ?: return
+        val colors = pet.heartColors
         val simulationTime = pet.animationTime
         val artworkScale = min(pet.width / 360f, pet.height / 400f)
+        pet.getLocationOnScreen(petLocation)
+        getLocationOnScreen(effectLocation)
         canvas.save()
         canvas.translate(
-            pet.x + (pet.width - artworkScale * 360f) / 2f + pet.artworkOffsetX,
-            pet.y + (pet.height - artworkScale * 400f) / 2f + pet.artworkOffsetY
+            petLocation[0] - effectLocation[0] + (pet.width - artworkScale * 360f) / 2f + pet.artworkOffsetX,
+            petLocation[1] - effectLocation[1] + (pet.height - artworkScale * 400f) / 2f + pet.artworkOffsetY
         )
         canvas.scale(artworkScale, artworkScale)
         var active = false

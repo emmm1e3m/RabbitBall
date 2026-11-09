@@ -31,8 +31,9 @@ class AiSmokeInstrumentation : Instrumentation() {
             deepSeekSearchAndConversation()
             errorsAndCancellation()
             encryptedSettingsAndTextHistory()
+            promptOverridesAndSession()
             UiContractChecks.run(this)
-            results.putString("stream", "5 组检查通过：完整截图与选框、PC同款DeepSeek搜索与多轮推理、错误与取消、加密设置与文字历史、草稿/聊天/安全链接/IME/选区/相机方向与切摄/选图/发送动效。\n")
+            results.putString("stream", "5 组检查通过：完整截图与选框、PC同款DeepSeek搜索与多轮推理、错误与取消、加密外观/提示词/历史设置、四页草稿/聊天/安全链接/IME/选区/相机方向与切摄/选图/发送动效。\n")
             finish(Activity.RESULT_OK, results)
         } catch (error: Throwable) {
             results.putString("stream", "检查失败：${error.stackTraceToString()}\n")
@@ -82,10 +83,16 @@ class AiSmokeInstrumentation : Instrumentation() {
             Reply(answer("查到了")), Reply(answer("继续回答")))
         MockServer(replies).use { server ->
             val client = AiClient()
-            val first = runRequest(server, action = "search", client = client)
+            val bitmap = Bitmap.createBitmap(12, 8, Bitmap.Config.ARGB_8888)
+            val visual = VisualContext(bitmap, VisualSource.CAMERA)
+            val first = runRequest(server, action = "search", client = client, visual = visual)
             check(first.error == null && first.text!!.contains("查到了") && first.text.contains("https://example.com/one")
                 && first.text.contains("https://example.com/two")) { first.error.orEmpty() }
             val initial = server.requests[0].body
+            check(userText(initial).contains("相机拍摄的照片") && !userText(initial).contains("屏幕截图")) {
+                "相机照片被描述成了屏幕截图"
+            }
+            check(imageCount(initial) == 1)
             check(initial.getJSONObject("thinking").getString("type") == "disabled" && !initial.has("reasoning_effort"))
             check(initial.getInt("max_tokens") == 8192)
             check(initial.getJSONObject("tool_choice").getJSONObject("function").getString("name") == "search_web")
@@ -100,13 +107,16 @@ class AiSmokeInstrumentation : Instrumentation() {
             val finalMessages = server.requests[4].body.getJSONArray("messages")
             check(finalMessages.getJSONObject(4).getString("reasoning_content") == "补充推理")
             check(finalMessages.getJSONObject(5).getString("tool_call_id") == "call-2")
-            val second = runRequest(server, previous = listOf(ChatTurn("user", "测试问题"), ChatTurn("assistant", first.text!!)), client = client)
+            val second = runRequest(server, previous = listOf(ChatTurn("user", "测试问题"), ChatTurn("assistant", first.text!!)),
+                client = client, visual = visual)
             check(second.error == null && second.text == "继续回答")
             val preserved = server.requests[5].body.getJSONArray("messages")
             check(preserved.length() == 8 && preserved.getJSONObject(2).getJSONArray("tool_calls").getJSONObject(0).getString("id") == "call-1") {
                 "后续提问丢失了工具消息前缀"
             }
+            check(imageCount(server.requests[5].body) == 1) { "同一会话后续提问重复追加了原图" }
             client.cancel()
+            bitmap.recycle()
         }
     }
 
@@ -121,14 +131,35 @@ class AiSmokeInstrumentation : Instrumentation() {
             val output = runRequest(server)
             check(output.error?.contains("HTTP 401") == true && output.error.contains("secret-key").not())
         }
+        val cancelledClient = AiClient()
+        val cancelledBitmap = Bitmap.createBitmap(12, 8, Bitmap.Config.ARGB_8888)
+        val cancelledVisual = VisualContext(cancelledBitmap, VisualSource.SCREEN)
         MockServer(listOf(Reply(answer("已取消的回复"))), stall = true).use { server ->
-            val client = AiClient()
             val callback = CountDownLatch(1)
-            client.request(ModelConfig(endpoint = server.endpoint, apiKey = "mock-key"), "问题", "ask", null, null,
+            cancelledClient.request(ModelConfig(endpoint = server.endpoint, apiKey = "mock-key"), "测试问题", "ask", cancelledVisual, null,
                 emptyList(), { callback.countDown() }, { callback.countDown() }, { callback.countDown() })
             check(server.received.await(5, TimeUnit.SECONDS))
-            client.cancel(); server.release.countDown()
+            check(imageCount(server.requests.first().body) == 1)
+            cancelledClient.cancel(); server.release.countDown()
             check(!callback.await(250, TimeUnit.MILLISECONDS)) { "取消后仍执行了回调" }
+        }
+        MockServer(listOf(Reply(answer("取消后重试")))).use { server ->
+            val retry = runRequest(server, client = cancelledClient, visual = cancelledVisual)
+            check(retry.error == null && imageCount(server.requests.first().body) == 1) { "首次取消后的重试丢失了原图" }
+        }
+        cancelledClient.cancel(); cancelledBitmap.recycle()
+
+        MockServer(listOf(Reply("failed", 401), Reply(answer("失败后重试")))).use { server ->
+            val client = AiClient()
+            val bitmap = Bitmap.createBitmap(12, 8, Bitmap.Config.ARGB_8888)
+            val visual = VisualContext(bitmap, VisualSource.PHOTO)
+            try {
+                check(runRequest(server, client = client, visual = visual).error != null)
+                check(userText(server.requests.first().body).contains("用户选择的图片") &&
+                    !userText(server.requests.first().body).contains("屏幕截图")) { "图库图片被描述成了屏幕截图" }
+                check(runRequest(server, client = client, visual = visual).error == null)
+                check(server.requests.all { imageCount(it.body) == 1 }) { "首次失败后的重试丢失了原图" }
+            } finally { client.cancel(); bitmap.recycle() }
         }
     }
 
@@ -138,10 +169,42 @@ class AiSmokeInstrumentation : Instrumentation() {
         val settings = AppSettings(targetContext)
         val original = settings.load()
         try {
-            val test = ModelConfig("https://example.com/v1", "deepseek-flash", "mock-secret", "high", 2)
+            val overrides = mapOf(PromptKey.SYSTEM to "测试用系统提示词", PromptKey.SEARCH to PromptCatalog.defaults.getValue(PromptKey.SEARCH))
+            val test = AppConfig(
+                ModelConfig("https://example.com/v1", "deepseek-flash", "mock-secret", "high", 2, overrides),
+                AppearanceConfig(.85f, 0xFF6699CC.toInt(), 0xFF224466.toInt()), 3)
             settings.save(test)
-            check(settings.load() == test)
+            check(settings.load() == test.copy(model = test.model.copy(prompts = mapOf(PromptKey.SYSTEM to "测试用系统提示词"))))
+            check(settings.loadAppearance() == test.appearance && settings.historyLimit == 3) { "外观或历史设置未持久化" }
             check(!targetContext.getSharedPreferences("rabbit_settings", 0).all.toString().contains("mock-secret")) { "Key 被明文保存" }
+            check(JSONObject(targetContext.getSharedPreferences("rabbit_settings", 0).getString("prompts_json", "{}")!!)
+                .keys().asSequence().toSet() == setOf(PromptKey.SYSTEM.wireKey)) { "默认提示词没有从覆盖集中移除" }
+            settings.save(test.copy(model = test.model.copy(prompts = PromptCatalog.defaults)))
+            check(settings.load().model.prompts.isEmpty()) { "全部恢复默认后仍保留提示词覆盖" }
+            check(PromptCatalog.normalize(mapOf(PromptKey.SYSTEM to "字".repeat(20_000))).size == 1)
+            val invalidPrompts = listOf(mapOf(PromptKey.SYSTEM to "  "), mapOf(PromptKey.SYSTEM to "字".repeat(20_001)),
+                PromptKey.entries.associateWith { "字".repeat(15_000) })
+            invalidPrompts.forEach { values ->
+                check(runCatching { AppSettings.validate(test.copy(model = test.model.copy(prompts = values))) }.isFailure) {
+                    "无效提示词或总长度没有被拒绝"
+                }
+            }
+            check(runCatching { AppSettings.validate(test.copy(appearance = test.appearance.copy(petSize = Float.NaN))) }.isFailure)
+            check(runCatching { AppSettings.validate(test.copy(historyLimit = 0)) }.isFailure)
+
+            val files = File(targetContext.cacheDir, "history-limit-${System.nanoTime()}").apply { mkdirs() }
+            try {
+                val history = ChatHistory(object : ContextWrapper(targetContext) { override fun getFilesDir(): File = files })
+                repeat(4) { index -> history.save("limit-$index", "第${index}条", listOf(ChatTurn("user", "问题$index"))) }
+                check(history.list().size == 3 && history.list().none { it.id == "limit-0" }) { "历史数量没有遵守设置" }
+                settings.save(test.copy(historyLimit = 1))
+                history.trim()
+                settings.save(test.copy(historyLimit = 3))
+                check(history.list().size == 1) { "缩小保留条数后旧历史只被隐藏，没有实际删除" }
+            } finally {
+                listOf("chat_history.json", "chat_history.json.bak", "chat_history.json.new").forEach { File(files, it).delete() }
+                files.delete()
+            }
         } finally { settings.save(original) }
         val testFiles = File(targetContext.cacheDir, "ai-history-test").apply { mkdirs() }
         val history = ChatHistory(object : ContextWrapper(targetContext) { override fun getFilesDir(): File = testFiles })
@@ -151,17 +214,96 @@ class AiSmokeInstrumentation : Instrumentation() {
         check(!json.contains("image") && !json.contains("bitmap") && !json.contains("base64"))
     }
 
+    private fun promptOverridesAndSession() {
+        val prompts = mapOf(
+            PromptKey.SYSTEM to "旧系统契约", PromptKey.SEARCH to "旧搜索契约", PromptKey.SEARCH_TOOL to "旧工具契约",
+            PromptKey.EXTRACT to "自定义提取契约", PromptKey.TRANSLATE to "自定义翻译契约", PromptKey.FALLBACK to "自定义附件契约")
+        val changed = prompts + mapOf(PromptKey.SYSTEM to "新系统契约", PromptKey.SEARCH to "新搜索契约", PromptKey.SEARCH_TOOL to "新工具契约")
+        val replies = listOf("第一答", "第二答", "新对话").flatMapIndexed { index, text -> listOf(
+            Reply(tool("prompt-$index", "提示词查询$index", "提示词规划")),
+            Reply("{\"results\":[]}", contentType = "application/json"), Reply(answer(text))) }
+        MockServer(replies).use { server ->
+            val client = AiClient()
+            try {
+                val first = runRequest(server, action = "search", client = client, text = "第一问", config = ModelConfig(prompts = prompts))
+                check(first.error == null && first.text == "第一答")
+                val second = runRequest(server, action = "search", client = client, text = "第二问", config = ModelConfig(prompts = changed),
+                    previous = listOf(ChatTurn("user", "第一问"), ChatTurn("assistant", "第一答")))
+                check(second.error == null)
+                for (request in listOf(server.requests[0], server.requests[3])) {
+                    check(request.body.getJSONArray("messages").getJSONObject(0).getString("content") == "旧系统契约")
+                    check(lastUserText(request.body).contains("旧搜索契约") && !lastUserText(request.body).contains("新搜索契约")) {
+                        "追问混入了新设置的动作提示词"
+                    }
+                    check(request.body.getJSONArray("tools").getJSONObject(0).getJSONObject("function").getString("description") == "旧工具契约")
+                }
+                client.resetConversation()
+                check(runRequest(server, action = "search", client = client, config = ModelConfig(prompts = changed)).error == null)
+                val fresh = server.requests.last().body
+                check(fresh.getJSONArray("messages").getJSONObject(0).getString("content") == "新系统契约" &&
+                    lastUserText(fresh).contains("新搜索契约") &&
+                    fresh.getJSONArray("tools").getJSONObject(0).getJSONObject("function").getString("description") == "新工具契约") {
+                    "新对话没有应用保存后的提示词"
+                }
+            } finally { client.cancel() }
+        }
+        MockServer(List(3) { Reply(answer("动作结果")) }).use { server ->
+            check(runRequest(server, action = "extract", config = ModelConfig(prompts = prompts)).error == null)
+            check(lastUserText(server.requests[0].body).contains("自定义提取契约") && !server.requests[0].body.has("tools"))
+            check(runRequest(server, action = "translate", config = ModelConfig(prompts = prompts)).error == null)
+            check(lastUserText(server.requests[1].body).contains("自定义翻译契约") && !server.requests[1].body.has("tools"))
+            val bitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+            try {
+                check(runRequest(server, bitmap = bitmap, text = "", config = ModelConfig(prompts = prompts)).error == null)
+                check(lastUserText(server.requests[2].body).contains("自定义附件契约"))
+            } finally { bitmap.recycle() }
+        }
+    }
+
     private data class Output(val text: String?, val error: String?, val deltas: List<String>)
     private fun runRequest(server: MockServer, action: String = "ask", bitmap: Bitmap? = null,
-        selection: RectF? = null, previous: List<ChatTurn> = emptyList(), client: AiClient = AiClient()): Output {
+        selection: RectF? = null, previous: List<ChatTurn> = emptyList(), client: AiClient = AiClient(),
+        visual: VisualContext? = bitmap?.let { VisualContext(it, VisualSource.SCREEN) },
+        config: ModelConfig = ModelConfig(), text: String = "测试问题"): Output {
         val done = CountDownLatch(1)
         val response = AtomicReference<String?>()
         val failure = AtomicReference<String?>()
         val deltas = mutableListOf<String>()
-        client.request(ModelConfig(endpoint = server.endpoint, apiKey = "mock-key"), "测试问题", action, bitmap, selection,
+        client.request(config.copy(endpoint = server.endpoint, apiKey = "mock-key"), text, action, visual, selection,
             previous, { deltas.add(it) }, { response.set(it); done.countDown() }, { failure.set(it); done.countDown() })
         check(done.await(8, TimeUnit.SECONDS)) { "模型回调超时" }
         return Output(response.get(), failure.get(), deltas.toList())
+    }
+
+    private fun imageCount(body: JSONObject): Int {
+        val messages = body.getJSONArray("messages")
+        var count = 0
+        for (index in 0 until messages.length()) {
+            val parts = messages.getJSONObject(index).optJSONArray("content") ?: continue
+            for (part in 0 until parts.length()) if (parts.optJSONObject(part)?.optString("type") == "image_url") count++
+        }
+        return count
+    }
+
+    private fun userText(body: JSONObject): String = buildString {
+        val messages = body.getJSONArray("messages")
+        for (index in 0 until messages.length()) {
+            val message = messages.getJSONObject(index)
+            if (message.optString("role") != "user") continue
+            val parts = message.optJSONArray("content") ?: continue
+            for (part in 0 until parts.length()) {
+                val item = parts.optJSONObject(part) ?: continue
+                if (item.optString("type") == "text") append(item.optString("text"))
+            }
+        }
+    }
+
+    private fun lastUserText(body: JSONObject): String {
+        val messages = body.getJSONArray("messages")
+        val message = (messages.length() - 1 downTo 0).map { messages.getJSONObject(it) }.first { it.optString("role") == "user" }
+        val parts = message.getJSONArray("content")
+        return (0 until parts.length()).map { parts.getJSONObject(it) }.filter { it.optString("type") == "text" }
+            .joinToString("\n") { it.getString("text") }
     }
 
     private fun answer(text: String): String = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\n\n" +

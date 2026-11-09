@@ -48,10 +48,6 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-// 兔球载体 96×108dp、画布 360×400、球半径 137：球体直径的 75% 为 54.8dp。
-private const val CAMERA_CONTROL_SIDE_DP = 54.8f
-private const val CAMERA_CONTROL_TOUCH_DP = 60f
-
 /** 使用融合陀螺仪的姿态矩阵，照片在内存中旋转为正向像素，不依赖查看器解释 EXIF。 */
 internal object CameraOrientation {
     fun fromGravity(x: Float, y: Float, z: Float): Int? {
@@ -84,17 +80,24 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
     private val cameraManager = context.getSystemService(CameraManager::class.java)
     private val sensors = context.getSystemService(SensorManager::class.java)
     private val displays = context.getSystemService(DisplayManager::class.java)
+    private val savedDock = PetDock(context)
+    private var petWidth = savedDock.viewWidth
+    private var petHeight = savedDock.viewHeight
+    private val petScale: Float get() = min(petWidth / 360f, petHeight / 400f)
+    private val controlSide: Float get() = 274f * petScale * .75f
+    private val controlTouch: Int get() = max(dp(44f).toFloat(), controlSide * 1.1f).roundToInt()
+    private fun shutterBottomOffset() = max(dp(78f).toFloat(), petHeight * .4f + dp(12f))
     private val viewport = FrameLayout(context)
     private val texture = TextureView(context)
     private val frozenPhoto = ImageView(context)
     private val flash = View(context)
     private val loading = ProgressBar(context)
-    private val close = CameraControl(context, false).apply {
+    private val close = CameraControl(context, false, controlSide).apply {
         contentDescription = "取消拍摄"
         tooltipText = "取消拍摄"
         setOnClickListener { onClose?.invoke() }
     }
-    private val switchCamera = CameraControl(context, true).apply {
+    private val switchCamera = CameraControl(context, true, controlSide).apply {
         contentDescription = "切换前后摄像头"
         tooltipText = "切换前后摄像头"
         isEnabled = false
@@ -200,8 +203,8 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
         flash.setBackgroundColor(Color.WHITE)
         flash.alpha = 0f
         viewport.addView(flash, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        addView(close, LayoutParams(dp(CAMERA_CONTROL_TOUCH_DP), dp(CAMERA_CONTROL_TOUCH_DP)))
-        addView(switchCamera, LayoutParams(dp(CAMERA_CONTROL_TOUCH_DP), dp(CAMERA_CONTROL_TOUCH_DP)))
+        addView(close, LayoutParams(controlTouch, controlTouch))
+        addView(switchCamera, LayoutParams(controlTouch, controlTouch))
 
         errorPanel.orientation = LinearLayout.VERTICAL
         errorPanel.gravity = Gravity.CENTER
@@ -387,9 +390,20 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
         catch (_: IllegalStateException) { fail(active, "相机已暂停，请重试。") }
     }
 
+    /** 辅助按钮以实际球体直径为基准，与外观尺寸一起调整。 */
+    fun applyPetSize(width: Int, height: Int) {
+        petWidth = width
+        petHeight = height
+        for (control in listOf(close, switchCamera)) {
+            control.setSide(controlSide)
+            control.layoutParams = control.layoutParams.apply { this.width = controlTouch; this.height = controlTouch }
+        }
+        requestLayout()
+    }
+
     fun shutterCenter(): PointF {
         val bottomInset = rootWindowInsets?.getInsets(android.view.WindowInsets.Type.navigationBars())?.bottom ?: 0
-        return PointF(width * .5f, height - bottomInset - dp(78f).toFloat())
+        return PointF(width * .5f, height - bottomInset - shutterBottomOffset())
     }
 
     fun takePhoto() {
@@ -560,7 +574,7 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
         val safe = rootWindowInsets?.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
         (viewport.layoutParams as LayoutParams).apply {
             topMargin = (safe?.top ?: 0) + dp(16f)
-            bottomMargin = (safe?.bottom ?: 0) + dp(148f)
+            bottomMargin = (safe?.bottom ?: 0) + max(dp(148f).toFloat(), shutterBottomOffset() + petHeight * .6f + dp(5f)).roundToInt()
         }
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
@@ -568,9 +582,13 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
         val anchor = shutterCenter()
-        val touchSize = dp(CAMERA_CONTROL_TOUCH_DP)
+        val touchSize = controlTouch
         val halfTouch = touchSize * .5f
-        val offset = min(dp(96f).toFloat(), (width * .5f - halfTouch - dp(16f)).coerceAtLeast(0f))
+        val bodyRadius = 137f * petScale
+        val preferred = bodyRadius + controlSide * .5f + dp(32f)
+        val minimum = bodyRadius + controlSide * .5f + dp(4f)
+        val edgeMargin = if (width * .5f - halfTouch - dp(16f) >= minimum) dp(16f) else dp(4f)
+        val offset = min(preferred, (width * .5f - halfTouch - edgeMargin).coerceAtLeast(0f))
         val controlsY = (anchor.y - halfTouch).roundToInt()
         val closeX = (anchor.x - offset - halfTouch).roundToInt()
         val switchX = (anchor.x + offset - halfTouch).roundToInt()
@@ -619,7 +637,7 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
 }
 
 /** 相机辅助操作延续 PC 的方圆底板，尺寸与兔球球体保持比例。 */
-private class CameraControl(context: Context, private val switch: Boolean) : FrameLayout(context) {
+private class CameraControl(context: Context, private val switch: Boolean, side: Float) : FrameLayout(context) {
     private val icon = object : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF785D6A.toInt()
@@ -630,13 +648,12 @@ private class CameraControl(context: Context, private val switch: Boolean) : Fra
         }
         private val path = Path()
         init {
-            background = Palette.ripple(context, 0xFFF4F4F6.toInt(), CAMERA_CONTROL_SIDE_DP * 9f / 32f)
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
             isDuplicateParentStateEnabled = true
         }
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val size = CAMERA_CONTROL_SIDE_DP * .5f * resources.displayMetrics.density
+            val size = min(width, height) * .5f
             canvas.save()
             canvas.translate((width - size) / 2f, (height - size) / 2f)
             canvas.scale(size / 24f, size / 24f)
@@ -658,8 +675,14 @@ private class CameraControl(context: Context, private val switch: Boolean) : Fra
     init {
         isClickable = true
         isFocusable = true
-        val side = Palette.dp(context, CAMERA_CONTROL_SIDE_DP)
-        addView(icon, LayoutParams(side, side, Gravity.CENTER))
+        addView(icon, LayoutParams(side.roundToInt(), side.roundToInt(), Gravity.CENTER))
+        setSide(side)
+    }
+
+    fun setSide(side: Float) {
+        icon.layoutParams = icon.layoutParams.apply { width = side.roundToInt(); height = side.roundToInt() }
+        icon.background = Palette.ripple(context, 0xFFF4F4F6.toInt(), side / resources.displayMetrics.density * 9f / 32f)
+        icon.invalidate()
     }
 
     fun turn() {

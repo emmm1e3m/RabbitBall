@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONObject
 import java.net.URI
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -16,7 +17,8 @@ data class ModelConfig(
     val model: String = "deepseek-flash",
     val apiKey: String = "",
     val reasoning: String = "medium",
-    val maxToolRounds: Int = 3
+    val maxToolRounds: Int = 3,
+    val prompts: Map<PromptKey, String> = emptyMap()
 )
 
 class AppSettings(context: Context) {
@@ -26,36 +28,70 @@ class AppSettings(context: Context) {
         get() = preferences.getBoolean("setup_complete", false)
         set(value) { preferences.edit().putBoolean("setup_complete", value).apply() }
 
-    fun load(): ModelConfig {
+    val historyLimit: Int get() = preferences.getInt("history_limit", 10)
+
+    fun loadAppearance(): AppearanceConfig {
+        val defaults = AppearanceConfig()
+        return AppearanceConfig(
+            preferences.getFloat("pet_size", defaults.petSize),
+            preferences.getInt("body_color", defaults.bodyColor),
+            preferences.getInt("eye_color", defaults.eyeColor)
+        )
+    }
+
+    fun load(): AppConfig {
         val defaults = ModelConfig()
         val encrypted = preferences.getString("api_key_encrypted", null)
         val apiKey = if (encrypted.isNullOrEmpty()) "" else {
             // 密钥随设备保护，恢复了失去原密钥的应用数据时要求重新填写。
             runCatching { decrypt(encrypted) }.getOrDefault("")
         }
-        return ModelConfig(
+        val storedPrompts = JSONObject(preferences.getString("prompts_json", "{}") ?: "{}")
+        val prompts = storedPrompts.keys().asSequence().associate { wireKey ->
+            val key = requireNotNull(PromptKey.entries.firstOrNull { it.wireKey == wireKey }) { "包含未知的提示词项。" }
+            key to storedPrompts.getString(wireKey)
+        }
+        val model = ModelConfig(
             preferences.getString("endpoint", defaults.endpoint) ?: defaults.endpoint,
             preferences.getString("model", defaults.model) ?: defaults.model,
             apiKey,
             preferences.getString("reasoning", defaults.reasoning) ?: defaults.reasoning,
-            preferences.getInt("max_tool_rounds", defaults.maxToolRounds)
+            preferences.getInt("max_tool_rounds", defaults.maxToolRounds),
+            PromptCatalog.normalize(prompts)
         )
+        return AppConfig(model, loadAppearance(), historyLimit)
     }
 
-    fun save(config: ModelConfig) {
+    fun save(config: AppConfig) {
         validate(config)
-        val encrypted = if (config.apiKey.isBlank()) "" else encrypt(config.apiKey.trim())
+        val model = config.model
+        val encrypted = if (model.apiKey.isBlank()) "" else encrypt(model.apiKey.trim())
+        val prompts = JSONObject().apply {
+            PromptCatalog.normalize(model.prompts).forEach { (key, value) -> put(key.wireKey, value) }
+        }
         check(preferences.edit()
-            .putString("endpoint", config.endpoint.trim().trimEnd('/'))
-            .putString("model", config.model.trim())
-            .putString("reasoning", config.reasoning)
-            .putInt("max_tool_rounds", config.maxToolRounds)
+            .putString("endpoint", model.endpoint.trim().trimEnd('/'))
+            .putString("model", model.model.trim())
+            .putString("reasoning", model.reasoning)
+            .putInt("max_tool_rounds", model.maxToolRounds)
             .putString("api_key_encrypted", encrypted)
+            .putString("prompts_json", prompts.toString())
+            .putFloat("pet_size", config.appearance.petSize)
+            .putInt("body_color", config.appearance.bodyColor)
+            .putInt("eye_color", config.appearance.eyeColor)
+            .putInt("history_limit", config.historyLimit)
             .commit()) { "设置未能保存，请重试。" }
     }
 
     companion object {
         private const val KEY_ALIAS = "rabbitball_api_key"
+
+        fun validate(config: AppConfig) {
+            validate(config.model)
+            require(config.appearance.petSize.isFinite() && config.appearance.petSize in .6f..1.6f) { "宠物尺寸应为 60% 到 160%。" }
+            require((config.appearance.bodyColor ushr 24) == 255 && (config.appearance.eyeColor ushr 24) == 255) { "请选择不透明的球色和眼睛色。" }
+            require(config.historyLimit >= 1) { "历史记录保留条数应为正整数。" }
+        }
 
         fun validate(config: ModelConfig) {
             val uri = runCatching { URI(config.endpoint.trim()) }.getOrNull()
@@ -69,6 +105,7 @@ class AppSettings(context: Context) {
             require(config.apiKey.length <= 8192 && !config.apiKey.contains('\n') && !config.apiKey.contains('\r')) {
                 "API Key 格式无效。"
             }
+            PromptCatalog.normalize(config.prompts)
         }
 
         private fun secretKey(): SecretKey {

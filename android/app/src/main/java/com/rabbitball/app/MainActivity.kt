@@ -37,9 +37,8 @@ class MainActivity : Activity() {
     private val ai = AiClient()
     private var search: SearchView? = null
     private var settingsView: SettingsView? = null
-    private var screenshot: Bitmap? = null
+    private var visualContext: VisualContext? = null
     private var retryCaptureAfterSettings = false
-    private var requestGeneration = 0
     private var conversationId: String? = null
     private var cameraPermissionTarget: WeakReference<SearchView>? = null
     private var cameraPermissionDenied = false
@@ -73,20 +72,15 @@ class MainActivity : Activity() {
     private fun route(intent: Intent) {
         RabbitAccessibilityService.setSearchVisible(true)
         if (!settings.setupComplete || intent.action == ACTION_SETTINGS) {
-            CaptureStore.bitmap = null
-            CaptureStore.error = null
+            CaptureStore.clear()
             showSettings()
         } else if (intent.action == ACTION_CAPTURED) {
-            stopRequest()
-            val image = CaptureStore.bitmap
-            val error = CaptureStore.error
-            CaptureStore.bitmap = null
-            CaptureStore.error = null
-            acceptCapture(image, error)
+            val result = CaptureStore.take()
+            acceptCapture(result?.bitmap, result?.error)
         } else showSearch()
     }
 
-    private fun stopRequest() { requestGeneration++; ai.cancel(); search?.setBusy(false) }
+    private fun stopRequest() { ai.cancel(); search?.setBusy(false) }
 
     private fun beginCapture() {
         stopRequest()
@@ -101,12 +95,19 @@ class MainActivity : Activity() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
-    private fun acceptCapture(bitmap: Bitmap?, error: String?) {
+    // 所有视觉上下文替换共用取消与会话清理，具体画面和草稿由各入口决定。
+    private fun replaceConversation(visual: VisualContext?, saved: SavedChat? = null) {
         cancelImageImport()
         ai.resetConversation()
-        screenshot = bitmap
-        conversationId = null
+        search?.setBusy(false)
+        visualContext = visual
+        conversationId = saved?.id
         turns.clear()
+        saved?.let { turns.addAll(it.turns) }
+    }
+
+    private fun acceptCapture(bitmap: Bitmap?, error: String?) {
+        replaceConversation(bitmap?.let { VisualContext(it, VisualSource.SCREEN) })
         search?.release()
         search = null
         showSearch()
@@ -124,13 +125,13 @@ class MainActivity : Activity() {
         view.onRecapture = { beginCapture() }
         view.onCaptureSetup = { openCaptureSetup(retry = true) }
         view.onCameraRequested = { requestCamera(view) }
-        view.onPhotoCaptured = { image -> acceptPhoto(view, image) }
+        view.onPhotoCaptured = { image -> acceptPhoto(view, image, VisualSource.CAMERA) }
         view.onPickImageRequested = { pickImage(view) }
         view.onCancelRequest = { stopRequest(); view.setStatus("已停止，可以继续提问。") }
         view.onSend = { text, action -> send(text, action) }
         setContentView(view)
         if (previous == null) {
-            view.setScreenshot(screenshot)
+            view.setScreenshot(visualContext?.bitmap)
         }
     }
 
@@ -165,17 +166,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun acceptPhoto(view: SearchView, image: Bitmap) {
+    private fun acceptPhoto(view: SearchView, image: Bitmap, source: VisualSource) {
         if (view !== search || settingsView != null || isFinishing || isDestroyed) {
             image.recycle()
             return
         }
-        cancelImageImport()
-        stopRequest()
-        ai.resetConversation()
-        screenshot = image
-        conversationId = null
-        turns.clear()
+        replaceConversation(VisualContext(image, source))
         view.setPhoto(image)
     }
 
@@ -229,7 +225,7 @@ class MainActivity : Activity() {
                 }
                 imageImportFuture = null
                 target.setPhotoLoading(false)
-                if (image != null) acceptPhoto(target, image)
+                if (image != null) acceptPhoto(target, image, VisualSource.PHOTO)
                 else target.setStatus("照片无法读取，请换一张再试。")
             }
         }
@@ -244,7 +240,7 @@ class MainActivity : Activity() {
 
     private fun send(text: String, action: String) {
         val view = search ?: return
-        val config = settings.load()
+        val config = settings.load().model
         val userText = text.ifBlank { when(action) { "search" -> "搜索选中内容"; "translate" -> "翻译选中内容"; "extract" -> "提取选中文字"; else -> "解释选中内容" } }
         val selectedRegion = view.selection
         stopRequest()
@@ -253,23 +249,20 @@ class MainActivity : Activity() {
             view.showResponse("请先在设置中填写 DeepSeek API Key。", true)
             return
         }
-        val generation = requestGeneration
         view.setBusy(true)
-        ai.request(config, text, action, screenshot, selectedRegion, turns.toList(),
-            onDelta = { if (generation == requestGeneration) view.showResponse(it) },
+        ai.request(config, text, action, visualContext, selectedRegion, turns.toList(),
+            onDelta = { view.showResponse(it) },
             onDone = { response ->
-                if (generation == requestGeneration) {
-                    view.showResponse(response)
-                    view.setBusy(false)
-                    view.completeSubmission()
-                    turns.add(ChatTurn("user", userText))
-                    turns.add(ChatTurn("assistant", response))
-                    try {
-                        conversationId = history.save(conversationId, turns.first().content.take(36), turns).id
-                    } catch (_: java.io.IOException) { view.setStatus("回答已完成，本次历史未能保存。") }
-                }
+                view.showResponse(response)
+                view.setBusy(false)
+                view.completeSubmission()
+                turns.add(ChatTurn("user", userText))
+                turns.add(ChatTurn("assistant", response))
+                try {
+                    conversationId = history.save(conversationId, turns.first().content.take(36), turns).id
+                } catch (_: java.io.IOException) { view.setStatus("回答已完成，本次历史未能保存。") }
             },
-            onError = { if (generation == requestGeneration) { view.showResponse(it, true); view.setBusy(false) } })
+            onError = { view.showResponse(it, true); view.setBusy(false) })
     }
 
     private fun showSettings() {
@@ -289,7 +282,10 @@ class MainActivity : Activity() {
         view.onSave = { config, first ->
             try {
                 settings.save(config)
+                history.trim()
                 settings.setupComplete = true
+                search?.refreshAppearance()
+                RabbitAccessibilityService.refreshPet()
                 if (first) beginCapture() else showSearch()
             } catch (e: Exception) { view.showError(e.message ?: "设置未能保存。") }
         }
@@ -307,13 +303,9 @@ class MainActivity : Activity() {
         }
         AlertDialog.Builder(this).setTitle("最近的对话")
             .setItems(entries.map { it.title }.toTypedArray()) { _, index ->
-                stopRequest()
-                ai.resetConversation()
                 val entry = entries[index]
                 // 恢复文字对话时清理模型图片上下文，视图继续保留当前模糊背景。
-                screenshot = null
-                conversationId = entry.id
-                turns.clear(); turns.addAll(entry.turns)
+                replaceConversation(null, entry)
                 showSearch()
                 search?.restoreConversation(turns.toList())
             }.setNegativeButton("返回", null).show()
@@ -350,7 +342,7 @@ class MainActivity : Activity() {
     private fun finishSearch() { stopRequest(); finishAndRemoveTask() }
 
     override fun onStop() {
-        RabbitAccessibilityService.setSearchVisible(false)
+        RabbitAccessibilityService.setSearchVisible(false, search?.petScreenPosition())
         super.onStop()
     }
 
@@ -373,7 +365,7 @@ class MainActivity : Activity() {
         search?.release()
         search = null
         cameraPermissionTarget = null
-        screenshot = null
+        visualContext = null
         RabbitAccessibilityService.setSearchVisible(false)
         super.onDestroy()
     }

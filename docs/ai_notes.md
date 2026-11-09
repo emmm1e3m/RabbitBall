@@ -3,7 +3,7 @@
 - Windows 原工程已整体迁至 `windows/`，`.git` 保留根目录。迁移包含全部原有未提交修改、依赖和发行包。Windows 构建及 161 项测试通过。
 - Android Studio 工程在 `android/`，由 IDE 新建并同步。原生 Kotlin Views，Android 11+，JDK 21、Gradle 9.3.1、AGP 9.1.0、SDK 36.1。
 - 两端 UI 与设计风格保持一致，当前以 PC 为准；主约定在根 README。激活界面略缩完整截图，背景使用同图 16dp 高斯模糊与 36/255（约 14%）黑色叠层，400ms 非线性显现；普通截图卡片同步 400ms 渐显与轻微缩入。白色圈画与细角边界，选区外直接重选。
-- 兔球恢复为 96×108dp，边缘容器 176dp、向右藏入 56dp；速度按上一版的 75%，横向飞行 600ms、激活飞入 433ms。默认位置、拖动与飞行共享面板上方 12dp 的边界；无足够空间时隐藏。点击表情和爱心以 Windows 实际实现为依据，不另设样式。IME 使用 ADJUST_NOTHING，截图保持原比例只向上平移，背景保持固定；设置页恢复 ADJUST_RESIZE 与浅色系统栏。
+- 兔球恢复为 96×108dp，边缘窗口也为 96×108dp，球心停在左右屏外 0.2×96dp，仅露薄球帽，耳眼按 PC tuck 弹簧收起；速度按上一版的 75%，横向飞行 600ms、激活飞入 433ms。默认位置、拖动与飞行共享面板上方 12dp 的边界；无足够空间时隐藏。点击表情和爱心以 Windows 实际实现为依据，不另设样式。IME 使用 ADJUST_NOTHING，截图保持原比例只向上平移，背景保持固定；设置页恢复 ADJUST_RESIZE 与浅色系统栏。
 - 普通打开由独立透明、noHistory 的 `CaptureActivity` 空任务先完成无障碍截图，再把内存图片交给聊天 `MainActivity`。Launcher、快捷方式、磁贴、边缘兔球均走该入口；设置 shortcut 仍直达 Main。掉线有限等待并提供重新连接入口；外部 ASSIST 手势/按键由系统提供截图。已移除 MediaProjection 服务、前台权限和旧 Main 捕获协调，不再弹共享授权。图片不经 Binder、不落盘，选区归一化后发送完整图的标记副本。
 - 圈选粒子沿触摸轨迹生成，松手后 420ms 收拢为圆角范围；遮罩、边界沿同一轮廓绘制。粒子上限 160，所有发射路径密度为此前两倍；实时轨迹/角点线宽 3dp，稳定边界 2.2dp，形变轮廓为闭合 Catmull-Rom 平滑曲线。四角 24dp 热区，固定对角、最小 20dp，框内移动、框外重选。
 - 视线采用 PC facing/faceX/faceY/glint 弹簧：默认左半屏朝右、右半屏朝左，输入焦点时看真实输入框；脸横移 70、耳朵换向、高光旋转 120°及渐变中心镜像共同转向，拖动和飞行中持续更新。旧版只有 ±8 的眼移，用户无法感知，已替换。
@@ -21,3 +21,15 @@
 - 外部助理请求同时设置 `SHOW_WITH_ASSIST | SHOW_WITH_SCREENSHOT`，App 不消费 AssistStructure。旧 Main 内部捕获会遇到系统 `SnapshotStartingWindow`：Main 隐藏后，系统旧聊天快照仍 shown/HAS_DRAWN，真正 Main 处于 DRAW_PENDING，A11y 和 inline Assist 都可能抓到旧帧；一次 A11y 对照成功不足以排除此问题。API33+禁最近任务截图只把缓存变成主题快照，不能作为可用性修复。现通过先截图、后打开聊天任务消除根因，普通入口不再走 inline 助理，Main 不再用 alpha/延时猜测交接。
 - QA 截图/XML 在 `android/qa/`，已忽略。旧测试设备中曾安装开发版，后续验收使用 5556。
 - 录屏避免使用 `uiautomator dump`：其 UiAutomation 默认抑制其它无障碍服务，会干扰此应用；使用 `input`、`screencap`、`screenrecord` 和只读 `dumpsys`。录制前需确认用户未同时操作同一模拟器，避免手动输入与验收动作互相干扰。
+
+## 2026-11-09 独立架构与实现审查
+
+- 优化前 APK 和对应源码已发布为 `android-v0.1.0-preview.1`，基线 `5b46003`；同仓库主分支已同时包含 `windows/` 与 `android/`。
+- 捕获结果绑定具体请求，取消后的迟到结果不交给新入口；`CaptureStore` 仅作 `CaptureResult` 一次性交接，Main 统一 `replaceConversation`。AiClient 已有请求身份门禁，因此移除 Main 重复代数；照片导入仍有独立代数。
+- 图片使用 `VisualContext(bitmap, source)` 一起替换，模型区分截图/拍摄/图库；成功会话复用首轮图片和工具消息，追问不再次编码或追加同图。归一化选区转为同一 Bitmap 的像素坐标，在内存副本画粉色圆角框并传整图。
+- `PetDock` 共享停靠侧、高度比例和球心几何；`EdgePetOverlay` 独占小型可触窗口、拖动吸附与穿透心形窗，不包含激活入口。点击仅互动；Main 关闭时将实际位置交给 overlay 飞回。Search 从同一停靠点入场，正常移动/相机共用一套有限飞行与取消契约。
+- 修复局部隐藏仍运行无限兔球动画、入场中断后残留中间态，以及拍照后的照片入场被取景器遮完。设置切页和高级区已补短过渡及打断收尾，静态快捷方式使用各自粉色语义图标。
+- 具体审查与验证范围见 `docs/android-review.md`。
+
+- 本轮最终验证：Android构建/Lint（0 errors）/五组runner通过；PC构建与34项focused检查通过。新AppConfig分离ModelConfig与AppearanceConfig，6项PromptCatalog覆盖保存、长度验证与会话快照；历史上限立即trim。Settings为PC四页，输入横飞已删除。新默认词两端都只处理鼠标附近或选区目标，背景仅增强理解。
+- 重启后同一AVD当前是emulator-5554（原5556编号不固定）；边缘真机拖动曾被Back手势抢走，已对RabbitView小窗口设systemGestureExclusionRects，复验可左右拖动且点击不激活。相机160%避让及照片reveal实测通过，恢复100%，MediaStore仍无图片。最终A11y/Voice均Bound。QA无需再次重装或instrument，以免破坏连接。

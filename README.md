@@ -1,6 +1,6 @@
 # 兔球 RabbitBall
 
-同一只兔球，分别适配 Windows 与 Android。
+同一只兔球，分别适配 Windows 与 Android。安装包见 [GitHub Releases](https://github.com/emmm1e3m/RabbitBall/releases)。
 
 - `windows/`：原有桌面版，包含源码、依赖、文档与发行包。开发命令在该目录中执行，见 [Windows 说明](windows/README.md)。
 - `android/`：Android Studio 工程，面向 Android 11 及以上设备，见 [Android 说明](android/README.md)。
