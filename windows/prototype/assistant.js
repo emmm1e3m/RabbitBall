@@ -130,6 +130,7 @@
     else if (request.context?.demo || /公式|数学|牛顿|加速度/.test(request.text)) text = '演示回复\n\n牛顿第二定律：$F=ma$，即力等于质量乘以加速度。\n\n$$a=\\frac{F}{m}$$';
     else text = '演示回复\n\n可以直接提问，也可以附上窗口后选择搜索、提取文字或翻译。';
     for (const character of text) { await delay(18, request.signal); request.onDelta(character); }
+    if(historyLimit===0){request.onPhase('idle');return{text};}
     let entry=demoHistory.get(request.conversationId);
     const turn={id:request.turnId,text:request.text,intent:request.intent};
     if(!entry){

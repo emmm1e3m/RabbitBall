@@ -37,7 +37,7 @@ async function renderSvg(window, svg) {
 
 app.whenReady().then(async () => {
   const source = await fs.readFile(path.join(workspace, 'windows/prototype/rabbit-character.svg'), 'utf8');
-  const window = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ icon: path.join(windowsIcons, 'rabbitball.ico'), show: false, webPreferences: { sandbox: true } });
   await window.loadURL('about:blank');
   if (!process.argv.includes('--android-only')) {
     await fs.mkdir(assets, { recursive: true });

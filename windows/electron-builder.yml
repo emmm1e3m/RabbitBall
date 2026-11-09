@@ -8,6 +8,7 @@ files:
   - prototype/capture.html
   - prototype/capture-host.js
   - prototype/capture-ui.js
+  - prototype/rabbit-character.svg
   - prototype/shortcut.js
   - prototype/fonts.css
   - prototype/fonts/**/*

@@ -668,26 +668,124 @@ test('工具轮数设置跨页保留草稿，取消恢复，保存后重新打�
   await page.window.RabbitSettings.open();assert.equal(input.value,'8');
 });
 
-test('历史保留条数默认十条，取消恢复，校验正整数并保存', async () => {
+test('历史保留条数默认十条，取消恢复，零可预览保存但空值和负数无效', async () => {
   const page=browser(),patches:any[]=[];let stored:any={};
   page.window.rabbitDesktop={loadSettings:async()=>stored,saveSettings:async(patch:any)=>{patches.push(patch);stored={...stored,...patch};return stored;}};
   page.load('settings-ui.js');await page.window.RabbitSettings.ready;await page.window.RabbitSettings.open();
   page.document.querySelector('#rabbit-tab-general').handlers.get('click')[0]();
   const input=page.document.querySelector('#rabbit-history-limit');
   const submit=()=>page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({preventDefault(){}});
+  assert.equal(input.attributes.min,'0');
   assert.equal(input.value,'10');input.value='25';input.handlers.get('input')[0]();
   page.document.querySelector('#rabbit-tab-model').handlers.get('click')[0]();
   page.document.querySelector('#rabbit-tab-general').handlers.get('click')[0]();assert.equal(input.value,'25');
   page.window.RabbitSettings.close();await page.window.RabbitSettings.open();assert.equal(input.value,'10');
-  for(const value of ['', '0', '-1', '1.5']) {
+  for(const value of ['', '-1', '1.5']) {
     input.value=value;input.handlers.get('input')[0]();await submit();
     assert.equal(patches.length,0);
-    assert.equal(page.document.querySelector('.rs-status').textContent,'历史记录保留条数应为正整数。');
+    assert.match(page.document.querySelector('.rs-status').textContent,/非负整数/);
   }
   input.value='25';input.handlers.get('input')[0]();await submit();
   assert.equal(patches[0].historyLimit,25);
   await page.window.RabbitSettings.open();assert.equal(input.value,'25');
   assert.equal(page.window.RabbitSettings.getSnapshot().settings.historyLimit,25);
+  input.value='0';input.handlers.get('input')[0]();
+  assert.equal(page.window.RabbitSettings.getSnapshot().draft.historyLimit,0);
+  assert.equal(page.events.filter(event=>event.type==='settings:change').at(-1).detail.settings.historyLimit,0);
+  await submit();assert.equal(patches[1].historyLimit,0);
+  await page.window.RabbitSettings.open();assert.equal(input.value,'0');
+  assert.equal(page.window.RabbitSettings.getSnapshot().settings.historyLimit,0);
+});
+
+test('外观字体默认关闭，切换即时预览，取消恢复已存字体，保存后重载保留选择', async () => {
+  const page = browser(), patches: any[] = [];
+  let stored: any = {};
+  const bridge = {
+    loadSettings: async () => stored,
+    saveSettings: async (patch: any) => { patches.push(patch); stored = { ...stored, ...patch }; return stored; },
+  };
+  page.window.rabbitDesktop = bridge;
+  page.load('settings-ui.js');
+  const api = page.window.RabbitSettings;
+  await api.ready; await api.open();
+  page.document.querySelector('#rabbit-tab-appearance').handlers.get('click')[0]();
+  const input = page.document.querySelector('#rabbit-use-builtin-font');
+  const submit = () => page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({ preventDefault() {} });
+  assert.equal(page.document.querySelector('#rabbit-page-appearance').contains(input), true);
+  assert.equal(input.checked, false);
+  assert.equal(api.getSnapshot().settings.useBuiltinFont, false);
+  assert.equal(page.document.documentElement.dataset.builtinFont, 'false');
+
+  input.checked = true; input.handlers.get('change')[0]();
+  assert.equal(api.getSnapshot().draft.useBuiltinFont, true);
+  assert.equal(api.getSnapshot().settings.useBuiltinFont, false);
+  assert.equal(page.document.documentElement.dataset.builtinFont, 'true');
+  api.close();
+  assert.equal(page.document.documentElement.dataset.builtinFont, 'false');
+  assert.equal(patches.length, 0);
+  await api.open();
+  assert.equal(input.checked, false);
+
+  input.checked = true; input.handlers.get('change')[0](); await submit();
+  assert.equal(patches[0].useBuiltinFont, true);
+  assert.equal(api.getSnapshot().settings.useBuiltinFont, true);
+  assert.equal(page.document.documentElement.dataset.builtinFont, 'true');
+  await api.open();
+  assert.equal(input.checked, true);
+  input.checked = false; input.handlers.get('change')[0]();
+  assert.equal(page.document.documentElement.dataset.builtinFont, 'false');
+  api.close();
+  assert.equal(page.document.documentElement.dataset.builtinFont, 'true');
+
+  await api.open();
+  input.checked = false; input.handlers.get('change')[0](); await submit();
+  assert.equal(patches[1].useBuiltinFont, false);
+  assert.equal(page.document.documentElement.dataset.builtinFont, 'false');
+  const reloaded = browser();
+  reloaded.window.rabbitDesktop = bridge;
+  reloaded.load('settings-ui.js'); await reloaded.window.RabbitSettings.ready;
+  assert.equal(reloaded.window.RabbitSettings.getSnapshot().settings.useBuiltinFont, false);
+  assert.equal(reloaded.document.querySelector('#rabbit-use-builtin-font').checked, false);
+  assert.equal(reloaded.document.documentElement.dataset.builtinFont, 'false');
+});
+
+test('历史数量预览或保存为零立即隐藏入口并关闭列表，迟到列表不覆盖重新启用后的结果', async () => {
+  for (const type of ['settings:change', 'settings:saved']) {
+    const page=chat(),pending=deferred<any[]>();let reads=0;
+    Object.assign(page.window.RabbitAssistant,{listHistory:()=>++reads===1?pending.promise:Promise.resolve([])});
+    await page.api.activate(null);
+    const toggle=page.document.querySelector('.chat-history-toggle');
+    assert.notEqual(toggle.hidden,true);
+    toggle.handlers.get('click')[0]();
+    assert.equal(page.api.getSnapshot().historyOpen,true);
+    page.emit(type,{detail:{settings:{historyLimit:0}}});
+    assert.equal(toggle.hidden,true);
+    assert.equal(page.api.getSnapshot().historyOpen,false);
+    page.emit(type,{detail:{settings:{historyLimit:10}}});
+    assert.equal(toggle.hidden,false);
+    toggle.handlers.get('click')[0]();await flush();
+    assert.equal(reads,2);
+    assert.equal(page.api.getSnapshot().historyOpen,true);
+    pending.resolve([{id:'stale',title:'关闭前的旧列表',updatedAt:1}]);await flush();
+    assert.equal(page.document.querySelector('.chat-archive-open'),null);
+    assert.equal(page.api.getSnapshot().historyOpen,true);
+  }
+});
+
+test('历史设为零后再启用，先前已点选但迟到的历史内容不能恢复旧会话', async () => {
+  const page=chat(),pending=deferred<any>();
+  Object.assign(page.window.RabbitAssistant,{listHistory:async()=>[{id:'stale',title:'旧对话',updatedAt:1}],getHistory:()=>pending.promise});
+  await page.api.activate(null);
+  const toggle=page.document.querySelector('.chat-history-toggle'),input=page.document.querySelector('.chat-input');
+  input.value='保留当前草稿';toggle.handlers.get('click')[0]();await flush();
+  page.document.querySelector('.chat-archive-open').handlers.get('click')[0]();
+  page.emit('settings:change',{detail:{settings:{historyLimit:0}}});
+  page.emit('settings:change',{detail:{settings:{historyLimit:10}}});
+  toggle.handlers.get('click')[0]();await flush();
+  pending.resolve({id:'stale',messages:[{role:'assistant',content:'迟到内容',turn:{id:'old',text:'旧问题',intent:'chat'},status:'complete'}]});await flush();
+  assert.equal(input.value,'保留当前草稿');
+  assert.equal(page.api.getSnapshot().messageCount,0);
+  assert.equal(page.api.getSnapshot().historyOpen,true);
 });
 
 test('历史选择恢复原会话与首图，追问沿用会话且不重复发送截图，删除不留下旧会话', async () => {

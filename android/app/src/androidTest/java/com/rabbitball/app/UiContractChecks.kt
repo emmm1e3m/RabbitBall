@@ -4,6 +4,7 @@ import android.app.Instrumentation
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -17,6 +18,7 @@ import android.net.Uri
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.MotionEvent
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -44,13 +46,56 @@ object UiContractChecks {
         captureResultOwnership(instrumentation)
         dockRemembersViewPosition(instrumentation)
         settingsPagesKeepDrafts(instrumentation)
+        historyRetention(instrumentation)
         inputFocusPreservesPetSide(instrumentation)
         submissionClearsSentText(instrumentation)
+        AttachmentContractChecks.run(instrumentation)
         conversationDomAndMarkdown(instrumentation)
         keyboardPreservesScreenshotViewport(instrumentation)
         selectionMaskAndGestures(instrumentation)
+        cameraFramesKeepControlsClear(instrumentation)
         cameraOrientationAndPixels()
         imageImportMemoryFixtures(instrumentation)
+    }
+
+    fun historyRetention(instrumentation: Instrumentation) = onMain(instrumentation) {
+        val preferences = instrumentation.targetContext.getSharedPreferences("history_retention_ui_fixture", Context.MODE_PRIVATE)
+        preferences.edit().clear().putInt("history_limit", 0).commit()
+        val context = object : ContextWrapper(instrumentation.targetContext) {
+            override fun getSharedPreferences(name: String, mode: Int): SharedPreferences = preferences
+        }
+        var search: SearchView? = null
+        try {
+            val view = SearchView(context).also { search = it }
+            val historyButton = descendants(view).single { it.contentDescription == "历史记录" }
+            check(historyButton.visibility == View.GONE) { "关闭历史后仍显示历史圆按钮" }
+            preferences.edit().putInt("history_limit", 3).commit()
+            view.refreshHistoryAvailability()
+            check(historyButton.visibility == View.VISIBLE) { "重新启用历史后没有恢复历史圆按钮" }
+            preferences.edit().putInt("history_limit", 0).commit()
+            view.refreshHistoryAvailability()
+            check(historyButton.visibility == View.GONE) { "已有会话没有同步隐藏历史圆按钮" }
+
+            for (limit in listOf(0, 3)) {
+                val settings = SettingsView(context, AppConfig(historyLimit = limit), false)
+                val recent = descendants(settings).filterIsInstance<TextView>().single { it.text.toString() == "最近对话  ›" }
+                check(recent.visibility == if (limit == 0) View.GONE else View.VISIBLE) { "设置页历史入口未遵循保留条数" }
+                val input = descendants(settings).filterIsInstance<EditText>().single { it.contentDescription == "历史记录保留条数" }
+                val save = descendants(settings).filterIsInstance<TextView>().single { it.isClickable && it.text.toString() == "保存" }
+                var saved: AppConfig? = null
+                settings.onSave = { config, _ -> saved = config }
+                input.setText("0")
+                check(save.performClick() && saved?.historyLimit == 0) { "设置页不能保存零条历史" }
+                for (invalid in listOf("", "2147483648", "-1")) {
+                    saved = null
+                    input.setText(invalid)
+                    check(save.performClick() && saved == null) { "无效保留条数被当成关闭历史：$invalid" }
+                }
+            }
+        } finally {
+            search?.release()
+            preferences.edit().clear().commit()
+        }
     }
 
     private fun settingsPagesKeepDrafts(instrumentation: Instrumentation) = onMain(instrumentation) {
@@ -213,6 +258,49 @@ object UiContractChecks {
         } finally { file.delete() }
     }
 
+    private fun cameraFramesKeepControlsClear(instrumentation: Instrumentation) {
+        for ((orientation, widthDp, heightDp) in listOf(
+            Triple(Configuration.ORIENTATION_PORTRAIT, 400, 800),
+            Triple(Configuration.ORIENTATION_LANDSCAPE, 800, 400)
+        )) {
+            val configuration = Configuration(instrumentation.targetContext.resources.configuration).also { it.orientation = orientation }
+            val context = instrumentation.targetContext.createConfigurationContext(configuration)
+            val view = onMain(instrumentation) {
+                SearchView(context).also { layout(it, widthDp, heightDp); it.openCamera(); layout(it, widthDp, heightDp) }
+            }
+            try {
+                // 在有限飞行动画完成后检查实际快门位置，避免把途中姿态当成最终布局。
+                Thread.sleep(700)
+                onMain(instrumentation) {
+                    layout(view, widthDp, heightDp)
+                    val camera = descendants(view).filterIsInstance<CameraView>().single()
+                    val frame = descendants(camera).filterIsInstance<TextureView>().single().parent as View
+                    val mascot = descendants(view).filterIsInstance<RabbitView>().single()
+                    fun bounds(child: View): RectF {
+                        val box = Rect(0, 0, child.width, child.height)
+                        view.offsetDescendantRectToMyCoords(child, box)
+                        return RectF(box)
+                    }
+                    val frameBox = bounds(frame)
+                    val mascotBox = bounds(mascot)
+                    val expected = if (orientation == Configuration.ORIENTATION_LANDSCAPE) 4f / 3f else 3f / 4f
+                    check(frameBox.width() > 0 && frameBox.height() > 0 &&
+                        abs(frameBox.width() / frameBox.height() - expected) < .005f) { "相机取景框未匹配屏幕横竖比例" }
+                    check(mascot.visibility == View.VISIBLE && frameBox.left >= 0 && frameBox.right <= view.width && frameBox.top >= 0 &&
+                        frameBox.bottom <= mascotBox.top && mascotBox.bottom <= view.height) { "取景框侵入快门区或越出屏幕" }
+                    val controls = descendants(camera).filter { it.contentDescription in listOf("取消拍摄", "切换前后摄像头") && it.visibility == View.VISIBLE }
+                    check(controls.any { it.contentDescription == "取消拍摄" })
+                    controls.forEach { control ->
+                        val controlBox = bounds(control)
+                        check(controlBox.left >= 0 && controlBox.right <= view.width && controlBox.top >= 0 &&
+                            controlBox.bottom <= view.height && !RectF.intersects(controlBox, frameBox) &&
+                            !RectF.intersects(controlBox, mascotBox)) { "相机控制与取景框或兔球快门重叠" }
+                    }
+                }
+            } finally { onMain(instrumentation) { view.release() } }
+        }
+    }
+
     private fun cameraOrientationAndPixels() {
         check(CameraOrientation.fromGravity(0f, 1f, 0f) == 0)
         check(CameraOrientation.fromGravity(-1f, 0f, 0f) == 90)
@@ -253,6 +341,21 @@ object UiContractChecks {
                 if (rotated !== original) rotated.recycle()
                 original.recycle()
             }
+        }
+        for ((width, height) in listOf(16 to 9, 9 to 16)) {
+            val source = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+            for (y in 0 until source.height) for (x in 0 until source.width) {
+                source.setPixel(x, y, Color.rgb(x * 7, y * 7, 100))
+            }
+            val cropped = CameraOrientation.centerCrop(source, width, height)
+            try {
+                check(!source.isRecycled && abs(cropped.width.toFloat() / cropped.height - width.toFloat() / height) < .005f)
+                check(cropped.width == source.width || cropped.height == source.height) { "照片裁切额外缩放了像素" }
+                check(cropped.getPixel(cropped.width / 2, cropped.height / 2) == source.getPixel(source.width / 2, source.height / 2)) {
+                    "照片没有围绕原始画面中心裁切"
+                }
+                check(CameraOrientation.centerCrop(cropped, width, height) === cropped) { "相同比例重复生成了位图" }
+            } finally { if (cropped !== source) cropped.recycle(); source.recycle() }
         }
     }
 
@@ -511,6 +614,7 @@ object UiContractChecks {
             """.trimIndent(), "Markdown、四种公式、安全来源图标或外部资源约束未满足")
             responseProgressLifecycle(instrumentation, view, web)
             messageMotionSemantics(instrumentation, view, web)
+            shortAndLongConversationScroll(instrumentation, view, web)
         } finally {
             onMain(instrumentation) { view.setScreenshot(null); view.release() }
         }
@@ -633,9 +737,10 @@ object UiContractChecks {
         awaitSources(instrumentation, web, history.map { it.content } + listOf("长回答问题", ""))
         awaitJavascript(instrumentation, web, """
             (() => {
-              const maximum = document.documentElement.scrollHeight - innerHeight;
+              const maximum = document.scrollingElement.scrollHeight - document.scrollingElement.clientHeight;
               if (maximum < 200) return false;
-              window.dispatchEvent(new WheelEvent('wheel', { deltaY:-600 }));
+              window.dispatchEvent(new TouchEvent('touchstart'));
+              window.dispatchEvent(new PointerEvent('pointercancel', { pointerType:'touch' }));
               window.scrollTo(0, Math.min(100, maximum / 4));
               window.dispatchEvent(new Event('scroll'));
               window.__rabbitQaReadPosition = scrollY;
@@ -643,12 +748,142 @@ object UiContractChecks {
             })()
         """.trimIndent(), "回看测试没有建立可滚动的实际聊天页面")
         val response = (1..8).joinToString("\n\n") { "继续生成的第${it}段回答。" }
-        onMain(instrumentation) { view.showResponse(response); view.setBusy(false) }
+        onMain(instrumentation) { view.showResponse(response) }
         awaitSources(instrumentation, web, history.map { it.content } + listOf("长回答问题", response))
         // 给有限滚动弹簧和异步浏览器事件完成的机会，避免只检查更新瞬间。
         Thread.sleep(700)
         awaitJavascript(instrumentation, web, "Math.abs(scrollY - window.__rabbitQaReadPosition) < 2",
-            "上滚回看后，流式回复或滚动弹簧重新把用户拉到了底部")
+            "手指回看期间，流式回复或 pointercancel 重新把用户拉到了底部")
+        evaluateJavascript(instrumentation, web, "window.dispatchEvent(new TouchEvent('touchend', { touches:[] })); true")
+        val finished = response + "\n\n手指离开后继续生成的内容。"
+        onMain(instrumentation) { view.showResponse(finished); view.setBusy(false) }
+        awaitSources(instrumentation, web, history.map { it.content } + listOf("长回答问题", finished))
+        Thread.sleep(700)
+        awaitJavascript(instrumentation, web, "Math.abs(scrollY - window.__rabbitQaReadPosition) < 2",
+            "回看松手后，新内容重新把用户拉到了底部")
+    }
+
+    private fun shortAndLongConversationScroll(instrumentation: Instrumentation, view: SearchView, web: ConversationWebView) {
+        onMain(instrumentation) {
+            view.restoreConversation(listOf(ChatTurn("user", "短问题"), ChatTurn("assistant", "短回答")))
+            layout(view, 400, 600)
+            web.setActivityVisible(true)
+        }
+        awaitSources(instrumentation, web, listOf("短问题", "短回答"))
+        awaitJavascript(instrumentation, web, """
+            (() => {
+              const documentBox = document.scrollingElement;
+              const messages = document.getElementById('messages');
+              const last = messages.lastElementChild?.querySelector('.bubble-surface')?.getBoundingClientRect();
+              const gap = parseFloat(getComputedStyle(messages).paddingBottom);
+              return documentBox.scrollHeight <= documentBox.clientHeight + 2 && !!last &&
+                Math.abs(innerHeight - gap - last.bottom) < 2;
+            })()
+        """.trimIndent(), "短对话没有贴底，或产生了空白滚动区")
+        val previewBitmap = Bitmap.createBitmap(120, 80, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        val firstImage = try { HistoryPreview.from(VisualContext(previewBitmap, VisualSource.PHOTO)) }
+            finally { previewBitmap.recycle() }
+        onMain(instrumentation) { web.setFirstImage(firstImage) }
+        awaitJavascript(instrumentation, web, """
+            (() => {
+              const image = document.querySelector('.bubble.user .bubble-image');
+              return document.querySelectorAll('.bubble-image').length === 1 && image?.complete &&
+                image.naturalWidth === 120 && image.naturalHeight === 80 &&
+                image.closest('.bubble') === document.querySelector('.bubble');
+            })()
+        """.trimIndent(), "恢复的历史图片未进入第一条用户气泡，或本地 JPEG 无法显示")
+        onMain(instrumentation) { view.beginTurn("图片后的追问"); view.showResponse("保留首图") }
+        awaitJavascript(instrumentation, web,
+            "document.querySelectorAll('.bubble-image').length === 1 && !document.querySelectorAll('.bubble.user')[1].querySelector('img')",
+            "追问重复添加了首图")
+        val longAnswer = (1..60).joinToString("\n\n") { "第${it}段长回答，确认超出一屏的内容保持实际文档高度并能够继续向下阅读。" } + "\n\n末行可见标记"
+        onMain(instrumentation) {
+            view.restoreConversation(listOf(ChatTurn("user", "长问题"), ChatTurn("assistant", longAnswer)))
+            web.setActivityVisible(true)
+        }
+        awaitSources(instrumentation, web, listOf("长问题", longAnswer))
+        awaitJavascript(instrumentation, web, """
+            (() => {
+              const documentBox = document.scrollingElement;
+              if (documentBox.scrollHeight - documentBox.clientHeight <= innerHeight) return false;
+              window.dispatchEvent(new WheelEvent('wheel', { deltaY:-600 }));
+              window.scrollTo(0, 0);
+              const firstLine = document.querySelector('.bubble:last-child .bubble-content p:first-child')?.getBoundingClientRect();
+              return !!firstLine && firstLine.top >= 0 && firstLine.bottom <= innerHeight &&
+                document.querySelector('.bubble:last-child .bubble-content p:last-child')?.getBoundingClientRect().top > innerHeight;
+            })()
+        """.trimIndent(), "长回答没有真实滚动范围，或开头内容无法完整阅读")
+        evaluateJavascript(instrumentation, web, """
+            (() => {
+              const bubble = document.querySelector('.bubble:last-child .bubble-surface').getBoundingClientRect();
+              window.scrollTo(0, scrollY + bubble.top + bubble.height / 2 - innerHeight / 2);
+              return true;
+            })()
+        """.trimIndent())
+        awaitJavascript(instrumentation, web, """
+            (() => {
+              const surface = document.querySelector('.bubble:last-child .bubble-surface');
+              const box = surface.getBoundingClientRect();
+              return box.top < 0 && box.bottom > innerHeight && !surface.style.clipPath &&
+                typeof window.RabbitViewport?.setBubbleBounds === 'function';
+            })()
+        """.trimIndent(), "长气泡没有交给原生视口裁切，或仍保留逐滚动 JS 遮罩")
+        val boundsField = ConversationWebView::class.java.getDeclaredField("bubbleBounds").apply { isAccessible = true }
+        val widthField = ConversationWebView::class.java.getDeclaredField("documentWidth").apply { isAccessible = true }
+        val geometryDeadline = SystemClock.uptimeMillis() + 5_000
+        while (true) {
+            val ready = onMain(instrumentation) {
+                @Suppress("UNCHECKED_CAST")
+                val bounds = boundsField.get(web) as List<RectF>
+                bounds.size == 2 && bounds.last().height() * web.width / widthField.getFloat(web) > web.height * 2
+            }
+            if (ready) break
+            check(SystemClock.uptimeMillis() < geometryDeadline) { "本地气泡几何未交付给原生视口" }
+            Thread.sleep(16)
+        }
+        onMain(instrumentation) {
+            @Suppress("UNCHECKED_CAST")
+            val bounds = (boundsField.get(web) as List<RectF>).last()
+            val scale = web.width / widthField.getFloat(web)
+            val left = (bounds.left * scale - web.scrollX).roundToInt()
+            val right = (bounds.right * scale - web.scrollX).roundToInt()
+            val savedScroll = web.scrollY
+            // 不等待 JS 或新几何回调，原生滚动后立即绘制并核对视口角点。
+            for (offset in listOf(0, 37, 121)) {
+                web.scrollTo(0, savedScroll + offset)
+                val bitmap = Bitmap.createBitmap(web.width, web.height, Bitmap.Config.ARGB_8888)
+                try {
+                    val canvas = Canvas(bitmap)
+                    canvas.translate(-web.scrollX.toFloat(), -web.scrollY.toFloat())
+                    web.draw(canvas)
+                    val sampleX = (left + 30 * scale).roundToInt().coerceIn(0, web.width - 1)
+                    for (y in listOf(1, web.height - 2)) {
+                        check(Color.alpha(bitmap.getPixel((left + 1).coerceIn(0, web.width - 1), y)) < 16 &&
+                            Color.alpha(bitmap.getPixel((right - 2).coerceIn(0, web.width - 1), y)) < 16) {
+                            "原生滚动后气泡角点没有保持透明：offset=$offset，y=$y"
+                        }
+                        check(Color.alpha(bitmap.getPixel(sampleX, y)) > 128) {
+                            "原生裁切坐标偏移，视口边缘的气泡内容消失：offset=$offset，y=$y"
+                        }
+                    }
+                } finally { bitmap.recycle() }
+            }
+            web.scrollTo(0, savedScroll)
+        }
+        evaluateJavascript(instrumentation, web, "window.scrollTo(0, document.scrollingElement.scrollHeight); true")
+        awaitJavascript(instrumentation, web, """
+            (() => {
+              const documentBox = document.scrollingElement;
+              const surface = document.querySelector('.bubble:last-child .bubble-surface');
+              const lastLine = surface?.querySelector('.bubble-content p:last-child');
+              if (!lastLine || lastLine.textContent.trim() !== '末行可见标记') return false;
+              const bubbleBox = surface.getBoundingClientRect(), lineBox = lastLine.getBoundingClientRect();
+              const style = getComputedStyle(surface);
+              return Math.abs(documentBox.scrollHeight - documentBox.clientHeight - scrollY) < 2 &&
+                lineBox.top >= 0 && lineBox.bottom <= innerHeight && bubbleBox.bottom <= innerHeight &&
+                parseFloat(style.borderBottomLeftRadius) > 0 && parseFloat(style.borderBottomRightRadius) > 0;
+            })()
+        """.trimIndent(), "长回答无法滚到末行，或气泡底部圆角仍被视口裁断")
     }
 
     private fun awaitSources(instrumentation: Instrumentation, web: ConversationWebView, expected: List<String>) {

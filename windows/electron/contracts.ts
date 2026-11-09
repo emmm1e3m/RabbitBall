@@ -20,6 +20,7 @@ export interface SettingsFields {
   petSize: number;
   bodyColor: string;
   eyeColor: string;
+  useBuiltinFont: boolean;
   launchAtLogin: boolean;
   pauseOnFullscreen: boolean;
   followMouse: boolean;
@@ -134,7 +135,7 @@ export interface PointerPoint {
 }
 
 export type CaptureEvent =
-  | { type: 'start'; sessionId: string; context: CaptureContext; backgroundImageDataUrl?: string; backgroundBitmap?: { data: Uint8Array; width: number; height: number }; width: number; height: number; dragStart?: PointerPoint; shortcut?: string[]; color?: string }
+  | { type: 'start'; sessionId: string; context: CaptureContext; backgroundImageDataUrl?: string; backgroundBitmap?: { data: Uint8Array; width: number; height: number }; width: number; height: number; dragStart?: PointerPoint; shortcut?: string[]; color?: string; useBuiltinFont?: boolean }
   | { type: 'frame'; sessionId: string; rect?: { x: number; y: number; width: number; height: number } }
   | { type: 'pointer'; sessionId: string; phase: 'down' | 'up'; x: number; y: number }
   | { type: 'image'; sessionId: string; context: CaptureContext; rect: { x: number; y: number; width: number; height: number } }

@@ -17,7 +17,7 @@
     { key: 'translate', group: '功能', label: '翻译', hint: '规定翻译语言、格式和范围；填写问题或直接点击快捷操作时均适用。' },
     { key: 'searchTool', group: '搜索工具', label: '联网搜索', hint: '统一规定何时联网搜索，以及如何组织搜索关键词。' }
   ];
-  const defaults = { bodyColor: '#F58DAA', eyeColor: '#F90040', petSize: 1, reasoning: 'medium', maxToolRounds: 3, historyLimit: 10, launchAtLogin: false, pauseOnFullscreen: true, followMouse: true, autoCopyScreenshots: true, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT], apiBaseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', hasApiKey: false };
+  const defaults = { bodyColor: '#F58DAA', eyeColor: '#F90040', useBuiltinFont: false, petSize: 1, reasoning: 'medium', maxToolRounds: 3, historyLimit: 10, launchAtLogin: false, pauseOnFullscreen: true, followMouse: true, autoCopyScreenshots: true, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT], apiBaseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', hasApiKey: false };
   const storeKey = 'rabbitball.appearance.v1';
   const emit = (name, detail = {}) => document.dispatchEvent(new CustomEvent('settings:' + name, { detail }));
   const validHex = value => typeof value === 'string' && /^#[\da-f]{6}$/i.test(value);
@@ -133,16 +133,14 @@
     #rabbit-settings-root .rs-close { display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:50%;background:#fff;color:var(--rb-text-muted);cursor:pointer; }
     #rabbit-settings-root .rs-close:hover { background:var(--rb-soft);color:var(--rb-accent); }
     #rabbit-settings-root button svg { width:16px;height:16px;stroke:currentColor;stroke-width:2.25;fill:none;stroke-linecap:round;stroke-linejoin:round; }
-    #rabbit-settings-root .rs-tabs { display:flex;gap:18px;padding:0 22px;flex:none; }
+    #rabbit-settings-root .rs-tabs { display:flex;gap:8px;padding:0 22px;flex:none; }
     #rabbit-settings-root .rs-tab { display:flex;align-items:center;justify-content:center;gap:6px;flex:1;padding:8px 0 11px;border:0;border-bottom:2px solid transparent;background:#fff;color:var(--rb-text-muted);font-size:14px;cursor:pointer;transition:color .2s,border-color .24s; }
-    #rabbit-settings-root .rs-tab svg { width:15px;height:15px; }
     #rabbit-settings-root .rs-tab:hover { color:var(--rb-text-secondary); }
     #rabbit-settings-root .rs-tab[aria-selected='true'] { color:var(--rb-text);border-bottom-color:var(--rb-text-secondary); }
     #rabbit-settings-root .rs-fields { padding:0;overflow-y:auto;min-height:0;scrollbar-width:thin;scrollbar-color:var(--rb-line) transparent; }
     #rabbit-settings-root .rs-pages { display:grid;padding:19px 22px 6px; }
     #rabbit-settings-root .rs-tab-panel { grid-area:1 / 1;display:grid;align-content:start;gap:20px;min-width:0;opacity:0;visibility:hidden;transform:translateX(7px);pointer-events:none;transition:opacity .2s,transform .3s cubic-bezier(.22,1,.36,1),visibility 0s .2s; }
     #rabbit-settings-root .rs-tab-panel.is-active { opacity:1;visibility:visible;transform:translateX(0);pointer-events:auto;transition:opacity .2s,transform .3s cubic-bezier(.22,1,.36,1),visibility 0s; }
-    #rabbit-settings-root .rs-tabs { gap:12px; }
     #rabbit-settings-root .rs-prompts { gap:12px; }
     #rabbit-settings-root .rs-prompt-editor { display:block;width:100%;height:160px;resize:vertical;min-height:110px;max-height:260px;padding:10px 11px;border:1px solid var(--rb-line);border-radius:9px;background:#fff;color:var(--rb-text);font:inherit;font-size:14px;line-height:1.7;outline:none; }
     #rabbit-settings-root .rs-prompt-editor:focus { border-color:var(--rb-accent); }
@@ -213,10 +211,10 @@
     <section class="rs-panel" role="dialog" aria-modal="true" aria-label="设置" aria-hidden="true" inert>
       <header class="rs-header"><h2>设置</h2><button class="rs-close" type="button" aria-label="关闭设置，放弃未保存的修改" title="关闭设置">${closeIcon}</button></header>
       <nav class="rs-tabs" role="tablist" aria-label="设置分类">
-        <button class="rs-tab" id="rabbit-tab-model" type="button" role="tab" aria-selected="true" aria-controls="rabbit-page-model" tabindex="0"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="4"/><path d="M9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4M9 9h6v6H9z"/></svg><span>模型</span></button>
-        <button class="rs-tab" id="rabbit-tab-appearance" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-appearance" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18h2a2 2 0 0 0 1-3.7 1.6 1.6 0 0 1 .8-3h1.4A3.8 3.8 0 0 0 21 10.5C21 6.4 17 3 12 3Z"/><path d="M7 11h.01M10 7h.01M15 7h.01" stroke-width="3.5"/></svg><span>外观</span></button>
-        <button class="rs-tab" id="rabbit-tab-general" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-general" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="white"/><circle cx="15" cy="17" r="3" fill="white"/></svg><span>通用</span></button>
-        <button class="rs-tab" id="rabbit-tab-prompts" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-prompts" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v13H9l-4 4V4ZM9 8h6m-6 4h4"/></svg><span>提示词</span></button>
+        <button class="rs-tab" id="rabbit-tab-model" type="button" role="tab" aria-selected="true" aria-controls="rabbit-page-model" tabindex="0"><span>模型</span></button>
+        <button class="rs-tab" id="rabbit-tab-appearance" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-appearance" tabindex="-1"><span>外观</span></button>
+        <button class="rs-tab" id="rabbit-tab-general" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-general" tabindex="-1"><span>通用</span></button>
+        <button class="rs-tab" id="rabbit-tab-prompts" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-prompts" tabindex="-1"><span>提示词</span></button>
       </nav>
       <form class="rs-fields" id="rabbit-settings-form">
         <div class="rs-pages">
@@ -229,9 +227,10 @@
         <section class="rs-tab-panel" id="rabbit-page-appearance" role="tabpanel" aria-labelledby="rabbit-tab-appearance" aria-hidden="true" inert>
         <div class="rs-field"><label class="rs-label" for="rabbit-pet-size">宠物尺寸<output id="rabbit-size-value" for="rabbit-pet-size">100%</output></label><input class="rs-size" id="rabbit-pet-size" type="range" min="0.6" max="1.6" step="0.05" value="1"></div>
         <div class="rs-field"><span class="rs-label">调色板</span><div class="rs-colors"><div class="rs-color-field"><input id="rabbit-body-color" type="color" value="#F58DAA" aria-label="球色"><div class="rs-color-copy"><label for="rabbit-body-color">球色</label><output id="rabbit-body-value">#F58DAA</output></div></div><div class="rs-color-field"><input id="rabbit-eye-color" type="color" value="#F90040" aria-label="眼睛色"><div class="rs-color-copy"><label for="rabbit-eye-color">眼睛色</label><output id="rabbit-eye-value">#F90040</output></div></div></div><p class="rs-hint">其他颜色会自动匹配。</p></div>
+        <label class="rs-toggle"><span class="rs-toggle-copy"><span>使用内置字体</span></span><span class="rs-switch"><input id="rabbit-use-builtin-font" type="checkbox" role="switch" aria-label="使用内置字体"><i aria-hidden="true"></i></span></label>
         </section>
         <section class="rs-tab-panel" id="rabbit-page-general" role="tabpanel" aria-labelledby="rabbit-tab-general" aria-hidden="true" inert>
-        <div class="rs-field"><label class="rs-label" for="rabbit-history-limit">历史记录保留条数</label><input class="rs-key" id="rabbit-history-limit" type="number" min="1" step="1" required aria-describedby="rabbit-history-limit-hint"><p class="rs-hint" id="rabbit-history-limit-hint">超过保留条数时，自动删除最早的记录。</p></div>
+        <div class="rs-field"><label class="rs-label" for="rabbit-history-limit">历史记录保留条数</label><input class="rs-key" id="rabbit-history-limit" type="number" min="0" step="1" required aria-describedby="rabbit-history-limit-hint"><p class="rs-hint" id="rabbit-history-limit-hint">超出数量自动删除最早记录。0 表示清空并不再保存历史，同时隐藏历史按钮。</p></div>
         <div class="rs-field"><span class="rs-label" id="rabbit-shortcut-label">启动键</span><div class="rs-shortcut-row"><button class="rs-shortcut" id="rabbit-activation-shortcut" type="button" aria-labelledby="rabbit-shortcut-label rabbit-shortcut-value" aria-describedby="rabbit-shortcut-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6"/></svg><span class="rs-shortcut-keys" id="rabbit-shortcut-value"></span></button><button class="rs-shortcut-reset" id="rabbit-shortcut-reset" type="button" aria-label="恢复默认启动键" title="恢复默认启动键"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6"/></svg></button></div><p class="rs-hint" id="rabbit-shortcut-hint" aria-live="polite">点击录制专用启动键；启用时会拦截所选按键。</p></div>
         <div class="rs-toggles">
           <label class="rs-toggle"><span class="rs-toggle-copy"><span>开机自启动</span><small id="rabbit-startup-note">桌面版可用</small></span><span class="rs-switch"><input id="rabbit-launch-at-login" type="checkbox" role="switch" aria-label="开机自启动" aria-describedby="rabbit-startup-note"><i aria-hidden="true"></i></span></label>
@@ -257,6 +256,7 @@
   const panel = $('.rs-panel'), keyInput = $('.rs-key'), clearKey = $('.rs-clear-key');
   const model = $('#rabbit-model'), reasoning = $('#rabbit-reasoning'), toolRounds = $('#rabbit-tool-rounds'), historyLimit = $('#rabbit-history-limit'), size = $('#rabbit-pet-size'), bodyInput = $('#rabbit-body-color'), eyeInput = $('#rabbit-eye-color');
   const startup = $('#rabbit-launch-at-login'), fullscreen = $('#rabbit-pause-fullscreen'), follow = $('#rabbit-follow-mouse'), autoCopy = $('#rabbit-auto-copy-screenshots');
+  const builtinFont = $('#rabbit-use-builtin-font');
   const shortcutButton = $('#rabbit-activation-shortcut'), shortcutKeys = $('.rs-shortcut-keys'), shortcutHint = $('#rabbit-shortcut-hint');
   const saveButton = $('.rs-save'), status = $('.rs-status');
   const promptKey = $('#rabbit-prompt-key'), promptEditor = $('#rabbit-prompt-editor'), promptHint = $('#rabbit-prompt-hint');
@@ -271,10 +271,11 @@
     return {
       bodyColor: validHex(value.bodyColor) ? value.bodyColor.toUpperCase() : defaults.bodyColor,
       eyeColor: validHex(value.eyeColor) ? value.eyeColor.toUpperCase() : defaults.eyeColor,
+      useBuiltinFont: typeof value.useBuiltinFont === 'boolean' ? value.useBuiltinFont : defaults.useBuiltinFont,
       petSize: Number.isFinite(value.petSize) ? Math.max(.6, Math.min(1.6, value.petSize)) : defaults.petSize,
       reasoning: ['low', 'medium', 'high'].includes(value.reasoning) ? value.reasoning : defaults.reasoning,
       maxToolRounds: Number.isSafeInteger(value.maxToolRounds) && value.maxToolRounds >= 1 ? value.maxToolRounds : defaults.maxToolRounds,
-      historyLimit: Number.isSafeInteger(value.historyLimit) && value.historyLimit >= 1 ? value.historyLimit : defaults.historyLimit,
+      historyLimit: Number.isSafeInteger(value.historyLimit) && value.historyLimit >= 0 ? value.historyLimit : defaults.historyLimit,
       launchAtLogin: !!bridge && typeof value.launchAtLogin === 'boolean' ? value.launchAtLogin : defaults.launchAtLogin,
       pauseOnFullscreen: typeof value.pauseOnFullscreen === 'boolean' ? value.pauseOnFullscreen : defaults.pauseOnFullscreen,
       followMouse: typeof value.followMouse === 'boolean' ? value.followMouse : defaults.followMouse,
@@ -289,6 +290,7 @@
   function applySettings(value) {
     const settings = normalize(value);
     applyPalette(settings.bodyColor, settings.eyeColor);
+    document.documentElement.dataset.builtinFont = String(settings.useBuiltinFont);
     emit('change', { settings: { ...settings } });
     return settings;
   }
@@ -353,6 +355,7 @@
     model.value = draft.model;
     reasoning.value = draft.reasoning; toolRounds.value = String(draft.maxToolRounds); historyLimit.value = String(draft.historyLimit); size.value = String(draft.petSize);
     bodyInput.value = draft.bodyColor; eyeInput.value = draft.eyeColor;
+    builtinFont.checked = draft.useBuiltinFont;
     startup.checked = draft.launchAtLogin; startup.disabled = !bridge;
     fullscreen.checked = draft.pauseOnFullscreen; follow.checked = draft.followMouse;
     autoCopy.checked = draft.autoCopyScreenshots;
@@ -408,7 +411,7 @@
     $('#rabbit-eye-value').textContent = draft.eyeColor;
   }
   function preview() {
-    draft = { ...draft, model: model.value, reasoning: reasoning.value, maxToolRounds: Number(toolRounds.value), historyLimit: Number(historyLimit.value), petSize: Number(size.value), bodyColor: bodyInput.value.toUpperCase(), eyeColor: eyeInput.value.toUpperCase(), launchAtLogin: !!bridge && startup.checked, pauseOnFullscreen: fullscreen.checked, followMouse: follow.checked, autoCopyScreenshots: autoCopy.checked };
+    draft = { ...draft, model: model.value, reasoning: reasoning.value, maxToolRounds: Number(toolRounds.value), historyLimit: historyLimit.value.trim() ? Number(historyLimit.value) : Number.NaN, petSize: Number(size.value), bodyColor: bodyInput.value.toUpperCase(), eyeColor: eyeInput.value.toUpperCase(), useBuiltinFont: builtinFont.checked, launchAtLogin: !!bridge && startup.checked, pauseOnFullscreen: fullscreen.checked, followMouse: follow.checked, autoCopyScreenshots: autoCopy.checked };
     syncOutputs(); applySettings(draft); layout();
   }
   const ready = (async () => {
@@ -457,8 +460,8 @@
     try {
       if (!await recordingFinished) throw new Error('未能结束录制，请重新打开设置。');
       if (!Number.isSafeInteger(draft.maxToolRounds) || draft.maxToolRounds < 1) throw new Error('工具调用轮数上限应为正整数。');
-      if (!Number.isSafeInteger(draft.historyLimit) || draft.historyLimit < 1) throw new Error('历史记录保留条数应为正整数。');
-      const patch = { bodyColor: draft.bodyColor, eyeColor: draft.eyeColor, petSize: draft.petSize, model: draft.model, reasoning: draft.reasoning, maxToolRounds: draft.maxToolRounds, historyLimit: draft.historyLimit, launchAtLogin: draft.launchAtLogin, pauseOnFullscreen: draft.pauseOnFullscreen, followMouse: draft.followMouse, autoCopyScreenshots: draft.autoCopyScreenshots, activationShortcut: [...draft.activationShortcut], prompts: { ...draft.prompts } };
+      if (!Number.isSafeInteger(draft.historyLimit) || draft.historyLimit < 0) throw new Error('历史记录保留条数应为非负整数。');
+      const patch = { bodyColor: draft.bodyColor, eyeColor: draft.eyeColor, useBuiltinFont: draft.useBuiltinFont, petSize: draft.petSize, model: draft.model, reasoning: draft.reasoning, maxToolRounds: draft.maxToolRounds, historyLimit: draft.historyLimit, launchAtLogin: draft.launchAtLogin, pauseOnFullscreen: draft.pauseOnFullscreen, followMouse: draft.followMouse, autoCopyScreenshots: draft.autoCopyScreenshots, activationShortcut: [...draft.activationShortcut], prompts: { ...draft.prompts } };
       const enteredKey = keyInput.value.trim();
       if (enteredKey) patch.apiKey = enteredKey;
       else if (keyCleared) patch.apiKey = '';
@@ -509,7 +512,7 @@
   });
   clearKey.addEventListener('click', () => { keyCleared = true; keyInput.value = ''; keyInput.placeholder = '保存后清除密钥'; clearKey.hidden = true; });
   for (const input of [model, reasoning, toolRounds, historyLimit, size, bodyInput, eyeInput]) input.addEventListener('input', preview);
-  for (const input of [startup, fullscreen, follow, autoCopy]) input.addEventListener('change', preview);
+  for (const input of [startup, fullscreen, follow, autoCopy, builtinFont]) input.addEventListener('change', preview);
   promptKey.addEventListener('change', fillPrompt);
   promptEditor.addEventListener('input', editPrompt);
   $('#rabbit-prompt-reset').addEventListener('click', () => { const prompts = { ...draft.prompts }; delete prompts[promptKey.value]; draft = { ...draft, prompts }; fillPrompt(); });

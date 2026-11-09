@@ -57,7 +57,7 @@ internal class PhotoSourceMenu(
             contentDescription = title
             isClickable = true
             isFocusable = true
-            addView(ActionIcon(context, kind).apply {
+            addView(ActionIcon(context, kind, 1.2f).apply {
                 inkColor = Palette.ink
                 isClickable = false
                 isFocusable = false
@@ -84,7 +84,7 @@ internal class PhotoSourceMenu(
             setOnClickListener {
                 if (isShowing && !closing) {
                     pendingAction = action
-                    dismiss()
+                    animateDismiss()
                 }
             }
         }
@@ -115,6 +115,12 @@ internal class PhotoSourceMenu(
     }
 
     override fun dismiss() {
+        // 返回或点击空白处可以撤回退出动画中尚未交接的拍照、选图动作。
+        pendingAction = null
+        animateDismiss()
+    }
+
+    private fun animateDismiss() {
         if (!isShowing || closing) return
         closing = true
         panel.animate().cancel()

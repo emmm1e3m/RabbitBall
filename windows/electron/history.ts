@@ -77,8 +77,11 @@ export class HistoryStore {
   }
 
   begin(request: AgentRequest, conversation: AgentConversation, firstScreenshot?: CaptureImage, thumbnail?: string): HistoryRun {
+    // 关闭历史只停止持久化；正在进行的对话仍由主进程的 AgentConversation 持有。
+    if (this.limit === 0) return { onEvent() {}, async save() {} };
     let record = this.records.get(request.conversationId);
-    if (request.regenerate && !record) throw new Error('找不到需要重新生成的历史消息。');
+    const regenerateIndex = request.regenerate ? record?.value.messages.findIndex(message => message.role === 'assistant' && message.turn.id === request.turnId) ?? -1 : -1;
+    if (request.regenerate && regenerateIndex < 0 && !conversation.turns.some(turn => turn.id === request.turnId)) throw new Error('找不到需要重新生成的历史消息。');
     const intent = request.action && request.action !== 'ask' ? request.action : 'chat';
     const turn: HistoryMessage['turn'] = { id: request.turnId, text: request.text, intent };
     if (!record) {
@@ -88,11 +91,11 @@ export class HistoryStore {
       this.records.set(request.conversationId, record);
     }
     const entry = record.value;
-    if (request.regenerate) {
-      const index = entry.messages.findIndex(message => message.role === 'assistant' && message.turn.id === request.turnId);
-      if (index < 0) throw new Error('找不到需要重新生成的历史消息。');
-      entry.messages.length = index;
+    if (request.regenerate && regenerateIndex >= 0) {
+      entry.messages.length = regenerateIndex;
     } else {
+      // 重新启用保存后，内存里可重新生成的旧问题可能尚无历史条目，从本次问题开始记录。
+      if (request.regenerate) entry.messages.length = 0;
       entry.messages.push({ role: 'user', content: request.text, turn, status: 'complete', ...(!request.text.trim() && intent !== 'chat' ? { hidden: true } : {}) });
     }
     // 写盘时将尚在生成的回复视为已停止，意外退出后不会恢复成永远等待的状态。

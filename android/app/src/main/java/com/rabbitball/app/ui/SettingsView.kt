@@ -132,12 +132,20 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
         endpoint = field(advanced, "API 基础地址", initialModel.endpoint, "https://api.deepseek.com", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
 
         buildAppearance()
-        historyLimit = field(generalPage, "历史记录保留条数", initial.historyLimit.toString(), "10", InputType.TYPE_CLASS_NUMBER)
+        historyLimit = field(generalPage, "历史记录保留条数", initial.historyLimit.toString(), "10", InputType.TYPE_CLASS_NUMBER).apply {
+            contentDescription = "历史记录保留条数"
+        }
+        generalPage.addView(Palette.text(context, "0 表示清空并不保留历史记录，同时隐藏历史入口。", 12f, Palette.muted),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(8) })
         generalPage.addView(Palette.text(context, context.getString(R.string.capture_entry_choice_hint), 12f, Palette.muted).apply {
             setPadding(0, d(18), 0, d(4))
         })
+        assistantValue = button("设为系统助理  ›", false) { onAssistant?.invoke() }
+        generalPage.addView(assistantValue, LinearLayout.LayoutParams(-1, d(50)).apply { topMargin=d(8) })
+        generalPage.addView(Palette.text(context, context.getString(R.string.capture_assistant_hint), 12f, Palette.muted),
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
         val access = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
-        access.addView(Palette.text(context, "即开即选（无障碍）", 14f), LinearLayout.LayoutParams(0, d(58), 1f))
+        access.addView(Palette.text(context, "备用截图（无障碍）", 14f), LinearLayout.LayoutParams(0, d(58), 1f))
         accessValue = button("开启", false) { onAccessibility?.invoke() }
         access.addView(accessValue, LinearLayout.LayoutParams(d(84), d(40)))
         generalPage.addView(access)
@@ -152,11 +160,9 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
             }
         }
         generalPage.addView(petSwitch)
-        assistantValue = button("设为系统助理  ›", false) { onAssistant?.invoke() }
-        generalPage.addView(assistantValue, LinearLayout.LayoutParams(-1, d(50)).apply { topMargin=d(8) })
-        generalPage.addView(Palette.text(context, context.getString(R.string.capture_assistant_hint), 12f, Palette.muted),
-            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
-        if (!firstRun) generalPage.addView(button("最近对话  ›", false) { onHistory?.invoke() }, LinearLayout.LayoutParams(-1, d(50)).apply { topMargin=d(8) })
+        if (!firstRun) generalPage.addView(button("最近对话  ›", false) { onHistory?.invoke() }.apply {
+            visibility = if (initial.historyLimit > 0) VISIBLE else GONE
+        }, LinearLayout.LayoutParams(-1, d(50)).apply { topMargin=d(8) })
         buildPrompts()
         error = Palette.text(context, "", 12f, Palette.error).apply { visibility = GONE; setPadding(0,d(8),0,d(8)) }
         column.addView(error)
@@ -171,7 +177,8 @@ class SettingsView(context: Context, initial: AppConfig, firstRun: Boolean) : Fr
                         prompts = PromptCatalog.normalize(promptDraft)
                     ),
                     appearance = draftAppearance.copy(bodyColor = parseColor(bodyColor, "球色"), eyeColor = parseColor(eyeColor, "眼睛色")),
-                    historyLimit = historyLimit.text.toString().toIntOrNull() ?: 0
+                    historyLimit = historyLimit.text.toString().toIntOrNull()
+                        ?: throw IllegalArgumentException("请填写有效的历史记录保留条数，0 表示不保留。")
                 )
                 AppSettings.validate(config)
                 onSave?.invoke(config, firstRun)

@@ -42,8 +42,8 @@ android {
         applicationId = "com.rabbitball.app"
         minSdk = 30
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 7
+        versionName = "0.1.3"
         testInstrumentationRunner = "com.rabbitball.app.AiSmokeInstrumentation"
     }
     compileOptions {

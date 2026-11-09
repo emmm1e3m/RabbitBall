@@ -99,7 +99,7 @@ class BlurBackgroundView(context: Context) : View(context) {
         if (!isAttachedToWindow) return
         revealAnimator?.cancel()
         revealAnimator = ValueAnimator.ofFloat(revealProgress, 1f).apply {
-            duration = 400L
+            duration = 180L
             interpolator = PathInterpolator(.2f, 0f, 0f, 1f)
             addUpdateListener { applyReveal(it.animatedValue as Float) }
             start()

@@ -5,6 +5,7 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -65,6 +66,22 @@ internal object CameraOrientation {
         if (degrees % 360 == 0) return bitmap
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height,
             Matrix().apply { postRotate(degrees.toFloat()) }, true)
+    }
+
+    /** 只裁掉取景框之外的像素，不缩放；调用方负责回收被替换的位图。 */
+    fun centerCrop(bitmap: Bitmap, width: Int, height: Int): Bitmap {
+        val cropWidth: Int
+        val cropHeight: Int
+        if (bitmap.width.toLong() * height > bitmap.height.toLong() * width) {
+            cropWidth = (bitmap.height.toDouble() * width / height).roundToInt().coerceIn(1, bitmap.width)
+            cropHeight = bitmap.height
+        } else {
+            cropWidth = bitmap.width
+            cropHeight = (bitmap.width.toDouble() * height / width).roundToInt().coerceIn(1, bitmap.height)
+        }
+        if (cropWidth == bitmap.width && cropHeight == bitmap.height) return bitmap
+        return Bitmap.createBitmap(bitmap, (bitmap.width - cropWidth) / 2, (bitmap.height - cropHeight) / 2,
+            cropWidth, cropHeight)
     }
 }
 
@@ -141,6 +158,8 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
         var firstFrame = false
         @Volatile var capturing = false
         @Volatile var photoRotation = 0
+        @Volatile var photoCropWidth = 1
+        @Volatile var photoCropHeight = 1
         @Volatile var closed = false
     }
 
@@ -192,14 +211,9 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
                 }
             }
         }
-        addView(viewport, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
-            leftMargin = dp(16f)
-            rightMargin = dp(16f)
-            topMargin = dp(16f)
-            bottomMargin = dp(148f)
-        })
+        addView(viewport, LayoutParams(0, 0))
         loading.indeterminateTintList = android.content.res.ColorStateList.valueOf(Palette.accent)
-        addView(loading, LayoutParams(dp(28f), dp(28f), Gravity.CENTER))
+        viewport.addView(loading, LayoutParams(dp(28f), dp(28f), Gravity.CENTER))
         flash.setBackgroundColor(Color.WHITE)
         flash.alpha = 0f
         viewport.addView(flash, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -402,8 +416,9 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
     }
 
     fun shutterCenter(): PointF {
-        val bottomInset = rootWindowInsets?.getInsets(android.view.WindowInsets.Type.navigationBars())?.bottom ?: 0
-        return PointF(width * .5f, height - bottomInset - shutterBottomOffset())
+        val safe = rootWindowInsets?.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+        return PointF(((safe?.left ?: 0) + width - (safe?.right ?: 0)) * .5f,
+            height - (safe?.bottom ?: 0) - shutterBottomOffset())
     }
 
     fun takePhoto() {
@@ -414,6 +429,10 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
         if (!current(active) || !active.ready || active.capturing) return
         active.capturing = true
         active.photoRotation = CameraOrientation.jpegRotation(active.sensorOrientation, deviceOrientation, active.front)
+        // 先把可见取景范围映回原始 JPEG，再转正；锁定屏幕方向时也保留同一画面。
+        val swapCrop = (active.sensorOrientation % 180 != 0) != ((display?.rotation ?: Surface.ROTATION_0) % 2 != 0)
+        active.photoCropWidth = if (swapCrop) viewport.height else viewport.width
+        active.photoCropHeight = if (swapCrop) viewport.width else viewport.height
         onReadyChanged?.invoke(false)
         updateControls()
         performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
@@ -456,8 +475,10 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
             BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 })
         if (decoded == null) { main.post { fail(active, "暂时无法读取照片，请重试。") }; return }
         if (!current(active)) { decoded.recycle(); return }
-        val photo = CameraOrientation.normaliseBitmap(decoded, active.photoRotation)
-        if (photo !== decoded) decoded.recycle()
+        val cropped = CameraOrientation.centerCrop(decoded, active.photoCropWidth, active.photoCropHeight)
+        if (cropped !== decoded) decoded.recycle()
+        val photo = CameraOrientation.normaliseBitmap(cropped, active.photoRotation)
+        if (photo !== cropped) cropped.recycle()
         main.post {
             val receiver = onPhoto
             if (!current(active) || receiver == null) { photo.recycle(); return@post }
@@ -572,9 +593,26 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val safe = rootWindowInsets?.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+        val viewWidth = MeasureSpec.getSize(widthMeasureSpec)
+        val viewHeight = MeasureSpec.getSize(heightMeasureSpec)
+        val margin = dp(16f)
+        val safeLeft = (safe?.left ?: 0) + margin
+        val safeTop = (safe?.top ?: 0) + margin
+        val availableWidth = (viewWidth - safeLeft - (safe?.right ?: 0) - margin).coerceAtLeast(1)
+        val shutterY = viewHeight - (safe?.bottom ?: 0) - shutterBottomOffset()
+        val controlsTop = shutterY - max(petHeight * .6f, controlTouch * .5f)
+        val availableHeight = (controlsTop - margin - safeTop).toInt().coerceAtLeast(1)
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val ratioWidth = if (landscape) 4 else 3
+        val ratioHeight = if (landscape) 3 else 4
+        val unit = min(availableWidth / ratioWidth, availableHeight / ratioHeight).coerceAtLeast(1)
+        val frameWidth = ratioWidth * unit
+        val frameHeight = ratioHeight * unit
         (viewport.layoutParams as LayoutParams).apply {
-            topMargin = (safe?.top ?: 0) + dp(16f)
-            bottomMargin = (safe?.bottom ?: 0) + max(dp(148f).toFloat(), shutterBottomOffset() + petHeight * .6f + dp(5f)).roundToInt()
+            width = frameWidth
+            height = frameHeight
+            leftMargin = safeLeft + (availableWidth - frameWidth) / 2
+            topMargin = safeTop + (availableHeight - frameHeight) / 2
         }
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
@@ -584,11 +622,13 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
         val anchor = shutterCenter()
         val touchSize = controlTouch
         val halfTouch = touchSize * .5f
+        val safe = rootWindowInsets?.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+        val sideSpace = min(anchor.x - (safe?.left ?: 0), width - (safe?.right ?: 0) - anchor.x)
         val bodyRadius = 137f * petScale
         val preferred = bodyRadius + controlSide * .5f + dp(32f)
         val minimum = bodyRadius + controlSide * .5f + dp(4f)
-        val edgeMargin = if (width * .5f - halfTouch - dp(16f) >= minimum) dp(16f) else dp(4f)
-        val offset = min(preferred, (width * .5f - halfTouch - edgeMargin).coerceAtLeast(0f))
+        val edgeMargin = if (sideSpace - halfTouch - dp(16f) >= minimum) dp(16f) else dp(4f)
+        val offset = min(preferred, (sideSpace - halfTouch - edgeMargin).coerceAtLeast(0f))
         val controlsY = (anchor.y - halfTouch).roundToInt()
         val closeX = (anchor.x - offset - halfTouch).roundToInt()
         val switchX = (anchor.x + offset - halfTouch).roundToInt()
@@ -611,7 +651,7 @@ class CameraView(context: Context) : FrameLayout(context), SensorEventListener {
                 previewScaleX = scaleX
                 previewScaleY = scaleY
                 previewRotation = targetRotation
-                // 先抵消默认拉伸，再补显示旋转并等比铺满；只裁取景显示，原照片仍完整。
+                // 先抵消默认拉伸，再补显示旋转并等比铺满；拍摄沿用同一中心裁切范围。
                 if (active.ready && ValueAnimator.areAnimatorsEnabled()) {
                     texture.animate().scaleX(scaleX).scaleY(scaleY).rotation(targetRotation)
                         .setDuration(260).setInterpolator(ease).start()

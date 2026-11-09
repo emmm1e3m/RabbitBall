@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS: SettingsFields = {
   petSize: 1,
   bodyColor: '#F58DAA',
   eyeColor: '#F90040',
+  useBuiltinFont: false,
   launchAtLogin: false,
   pauseOnFullscreen: true,
   followMouse: true,
@@ -33,7 +34,7 @@ export function validateSettingsPatch(value: unknown): SettingsPatch {
   const patch: SettingsPatch = {};
   if (input.activationShortcut !== undefined) patch.activationShortcut = normalizeShortcut(input.activationShortcut);
   if (input.prompts !== undefined) patch.prompts = normalizePromptOverrides(input.prompts);
-  for (const key of ['launchAtLogin', 'pauseOnFullscreen', 'followMouse', 'autoCopyScreenshots'] as const) {
+  for (const key of ['launchAtLogin', 'pauseOnFullscreen', 'followMouse', 'autoCopyScreenshots', 'useBuiltinFont'] as const) {
     if (input[key] === undefined) continue;
     if (typeof input[key] !== 'boolean') throw new Error('开关设置无效。');
     patch[key] = input[key];
@@ -56,7 +57,7 @@ export function validateSettingsPatch(value: unknown): SettingsPatch {
     patch.maxToolRounds = input.maxToolRounds;
   }
   if (input.historyLimit !== undefined) {
-    if (typeof input.historyLimit !== 'number' || !Number.isSafeInteger(input.historyLimit) || input.historyLimit < 1) throw new Error('历史记录保留条数应为正整数。');
+    if (typeof input.historyLimit !== 'number' || !Number.isSafeInteger(input.historyLimit) || input.historyLimit < 0) throw new Error('历史记录保留条数应为非负整数。');
     patch.historyLimit = input.historyLimit;
   }
   if (input.model !== undefined) {

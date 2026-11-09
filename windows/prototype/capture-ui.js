@@ -72,6 +72,7 @@
     if(session)hide(true);
     if(data.shortcut)activationShortcut=shortcut.normalizeShortcut(data.shortcut);
     if(data.color)root.style.setProperty('--capture-accent',data.color);
+    if(typeof data.useBuiltinFont==='boolean')document.documentElement.dataset.builtinFont=String(data.useBuiltinFont);
     const current={id:data.sessionId,native,visible,context:data.context,drag:null,frame:null,pointerId:null,pending:Promise.resolve(),finishing:false,failed:false,count:data.context?.images?.length??0};
     session=current;background.hidden=!!data.backgroundBitmap;bitmap.hidden=!data.backgroundBitmap;root.dataset.demo=String(!!data.context?.demo);
     if(data.backgroundBitmap){

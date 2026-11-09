@@ -65,12 +65,13 @@
     #rabbit-chat-root .chat-context-remove svg { width:8px;height:8px;stroke-width:1.8; }
     #rabbit-chat-root .chat-shortcuts { position:absolute;left:8px;top:9px;display:flex;align-items:center;gap:5px;transition:opacity .16s,transform .26s; }
     #rabbit-chat-root.is-expanded .chat-shortcuts { opacity:0;transform:translateY(-6px);pointer-events:none; }
-    #rabbit-chat-root .chat-shortcut { display:grid;place-items:center;width:32px;height:30px;padding:0;border:0;border-radius:9px;background:#F4F4F6;color:var(--chat-secondary);transition:color .2s,background .2s,transform .2s; }
+    #rabbit-chat-root .chat-shortcut { display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:50%;background:#F4F4F6;color:var(--chat-secondary);transition:color .2s,background .2s,transform .2s; }
     #rabbit-chat-root .chat-shortcut:hover { color:var(--chat-accent);background:var(--chat-soft);transform:translateY(-1px); }
     #rabbit-chat-root .chat-shortcut svg { width:16px;height:16px; }
     #rabbit-chat-root .chat-shortcut svg > * { stroke-width:1.5px;vector-effect:non-scaling-stroke; }
     #rabbit-chat-root .chat-shortcut .letter-t { font-family:var(--rabbit-font);font-size:19px;font-weight:500;line-height:1; }
     #rabbit-chat-root .chat-history-toggle { position:absolute;right:8px;top:9px; }
+    #rabbit-chat-root .chat-history-toggle[hidden] { display:none; }
     #rabbit-chat-root .chat-history-toggle svg { width:18px;height:18px;transform:scale(.9); }
     #rabbit-chat-root .chat-history-toggle[aria-expanded="true"] { color:var(--chat-accent);background:var(--chat-soft); }
     #rabbit-chat-root .chat-archive { position:absolute;inset:0;opacity:0;transform:translateY(10px);pointer-events:none;transition:opacity .2s,transform .3s; }
@@ -231,6 +232,7 @@
   }
   function endPetDrag() { state.dragging=false;root.classList.remove('is-pet-dragging');focusComposer(); }
   function setHistoryOpen(value) {
+    if(value&&historyButton.hidden)return;
     state.historyOpen=value;state.historyRequest++;
     root.classList.toggle('is-choosing-history',value);
     archive.inert=!value;archive.setAttribute('aria-hidden',String(!value));form.inert=value;
@@ -238,6 +240,14 @@
     collapseButton.setAttribute('aria-label',value?'返回对话':'收起对话');collapseButton.title=value?'返回对话':'收起对话';
     if(value){input.blur();emit('focus',{bounds:null,active:false});}
     setPresentation(state.presentation);
+  }
+  function applyHistorySettings(settings) {
+    if(!Number.isSafeInteger(settings.historyLimit)||settings.historyLimit<0)return;
+    historyButton.hidden=settings.historyLimit===0;
+    if(historyButton.hidden){
+      if(state.historyOpen)setHistoryOpen(false);
+      archiveList.replaceChildren();
+    }
   }
   function archiveStatus(text) {
     const status=document.createElement('div');status.className='chat-archive-empty';status.textContent=text;archiveList.replaceChildren(status);
@@ -559,6 +569,8 @@
   fileInput.addEventListener('cancel',()=>{state.pickingFile=false;if(state.open)input.focus({preventScroll:true});});
   shortcuts.querySelectorAll('.chat-shortcut').forEach(button=>button.addEventListener('click',()=>send(button.dataset.intent)));
   historyButton.addEventListener('click',()=>{setHistoryOpen(!state.historyOpen);if(state.historyOpen)void loadHistory();});
+  for(const name of ['settings:change','settings:saved'])document.addEventListener(name,event=>applyHistorySettings(event.detail.settings));
+  applyHistorySettings(window.RabbitSettings?.getSnapshot().settings??{historyLimit:10});
   for(const name of ['pointerdown','pointerup','pointermove','click','dblclick'])root.addEventListener(name,event=>{if(name==='pointerdown')cancelDemo();event.stopPropagation();});
   root.addEventListener('keydown',event=>{cancelDemo();if(event.key==='Escape'){event.preventDefault();close();}event.stopPropagation();});
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&(state.open||state.opening)&&!state.selecting){event.preventDefault();close();}});

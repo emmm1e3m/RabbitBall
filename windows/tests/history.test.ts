@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { HistoryStore } from '../electron/history.ts';
@@ -127,4 +127,79 @@ test('取消保存已显示正文并剔除未提交工具调用；同会话的�
   next.onEvent({ id: 'request-turn-2', type: 'done', text: '新回复' }); await next.save();
   run.onEvent({ id: 'request-turn-1', type: 'done', text: '旧回复' }); await run.save();
   assert.equal((await reload()).get('conversation-1')?.messages[3].content, '新回复');
+});
+
+test('零条模式不创建历史文件，连续问答与重新生成仍沿用当前内存上下文', async t => {
+  const { store, directory } = await fixture(t, 0);
+  const state = createAgentConversation(), sent: Array<{ messages: unknown[] }> = [];
+  const fetchBefore = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => { sent.push(JSON.parse(String(init?.body))); return response('第 ' + sent.length + ' 次回答'); };
+  t.after(() => { globalThis.fetch = fetchBefore; });
+  const first = { ...request(), text: '记住数字 7' };
+  const runFirst = store.begin(first, state);
+  await runAgent(first, settings, { signal: new AbortController().signal, conversation: state, onEvent: runFirst.onEvent });
+  await runFirst.save();
+  const prefix = structuredClone(state.messages);
+  const next = { ...request('conversation-1', 'turn-2'), text: '刚才的数字是什么？' };
+  const runNext = store.begin(next, state);
+  await runAgent(next, settings, { signal: new AbortController().signal, conversation: state, onEvent: runNext.onEvent });
+  await runNext.save();
+  assert.deepEqual(sent[1].messages.slice(0, prefix.length), prefix);
+  const regenerate = { ...first, regenerate: true }, again = store.begin(regenerate, state);
+  await runAgent(regenerate, settings, { signal: new AbortController().signal, conversation: state, onEvent: again.onEvent });
+  await again.save(); await store.flush();
+  assert.deepEqual(sent[2].messages, prefix.slice(0, 2));
+  assert.equal(state.turns.length, 1);
+  assert.equal(state.messages.at(-1)?.content, '第 3 次回答');
+  assert.deepEqual(store.list(), []);
+  assert.equal(store.get('conversation-1'), null);
+  assert.equal(store.getConversation('conversation-1'), undefined);
+  assert.deepEqual(await readdir(directory), []);
+
+  // 启用后可直接重生成先前仅存在内存里的问题，旧的零条 run 仍不获得保存权限。
+  await store.setLimit(2);
+  const enabled = store.begin(regenerate, state);
+  await runAgent(regenerate, settings, { signal: new AbortController().signal, conversation: state, onEvent: enabled.onEvent });
+  await enabled.save(); await again.save();
+  assert.deepEqual(store.get('conversation-1')?.messages.map(message => message.content), ['记住数字 7', '第 4 次回答']);
+  assert.equal(store.getConversation('conversation-1')?.turns.length, 1);
+  assert.equal((await readdir(directory)).length, 1);
+});
+
+test('改为零条清理已有和排队历史，旧请求不能复活；恢复正数后新记录正常保存', async t => {
+  const { store, directory } = await fixture(t);
+  const old = store.begin(request('old'), conversation());
+  const pending = old.save();
+  const disabled = store.setLimit(0);
+  old.onEvent({ id: 'request-turn-1', type: 'done', text: '不应恢复的回答' });
+  const ignored = store.begin(request('new-while-disabled'), conversation());
+  ignored.onEvent({ id: 'request-turn-1', type: 'done', text: '不应保存的回答' });
+  await Promise.all([pending, disabled, old.save(), ignored.save()]);
+  await store.flush();
+  assert.deepEqual(store.list(), []);
+  assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'history.json'), 'utf8')).entries, []);
+  await store.setLimit(3);
+  const resumed = store.begin(request('new-after-enabled'), conversation());
+  resumed.onEvent({ id: 'request-turn-1', type: 'done', text: '保存的新回答' });
+  await resumed.save(); await ignored.save(); await old.save();
+  assert.deepEqual(store.list().map(entry => entry.id), ['new-after-enabled']);
+  const restored = new HistoryStore(directory, 3); await restored.load();
+  assert.deepEqual(restored.list().map(entry => entry.id), ['new-after-enabled']);
+
+  const zeroOnStartup = new HistoryStore(directory, 0); await zeroOnStartup.load();
+  assert.deepEqual(zeroOnStartup.list(), []);
+  assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'history.json'), 'utf8')).entries, []);
+});
+
+test('恢复保存后已有较新历史时，仍可重新生成无历史条目的旧问题', async t => {
+  const { store } = await fixture(t, 0);
+  const state = conversation();
+  await store.setLimit(2);
+  const next = store.begin({ ...request('conversation-1', 'turn-2'), text: '重新启用后发送的问题' }, state);
+  next.onEvent({ id: 'request-turn-2', type: 'done', text: '较新回答' }); await next.save();
+  const again = store.begin({ ...request(), regenerate: true }, state);
+  again.onEvent({ id: 'request-turn-1', type: 'done', text: '旧问题的新回答' }); await again.save();
+  assert.deepEqual(store.get('conversation-1')?.messages.map(message => message.content), ['解释这张截图', '旧问题的新回答']);
+  assert.throws(() => store.begin({ ...request('missing'), turnId: 'missing-turn', regenerate: true }, state), /找不到需要重新生成/);
+  assert.equal(store.get('missing'), null);
 });

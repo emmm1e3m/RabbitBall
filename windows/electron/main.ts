@@ -413,7 +413,7 @@ function showCapture(session: CaptureSession): void {
   if (captureSession !== session || !session.holdReady || session.released || session.visible || !session.context || !session.background) return;
   session.visible = true;
   const settings = store.getPublic();
-  void captureOverlays!.show({ sessionId: session.id, viewports: session.viewports, background: session.background, physicalBounds: session.physicalBounds, context: rendererContext(session.context), shortcut: settings.activationShortcut, color: settings.eyeColor }).then(() => {
+  void captureOverlays!.show({ sessionId: session.id, viewports: session.viewports, background: session.background, physicalBounds: session.physicalBounds, context: rendererContext(session.context), shortcut: settings.activationShortcut, color: settings.eyeColor, useBuiltinFont: settings.useBuiltinFont }).then(() => {
     if (captureSession === session) updateCaptureFrame(session);
   }).catch(() => {
     if (captureSession === session) cancelCapture();
@@ -604,7 +604,8 @@ function registerIpc(): void {
     const controller = new AbortController();
     const context = request.contextId && currentContext ? { ...currentContext, images: request.imageIds!.map(id => currentContext!.images.find(image => image.id === id)!) } : undefined;
     const firstScreenshot = context?.images[0];
-    const history = historyStore.begin(request, conversation, firstScreenshot, historyStore.list().some(entry => entry.id === conversationId) ? undefined : historyThumbnail(firstScreenshot));
+    const thumbnail = store.getPublic().historyLimit > 0 && !historyStore.list().some(entry => entry.id === conversationId) ? historyThumbnail(firstScreenshot) : undefined;
+    const history = historyStore.begin(request, conversation, firstScreenshot, thumbnail);
     activeRequest = { id: request.id, conversationId, controller, history };
     void runAgent(request, store.getPrivate(), { signal: controller.signal, conversation, context, onEvent: event => {
       history.onEvent(event);
@@ -724,9 +725,13 @@ async function createWindow(): Promise<void> {
   }, 1000 / 30);
 }
 
-if (!app.requestSingleInstanceLock()) app.quit();
+const quitRequested = process.argv.includes('--rabbitball-quit');
+if (!app.requestSingleInstanceLock({ command: quitRequested ? 'quit' : 'open' }) || quitRequested) app.quit();
 else {
-  app.on('second-instance', () => { if (window && !window.isDestroyed()) openSettings(); });
+  app.on('second-instance', (_event, _argv, _directory, data) => {
+    if ((data as { command?: unknown })?.command === 'quit') app.quit();
+    else if (window && !window.isDestroyed()) openSettings();
+  });
   app.on('before-quit', event => {
     if (quitting) return;
     event.preventDefault();

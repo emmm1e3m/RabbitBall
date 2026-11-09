@@ -12,12 +12,14 @@ import android.graphics.Path
 import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.net.Uri
 import android.text.InputType
 import android.transition.ChangeBounds
 import android.transition.Fade
 import android.transition.TransitionManager
 import android.transition.TransitionSet
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -27,14 +29,18 @@ import android.view.animation.OvershootInterpolator
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import com.rabbitball.app.ChatTurn
 import com.rabbitball.app.AppSettings
+import com.rabbitball.app.HistoryPreview
 import kotlin.math.max
-import kotlin.math.min
 
 class SearchView(context: Context) : FrameLayout(context) {
     var onSend: ((String, String) -> Unit)? = null
@@ -43,12 +49,18 @@ class SearchView(context: Context) : FrameLayout(context) {
     var onCancelRequest: (() -> Unit)? = null
     var onHistory: (() -> Unit)? = null
     var onCameraRequested: (() -> Unit)? = null
+    var onCameraClosed: (() -> Unit)? = null
     var onPhotoCaptured: ((Bitmap) -> Unit)? = null
     var onPickImageRequested: (() -> Unit)? = null
+    var onRemoveAttachment: (() -> Unit)? = null
+    var onOpenSource: ((Uri) -> Unit)? = null
     val selectionView = SelectionView(context)
     val selection: RectF? get() = selectionView.selection?.let { RectF(it) }
 
     private fun dp(value: Float) = Palette.dp(context, value)
+    private val actionSide = dp(40f)
+    private val composerTouchSide = dp(44f)
+    private val shortcutHeight = dp(Palette.cornerSurface * 2f)
     private val petDock = PetDock(context)
     private var mascotWidth = petDock.viewWidth
     private var mascotHeight = petDock.viewHeight
@@ -56,8 +68,10 @@ class SearchView(context: Context) : FrameLayout(context) {
     private val blur = BlurBackgroundView(context)
     private val sheet = LinearLayout(context)
     private val composer = LinearLayout(context)
-    private val input = EditText(context)
-    private val send = ActionIcon(context, "send")
+    private val input = AttachmentInput(context)
+    private val attachmentChip = FrameLayout(context)
+    private val attachmentImage = ImageView(context)
+    private val send = ActionIcon(context, "send", 1.2f)
     private val mascot = RabbitView(context)
     private val petEffects = PetEffectsView(context)
     private val shortcuts = LinearLayout(context)
@@ -65,6 +79,7 @@ class SearchView(context: Context) : FrameLayout(context) {
     private val status = Palette.text(context, "", 12f, Palette.muted)
     private val recapture = ActionIcon(context, "capture")
     private lateinit var photoButton: View
+    private lateinit var historyButton: View
     private var photoMenu: PhotoSourceMenu? = null
     private var pendingChatFlight: PointF? = null
     private var busy = false
@@ -74,6 +89,7 @@ class SearchView(context: Context) : FrameLayout(context) {
     private var topInset = 0
     private var bottomInset = 0
     private var navigationInset = 0
+    private var imeVisible = false
     private var screenshotBottomInset: Int? = null
     private var mascotPosition: PointF? = null
     private var mascotDragging = false
@@ -128,6 +144,10 @@ class SearchView(context: Context) : FrameLayout(context) {
         }
         enableMascotDragging()
         setOnApplyWindowInsetsListener { _, insets ->
+            val keyboardVisible = insets.isVisible(WindowInsets.Type.ime())
+            // 系统先关闭输入法时同步结束编辑，不让下一次返回再被残留焦点吞掉。
+            if (imeVisible && !keyboardVisible) input.clearFocus()
+            imeVisible = keyboardVisible
             topInset = insets.getInsets(WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()).top
             navigationInset = insets.getInsets(WindowInsets.Type.navigationBars()).bottom
             bottomInset = max(
@@ -143,8 +163,8 @@ class SearchView(context: Context) : FrameLayout(context) {
     }
 
     private fun buildEmptyState() {
-        recapture.contentDescription = "开启即开即选"
-        recapture.tooltipText = "开启即开即选"
+        recapture.contentDescription = "设置助理或重新读取屏幕"
+        recapture.tooltipText = "设置助理或重新读取屏幕"
         recapture.background = Palette.ripple(context, Color.WHITE, 28f, Palette.line)
         recapture.setOnClickListener { onCaptureSetup?.invoke() ?: onRecapture?.invoke() }
         addView(recapture, LayoutParams(dp(56f), dp(56f), Gravity.CENTER))
@@ -152,6 +172,7 @@ class SearchView(context: Context) : FrameLayout(context) {
 
     private fun buildConversation() {
         conversation.visibility = GONE
+        conversation.onOpenSource = { onOpenSource?.invoke(it) }
         addView(conversation, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
             leftMargin = dp(16f)
             rightMargin = dp(16f)
@@ -163,16 +184,17 @@ class SearchView(context: Context) : FrameLayout(context) {
         tooltipText = description
         isClickable = true
         isFocusable = true
-        val icon = ActionIcon(context, kind).apply {
-            lineWidth = if (embedded) 2.25f else 1.5f
-            inkColor = if (embedded) Palette.muted else 0xFF785D6A.toInt()
+        val icon = ActionIcon(context, kind, 1.2f).apply {
+            inkColor = Palette.accent
             isClickable = false
             isFocusable = false
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
             isDuplicateParentStateEnabled = true
-            background = Palette.ripple(context, if (embedded) Color.TRANSPARENT else 0xFFF4F4F6.toInt(), Palette.cornerSmall)
+            background = Palette.ripple(context, if (embedded) Color.TRANSPARENT else 0xCCFFFFFF.toInt(),
+                if (embedded) 20f else Palette.cornerSurface)
         }
-        addView(icon, LayoutParams(dp(32f), dp(if (embedded) 32f else 30f), Gravity.CENTER))
+        val side = if (embedded) actionSide else shortcutHeight
+        addView(icon, LayoutParams(side, side, Gravity.CENTER))
         setOnTouchListener { _, event ->
             if (ValueAnimator.areAnimatorsEnabled()) {
                 when (event.actionMasked) {
@@ -208,6 +230,18 @@ class SearchView(context: Context) : FrameLayout(context) {
         return true
     }
 
+    /** 先退出当前局部层；根页面的返回由宿主决定。 */
+    fun handleBack(): Boolean {
+        if (dismissPhotoMenu()) return true
+        if (closeCamera()) return true
+        if (rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true) {
+            input.clearFocus()
+            windowInsetsController?.hide(WindowInsets.Type.ime())
+            return true
+        }
+        return false
+    }
+
     private fun closePhotoMenuImmediately() {
         photoMenu?.dismissImmediately()
         photoMenu = null
@@ -236,7 +270,7 @@ class SearchView(context: Context) : FrameLayout(context) {
         shortcuts.translationY = 0f
         if (chatMode && animate && !covered && shortcuts.visibility == VISIBLE &&
             isAttachedToWindow && ValueAnimator.areAnimatorsEnabled()) {
-            shortcuts.animate().alpha(0f).translationY(dp(6f).toFloat()).setDuration(160)
+            shortcuts.animate().alpha(0f).translationY(dp(6f).toFloat()).setStartDelay(0).setDuration(160)
                 .withEndAction {
                     if (chatMode) {
                         shortcuts.visibility = GONE
@@ -258,41 +292,58 @@ class SearchView(context: Context) : FrameLayout(context) {
 
         shortcuts.gravity = Gravity.CENTER_VERTICAL
         for ((action, description) in listOf("search" to "搜索", "extract" to "提取文字", "translate" to "翻译")) {
-            shortcuts.addView(shortcut(action, description) { dispatch(action) }, LinearLayout.LayoutParams(dp(37f), dp(44f)))
+            shortcuts.addView(shortcut(action, description) { dispatch(action) }, LinearLayout.LayoutParams(shortcutHeight, shortcutHeight).apply {
+                rightMargin = dp(8f)
+            })
         }
         shortcuts.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-        shortcuts.addView(shortcut("history", "历史记录") { onHistory?.invoke() }, LinearLayout.LayoutParams(dp(37f), dp(44f)))
-        addView(shortcuts, LayoutParams(LayoutParams.MATCH_PARENT, dp(44f)).apply {
-            leftMargin = dp(24f)
-            rightMargin = dp(24f)
+        historyButton = shortcut("history", "历史记录") { onHistory?.invoke() }
+        shortcuts.addView(historyButton, LinearLayout.LayoutParams(shortcutHeight, shortcutHeight))
+        refreshHistoryAvailability()
+        addView(shortcuts, LayoutParams(LayoutParams.MATCH_PARENT, shortcutHeight).apply {
+            // 工具圆心与输入两端圆心共用同一轴，较大的工具圆向两侧各伸出 4dp。
+            val controlInset = sheet.paddingLeft + (composerTouchSide - shortcutHeight) / 2
+            leftMargin = dp(16f) + controlInset
+            rightMargin = dp(16f) + controlInset
         })
 
-        composer.gravity = Gravity.CENTER_VERTICAL
-        composer.minimumHeight = dp(44f)
-        composer.setPadding(dp(3f), 0, dp(3f), 0)
+        composer.gravity = Gravity.BOTTOM
+        composer.minimumHeight = composerTouchSide
         photoButton = shortcut("camera", "拍照或上传照片", true) { togglePhotoMenu() }
-        composer.addView(photoButton, LinearLayout.LayoutParams(dp(44f), dp(44f)))
+        composer.addView(photoButton, LinearLayout.LayoutParams(composerTouchSide, composerTouchSide))
+        buildAttachmentPreview()
+        composer.addView(attachmentChip, LinearLayout.LayoutParams(dp(48f), composerTouchSide))
         input.setTextColor(Palette.ink)
         input.setHintTextColor(Palette.muted)
         input.textSize = 15f
         input.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
         input.background = null
-        input.setPadding(0, dp(8f), dp(8f), dp(8f))
+        input.setPadding(dp(4f), dp(10f), dp(8f), dp(10f))
         input.hint = ""
         input.contentDescription = "输入问题"
         input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         input.minLines = 1
-        input.maxLines = 3
-        input.imeOptions = EditorInfo.IME_ACTION_SEND
+        input.minimumHeight = composerTouchSide
+        input.gravity = Gravity.TOP or Gravity.START
+        input.setHorizontallyScrolling(false)
+        input.isVerticalScrollBarEnabled = true
+        input.scrollBarStyle = SCROLLBARS_INSIDE_OVERLAY
+        input.imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_EXTRACT_UI
         input.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND) { dispatch("ask"); true } else false
         }
         input.setOnFocusChangeListener { _, _ -> updatePetGaze() }
+        input.onDeleteEmpty = ::removeAttachment
         composer.addView(input, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         send.contentDescription = "发送问题"
         send.background = Palette.ripple(context, Palette.blush, 20f)
         send.setOnClickListener { if (busy) onCancelRequest?.invoke() else dispatch("ask") }
-        composer.addView(send, LinearLayout.LayoutParams(dp(40f), dp(40f)))
+        val sendTouchArea = FrameLayout(context).apply {
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+            addView(send, LayoutParams(actionSide, actionSide, Gravity.CENTER))
+            setOnClickListener { if (send.isEnabled) send.performClick() }
+        }
+        composer.addView(sendTouchArea, LinearLayout.LayoutParams(composerTouchSide, composerTouchSide))
         sheet.addView(composer, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
         status.visibility = GONE
@@ -310,11 +361,48 @@ class SearchView(context: Context) : FrameLayout(context) {
         })
     }
 
+    private fun buildAttachmentPreview() {
+        attachmentChip.visibility = GONE
+        attachmentImage.contentDescription = "待发送图片"
+        attachmentImage.scaleType = ImageView.ScaleType.CENTER_CROP
+        attachmentImage.background = Palette.round(context, Color.WHITE, 8f, Palette.line)
+        attachmentImage.clipToOutline = true
+        attachmentChip.addView(attachmentImage, LayoutParams(dp(40f), dp(32f), Gravity.CENTER_VERTICAL or Gravity.START))
+        val remove = FrameLayout(context).apply {
+            contentDescription = "移除待发送图片"
+            tooltipText = "移除待发送图片"
+            isFocusable = true
+            addView(ActionIcon(context, "close").apply {
+                inkColor = Palette.accent
+                background = Palette.ripple(context, Color.WHITE, 10f, Palette.line)
+                isClickable = false
+                isFocusable = false
+                importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+                isDuplicateParentStateEnabled = true
+            }, LayoutParams(dp(20f), dp(20f), Gravity.CENTER))
+            setOnClickListener { removeAttachment() }
+        }
+        attachmentChip.addView(remove, LayoutParams(dp(28f), dp(28f), Gravity.TOP or Gravity.END))
+    }
+
+    /** 只展示当前待发送图片；移除附件不触碰框选画面与背景。 */
+    fun setAttachmentPreview(bitmap: Bitmap?) {
+        if (bitmap == null) attachmentImage.setImageDrawable(null) else attachmentImage.setImageBitmap(bitmap)
+        attachmentChip.visibility = if (bitmap == null) GONE else VISIBLE
+    }
+
+    private fun removeAttachment(): Boolean {
+        if (attachmentImage.drawable == null) return false
+        setAttachmentPreview(null)
+        onRemoveAttachment?.invoke()
+        return true
+    }
+
     private fun dispatch(action: String) {
         if (busy || photoLoading) return
         closePhotoMenuImmediately()
         val value = input.text.toString().trim()
-        if (action == "ask" && value.isBlank()) {
+        if (action == "ask" && value.isBlank() && attachmentImage.drawable == null) {
             input.requestFocus()
             context.getSystemService(InputMethodManager::class.java).showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
             return
@@ -436,6 +524,7 @@ class SearchView(context: Context) : FrameLayout(context) {
                 updateProcessingVisibility()
                 applySystemBarContrast()
                 requestLayout()
+                onCameraClosed?.invoke()
             }
         }
         val reveal: () -> Unit = {
@@ -495,6 +584,10 @@ class SearchView(context: Context) : FrameLayout(context) {
         mascot.alpha = if (cameraClosing || cameraPhotoPending || flying || ready) 1f else .6f
     }
 
+    fun refreshHistoryAvailability() {
+        historyButton.visibility = if (AppSettings(context).historyLimit > 0) VISIBLE else GONE
+    }
+
     /** 保存外观后更新现有角色，保留选区、草稿、消息和滚动位置。 */
     fun refreshAppearance() {
         val centerX = mascot.x + mascotWidth * .5f
@@ -546,7 +639,8 @@ class SearchView(context: Context) : FrameLayout(context) {
                 selectionView.scaleX = scale
                 selectionView.scaleY = scale
                 selectionView.animate().alpha(1f).scaleX(1f).scaleY(1f)
-                    .setDuration(if (photo) 380L else 400L)
+                    .setStartDelay(if (photo) 0L else 100L)
+                    .setDuration(if (photo) 380L else 280L)
                     .setInterpolator(if (photo) OvershootInterpolator(.45f) else DecelerateInterpolator(1.6f)).start()
             }
         }
@@ -572,11 +666,15 @@ class SearchView(context: Context) : FrameLayout(context) {
     fun beginTurn(userText: String) {
         enterConversation()
         conversation.beginTurn(userText)
+        setAttachmentPreview(null)
         input.text.clear()
     }
 
+    fun setFirstImage(preview: HistoryPreview?) = conversation.setFirstImage(preview)
+
     fun restoreConversation(turns: List<ChatTurn>) {
         setBusy(false)
+        setAttachmentPreview(null)
         input.text.clear()
         enterConversation()
         conversation.restoreConversation(turns)
@@ -584,6 +682,7 @@ class SearchView(context: Context) : FrameLayout(context) {
 
     fun release() {
         setBusy(false)
+        setAttachmentPreview(null)
         closePhotoMenuImmediately()
         dismissCamera(false)
         removeView(conversation)
@@ -651,19 +750,41 @@ class SearchView(context: Context) : FrameLayout(context) {
         return PointF(mascotLocation[0].toFloat(), mascotLocation[1].toFloat())
     }
 
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        // 先确定输入条和提示的高度，WebView 只以最终消息视口参与测量及布局。
+        // 先铺满整屏再缩小，会让原生触摸滚动仍使用整屏高度计算底部边界。
+        if (status.visibility != GONE) measureChildWithMargins(status, widthMeasureSpec, 0, heightMeasureSpec, 0)
+        val statusHeight = if (status.visibility != GONE) status.measuredHeight else 0
+        val sheetParams = sheet.layoutParams as LayoutParams
+        val availableWidth = MeasureSpec.getSize(widthMeasureSpec) - sheetParams.leftMargin - sheetParams.rightMargin
+        val availableHeight = MeasureSpec.getSize(heightMeasureSpec) - topInset - sheetParams.bottomMargin - dp(8f)
+        val toolsHeight = if (shortcuts.visibility != GONE) shortcutHeight + dp(8f) else 0
+        val statusSpace = if (statusHeight > 0) statusHeight + dp(8f) else 0
+        val contentSpace = minOf(dp(96f), (availableHeight * .2f).toInt())
+        val maximumSheetHeight = minOf((availableWidth * .75f).toInt(), availableHeight - toolsHeight - statusSpace - contentSpace)
+        val maximumInputHeight = (maximumSheetHeight - sheet.paddingTop - sheet.paddingBottom).coerceAtLeast(composerTouchSide)
+        if (input.maxHeight != maximumInputHeight) input.maxHeight = maximumInputHeight
+        measureChildWithMargins(sheet, widthMeasureSpec, 0, heightMeasureSpec, 0)
+        val sheetTop = MeasureSpec.getSize(heightMeasureSpec) - sheetParams.bottomMargin - sheet.measuredHeight
+        val statusTop = sheetTop - dp(4f) - statusHeight
+        val toolsTop = (if (statusHeight > 0) statusTop - dp(4f) else sheetTop - dp(8f)) - shortcutHeight
+        val chatBottom = chatContentBottom(sheetTop, statusTop, toolsTop)
+        val showPet = chatMode && chatBottom - chatPetTop() - mascotHeight - mascotGap >= dp(48f)
+        val chatTop = if (showPet) chatPetTop() + mascotHeight + mascotGap else topInset + dp(8f)
+        (conversation.layoutParams as LayoutParams).apply {
+            height = (chatBottom - chatTop).coerceAtLeast(0)
+            topMargin = chatTop
+        }
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
         val statusHeight = if (status.visibility != GONE) status.measuredHeight else 0
         val statusBottom = sheet.top - dp(4f)
         status.layout(dp(24f), statusBottom - statusHeight, width - dp(24f), statusBottom)
         val toolsBottom = if (statusHeight > 0) status.top - dp(4f) else sheet.top - dp(8f)
-        shortcuts.layout(dp(24f), toolsBottom - dp(44f), width - dp(24f), toolsBottom)
-        val chatTop = if (chatMode && canShowChatPet()) chatPetTop() + mascotHeight + mascotGap else topInset + dp(8f)
-        val chatBottom = chatContentBottom().coerceAtLeast(chatTop)
-        val chatWidth = sheet.width
-        conversation.measure(MeasureSpec.makeMeasureSpec(chatWidth, MeasureSpec.EXACTLY),
-            MeasureSpec.makeMeasureSpec(chatBottom - chatTop, MeasureSpec.EXACTLY))
-        conversation.layout(sheet.left, chatTop, sheet.right, chatBottom)
+        shortcuts.layout(shortcuts.left, toolsBottom - shortcutHeight, shortcuts.right, toolsBottom)
         val keyboardOffset = (bottomInset - navigationInset).coerceAtLeast(0)
         // 键盘只平移原图，保留弹出前的视口尺寸与选区坐标。
         if (keyboardOffset == 0 || screenshotBottomInset == null) {
@@ -678,6 +799,7 @@ class SearchView(context: Context) : FrameLayout(context) {
                 cameraEntryPending = false
                 flyCameraPet(false, true)
             }
+            if (!cameraClosing && petFlight?.isRunning != true) cameraPetPosition = cameraPetTarget(false)
             cameraPetPosition?.let { placeMascot(it.x, it.y) }
         } else {
             val start = pendingChatFlight
@@ -705,10 +827,10 @@ class SearchView(context: Context) : FrameLayout(context) {
 
     private fun chatPetTop() = topInset + dp(8f)
 
-    private fun chatContentBottom(): Int = when {
-        chatMode && shortcuts.visibility == VISIBLE -> shortcuts.top - dp(8f)
-        status.visibility != GONE -> status.top - dp(8f)
-        else -> sheet.top - dp(8f)
+    private fun chatContentBottom(sheetTop: Int = sheet.top, statusTop: Int = status.top, toolsTop: Int = shortcuts.top): Int = when {
+        chatMode && shortcuts.visibility == VISIBLE -> toolsTop - dp(8f)
+        status.visibility != GONE -> statusTop - dp(8f)
+        else -> sheetTop - dp(8f)
     }
 
     private fun canShowChatPet() = chatContentBottom() - chatPetTop() - mascotHeight - mascotGap >= dp(48f)
@@ -893,13 +1015,13 @@ class SearchView(context: Context) : FrameLayout(context) {
     private fun applySystemBarContrast() {
         val statusMask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
         val navigationMask = WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-        val appearance = if (cameraView != null) 0 else
-            (if (lightStatusBar) statusMask else 0) or (if (lightNavigationBar) navigationMask else 0)
+        val appearance = (if (lightStatusBar) statusMask else 0) or (if (lightNavigationBar) navigationMask else 0)
         windowInsetsController?.setSystemBarsAppearance(appearance, statusMask or navigationMask)
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        refreshHistoryAvailability()
         requestApplyInsets()
         applySystemBarContrast()
         resumeCamera()
@@ -925,9 +1047,16 @@ class SearchView(context: Context) : FrameLayout(context) {
             mascot.setDockPose(left, 0f)
             return
         }
-        sheet.translationY = dp(24f).toFloat()
+        sheet.translationY = dp(12f).toFloat()
         sheet.alpha = 0f
-        sheet.animate().translationY(0f).alpha(1f).setDuration(380).setInterpolator(OvershootInterpolator(.35f)).start()
+        sheet.animate().translationY(0f).alpha(1f).setStartDelay(100).setDuration(280)
+            .setInterpolator(OvershootInterpolator(.35f)).start()
+        if (!chatMode) {
+            shortcuts.alpha = 0f
+            shortcuts.translationY = dp(6f).toFloat()
+            shortcuts.animate().translationY(0f).alpha(1f).setStartDelay(100).setDuration(280)
+                .setInterpolator(DecelerateInterpolator(1.6f)).start()
+        }
         // 首次布局后再求真实停靠点；设置暂离和更换照片不重播入场。
         val origin = if (docked) petDock.position(width, height, topInset, navigationInset)
             else PointF(width.toFloat(), mascot.top - dp(18f).toFloat())
@@ -936,7 +1065,7 @@ class SearchView(context: Context) : FrameLayout(context) {
         mascot.rotation = if (origin.x < mascot.left) 18f else -18f
         mascot.setDockPose(left, if (docked) 1f else 0f, snap = true)
         mascot.animate().translationX(0f).translationY(0f).rotation(0f)
-            .setStartDelay(30).setDuration(433).setInterpolator(OvershootInterpolator(.7f))
+            .setStartDelay(100).setDuration(360).setInterpolator(OvershootInterpolator(.7f))
             .setUpdateListener {
                 if (docked) mascot.setDockPose(left, 1f - it.animatedFraction)
                 updatePetGaze()
@@ -970,8 +1099,50 @@ class SearchView(context: Context) : FrameLayout(context) {
     }
 }
 
+/** 空输入的退格与 PC 一致移除待发图片，兼容软键盘和实体键盘。 */
+private class AttachmentInput(context: Context) : EditText(context) {
+    var onDeleteEmpty: (() -> Boolean)? = null
+    private var consumedDelete = false
+
+    private fun deleteAttachment(): Boolean {
+        val value = text
+        if (value.isNotEmpty() || BaseInputConnection.getComposingSpanStart(value) >= 0) return false
+        return onDeleteEmpty?.invoke() == true
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_DEL && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed &&
+            deleteAttachment()) {
+            consumedDelete = true
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_DEL && consumedDelete) {
+            consumedDelete = false
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        val connection = super.onCreateInputConnection(outAttrs) ?: return null
+        return object : InputConnectionWrapper(connection, false) {
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean =
+                if (beforeLength > 0 && afterLength == 0 && deleteAttachment()) true
+                else super.deleteSurroundingText(beforeLength, afterLength)
+
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean =
+                if (beforeLength > 0 && afterLength == 0 && deleteAttachment()) true
+                else super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+        }
+    }
+}
+
 /** 路径沿用桌面版 chat-ui.js 的 search、type、translate、send。 */
-internal class ActionIcon(context: Context, var kind: String) : View(context) {
+internal class ActionIcon(context: Context, var kind: String, private val iconScale: Float = 1f) : View(context) {
     var lineWidth = 2.25f
     var inkColor = Palette.accent
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -984,18 +1155,30 @@ internal class ActionIcon(context: Context, var kind: String) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val side = min(width, height).toFloat()
-        val iconSize = min(side * .52f, 22f * resources.displayMetrics.density)
+        // 各路径的实际外沿与发送箭头等大；图案缩放不改变屏幕上的线宽。
+        val iconSize = 20.8f * iconScale * resources.displayMetrics.density
+        val geometryScale = when (kind) {
+            "search" -> 14f / 16.5f
+            "camera" -> 14f / 20f
+            "history", "photo" -> 14f / 18f
+            "extract" -> 14f / 16f
+            "translate" -> 14f / 19f
+            else -> 1f
+        }
+        val centerX = when (kind) { "search" -> 12.25f; "translate" -> 12.5f; else -> 12f }
+        val centerY = when (kind) { "search" -> 12.25f; "extract" -> 12.5f; else -> 12f }
         canvas.save()
-        canvas.translate((width - iconSize) / 2, (height - iconSize) / 2)
-        canvas.scale(iconSize / 24f, iconSize / 24f)
+        canvas.translate(width * .5f, height * .5f)
+        canvas.scale(iconSize / 24f * geometryScale, iconSize / 24f * geometryScale)
+        canvas.translate(-centerX, -centerY)
         paint.color = inkColor
-        paint.strokeWidth = lineWidth
+        paint.strokeWidth = lineWidth / (geometryScale * iconScale)
         paint.style = Paint.Style.STROKE
         paint.strokeCap = Paint.Cap.ROUND
         paint.strokeJoin = Paint.Join.ROUND
         path.reset()
         when (kind) {
+            "close" -> { path.moveTo(7f, 7f); path.lineTo(17f, 17f); path.moveTo(17f, 7f); path.lineTo(7f, 17f) }
             "send" -> { path.moveTo(12f, 19f); path.lineTo(12f, 5f); path.moveTo(6f, 11f); path.lineTo(12f, 5f); path.lineTo(18f, 11f) }
             "stop" -> { paint.style = Paint.Style.FILL; canvas.drawRoundRect(6f, 6f, 18f, 18f, 2f, 2f, paint) }
             "search" -> { canvas.drawCircle(10.5f, 10.5f, 6.5f, paint); path.moveTo(15.5f, 15.5f); path.lineTo(20.5f, 20.5f) }

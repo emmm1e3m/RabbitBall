@@ -15,7 +15,7 @@
         android:theme="@style/Theme.RabbitBall" android:supportsRtl="true">
         <activity android:name=".CaptureActivity" android:exported="true" android:launchMode="singleTask"
             android:noHistory="true" android:excludeFromRecents="true" android:taskAffinity="com.rabbitball.capture"
-            android:windowSoftInputMode="stateAlwaysHidden|adjustNothing" android:theme="@style/Theme.RabbitBall"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustNothing" android:theme="@style/Theme.RabbitBall.Entry"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -29,6 +29,7 @@
         </activity>
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask"
             android:excludeFromRecents="true" android:taskAffinity="com.rabbitball.search"
+            android:theme="@style/Theme.RabbitBall.Main"
             android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden" />
         <service android:name=".RabbitAccessibilityService" android:label="兔球 · 即开即选" android:exported="true"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">

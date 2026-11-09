@@ -9,15 +9,49 @@
       if (entry.isIntersecting) visible.add(entry.target);
       else visible.delete(entry.target);
     }
-  });
+  }, { rootMargin:'48px 24px' });
   let current = null, raw = '', busy = false, follow = true, resizing = false, interacting = false;
   let scrollMotion = null, scrollFrame = 0, paintFrame = 0, pendingPaint = null, lastPaint = 0;
-  let progressRun = null, activityVisible = true;
+  let progressRun = null, activityVisible = true, geometryFrame = 0, lastGeometry = null;
   const bodyOf = node => node.querySelector('.bubble-content');
   const surfaceOf = node => node.querySelector('.bubble-surface');
   const selected = () => !window.getSelection().isCollapsed;
-  const maximumScroll = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  const scrollRoot = document.scrollingElement;
+  const maximumScroll = () => Math.max(0, scrollRoot.scrollHeight - scrollRoot.clientHeight);
   const atBottom = () => window.scrollY >= maximumScroll() - 8;
+  // 只上报文档中的气泡边界；滚动和视口交集由原生 draw 在同一帧处理。
+  const publishGeometry = () => {
+    geometryFrame = 0;
+    const bounds = Array.from(messages.children, node => {
+      const rect = surfaceOf(node).getBoundingClientRect();
+      return [rect.left + scrollX, rect.top + scrollY, rect.right + scrollX, rect.bottom + scrollY];
+    });
+    const geometry = JSON.stringify({ width:visualViewport.width, bounds });
+    if (geometry !== lastGeometry) {
+      window.RabbitViewport?.setBubbleBounds(geometry);
+      lastGeometry = geometry;
+    }
+    if (Array.from(activeAnimations).some(animation => animation.playState === 'running' || animation.pending)) scheduleGeometry();
+  };
+  const scheduleGeometry = () => {
+    if (!geometryFrame && activityVisible && !document.hidden) geometryFrame = requestAnimationFrame(publishGeometry);
+  };
+  const stopGeometry = () => { cancelAnimationFrame(geometryFrame); geometryFrame = 0; };
+  const boundsObserver = new ResizeObserver(scheduleGeometry);
+  const setFirstImage = value => {
+    const firstImage = value ? String(value) : null;
+    messages.querySelector('.bubble-image')?.remove();
+    const node = messages.querySelector('.bubble.user');
+    if (firstImage && node) {
+      const image = document.createElement('img');
+      image.className = 'bubble-image';
+      image.alt = '本次提问的图片';
+      image.addEventListener('load', () => { if (follow) bottom(); scheduleGeometry(); }, { once:true });
+      image.src = 'data:image/jpeg;base64,' + firstImage;
+      surfaceOf(node).prepend(image);
+    }
+    scheduleGeometry();
+  };
   // 入场采用有限的阻尼弹簧关键帧，流式更新不重复播放。
   const spring = time => {
     const frequency = 18, damping = .66, damped = frequency * Math.sqrt(1 - damping * damping);
@@ -33,7 +67,10 @@
     const animation = node.animate(keyframes, { duration, delay, easing:'linear', fill:'backwards' });
     animation.id = id;
     activeAnimations.add(animation);
-    animation.finished.then(() => { activeAnimations.delete(animation); finished(); }, () => activeAnimations.delete(animation));
+    scheduleGeometry();
+    animation.finished.then(() => { activeAnimations.delete(animation); finished(); scheduleGeometry(); }, () => {
+      activeAnimations.delete(animation); scheduleGeometry();
+    });
     return animation;
   };
   const arrive = (node, assistant = false) => {
@@ -96,14 +133,16 @@
     scrollFrame = requestAnimationFrame(tick);
   };
   const update = (action, { force = false, flow = false, immediate = false } = {}) => {
-    const shouldFollow = (force || follow || atBottom()) && !interacting && !selected();
+    const shouldFollow = (force || follow) && !interacting && !selected();
     const before = flow ? positions() : new Map();
     action();
     if (flow) shift(before);
     if (shouldFollow) { follow = true; bottom(immediate); }
+    scheduleGeometry();
   };
   const remove = node => {
     observer.unobserve(node);
+    boundsObserver.unobserve(surfaceOf(node));
     visible.delete(node);
     leaving.delete(node);
     node.getAnimations({ subtree:true }).forEach(animation => animation.cancel());
@@ -124,7 +163,9 @@
     if (role === 'user') body.textContent = content;
     else window.RabbitRender.render(body, content);
     messages.appendChild(node);
+    visible.add(node);
     observer.observe(node);
+    boundsObserver.observe(surface);
     return node;
   };
   const suspendProgress = () => {
@@ -171,16 +212,20 @@
     const visible = Boolean(value);
     if (activityVisible === visible) return;
     activityVisible = visible;
+    if (!visible) { interacting = false; cancelScroll(); stopGeometry(); }
+    else scheduleGeometry();
     syncProgress();
   };
   const reset = () => {
     clearProgress();
     cancelScroll();
+    stopGeometry();
     cancelAnimationFrame(paintFrame);
     paintFrame = 0; pendingPaint = null;
     activeAnimations.forEach(animation => animation.cancel());
-    activeAnimations.clear(); observer.disconnect(); visible.clear(); leaving.clear();
-    messages.replaceChildren(); current = null; raw = ''; busy = false; follow = true;
+    activeAnimations.clear(); observer.disconnect(); boundsObserver.disconnect(); visible.clear(); leaving.clear();
+    messages.replaceChildren(); current = null; raw = ''; busy = false; follow = true; interacting = false;
+    publishGeometry();
     window.scrollTo(0, 0);
   };
   const beginTurn = text => {
@@ -207,6 +252,7 @@
       if (turn.role !== 'user') { current = node; raw = String(turn.content); }
     }
     bottom(true);
+    scheduleGeometry();
   };
   const flushResponse = () => {
     cancelAnimationFrame(paintFrame);
@@ -305,9 +351,13 @@
   });
   const beginInteraction = () => { interacting = true; follow = false; cancelScroll(); };
   const endInteraction = () => { interacting = false; follow = atBottom(); };
-  window.addEventListener('pointerdown', beginInteraction, { passive:true });
-  window.addEventListener('pointerup', endInteraction, { passive:true });
-  window.addEventListener('pointercancel', endInteraction, { passive:true });
+  // Android 开始原生拖动时会取消 pointer；触摸所有权持续到手指离开。
+  window.addEventListener('touchstart', beginInteraction, { passive:true });
+  window.addEventListener('touchend', event => { if (!event.touches.length) endInteraction(); }, { passive:true });
+  window.addEventListener('touchcancel', () => { interacting = false; }, { passive:true });
+  window.addEventListener('pointerdown', event => { if (event.pointerType !== 'touch') beginInteraction(); }, { passive:true });
+  window.addEventListener('pointerup', event => { if (event.pointerType !== 'touch') endInteraction(); }, { passive:true });
+  window.addEventListener('pointercancel', event => { if (event.pointerType !== 'touch') interacting = false; }, { passive:true });
   window.addEventListener('wheel', () => { follow = false; cancelScroll(); }, { passive:true });
   document.addEventListener('selectionchange', () => { if (selected()) { follow = false; cancelScroll(); } });
   window.addEventListener('scroll', () => {
@@ -317,18 +367,22 @@
   window.addEventListener('resize', () => {
     resizing = true;
     if (follow) bottom();
+    scheduleGeometry();
     requestAnimationFrame(() => { resizing = false; });
   });
-  document.fonts.ready.then(() => { if (follow) bottom(); });
-  document.fonts.addEventListener('loadingdone', () => { if (follow) bottom(); });
+  document.fonts.ready.then(() => { if (follow) bottom(); scheduleGeometry(); });
+  document.fonts.addEventListener('loadingdone', () => { if (follow) bottom(); scheduleGeometry(); });
   reducedMotion.addEventListener('change', () => {
     if (!reducedMotion.matches) return;
     activeAnimations.forEach(animation => animation.cancel());
     leaving.forEach(remove);
     if (follow) bottom(true); else cancelScroll();
   });
-  document.addEventListener('visibilitychange', syncProgress);
-  window.addEventListener('pagehide', () => { clearProgress(); leaving.forEach(remove); });
-  window.RabbitConversation = Object.freeze({ reset, beginTurn, restore, showResponse, setBusy, setSearchCount, setActivityVisible });
+  document.addEventListener('visibilitychange', () => {
+    syncProgress();
+    if (document.hidden) stopGeometry(); else scheduleGeometry();
+  });
+  window.addEventListener('pagehide', () => { clearProgress(); leaving.forEach(remove); stopGeometry(); });
+  window.RabbitConversation = Object.freeze({ reset, beginTurn, restore, showResponse, setBusy, setSearchCount, setActivityVisible, setFirstImage });
   document.documentElement.dataset.ready = 'true';
 })();

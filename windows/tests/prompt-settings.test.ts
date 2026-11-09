@@ -34,16 +34,22 @@ async function settingsFixture(t: TestContext) {
   return { Store: module.SettingsStore, file, disk: async () => JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown> };
 }
 
-test('历史保留条数默认为十条，只接受正安全整数并持久保存', async t => {
+test('历史保留条数默认为十条，接受零和非负安全整数并持久保存', async t => {
   const { Store, disk } = await settingsFixture(t);
   const store = new Store();
   assert.equal((await store.load()).historyLimit, 10);
-  for (const historyLimit of [0, -1, 1.5, '10', null, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
-    await assert.rejects(store.save({ historyLimit }), /历史记录保留条数应为正整数/);
+  for (const historyLimit of [-1, 1.5, '10', '', null, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(store.save({ historyLimit }), /非负整数/);
   }
   assert.equal((await store.save({ historyLimit: 6 })).historyLimit, 6);
   assert.equal((await disk()).historyLimit, 6);
   assert.equal((await new Store().load()).historyLimit, 6);
+  assert.equal((await store.save({ historyLimit: 0 })).historyLimit, 0);
+  assert.equal((await disk()).historyLimit, 0);
+  const reloaded = new Store();
+  assert.equal((await reloaded.load()).historyLimit, 0);
+  await reloaded.save({ petSize: 1.2 });
+  assert.equal((await new Store().load()).historyLimit, 0);
 });
 
 test('提示词覆盖保存、未传保留、整组替换和空组恢复默认', async t => {
@@ -137,5 +143,34 @@ test('工具轮数上限默认3，保存重载有效，拒绝非正整数且不�
   for(const invalid of [0,-1,1.5,'4',null,Number.MAX_SAFE_INTEGER+1]) {
     await assert.rejects(store.save({maxToolRounds:invalid}),/正整数/);
     assert.equal(store.getPrivate().maxToolRounds,7);
+  }
+});
+
+test('内置字体默认关闭，旧配置补齐，开关保存重载且无关更新保留选择', async t => {
+  const { Store, file, disk } = await settingsFixture(t);
+  assert.equal((await new Store().load()).useBuiltinFont, false);
+  await writeFile(file, JSON.stringify({ bodyColor: '#ABCDEF' }), 'utf8');
+  const store = new Store();
+  assert.equal((await store.load()).useBuiltinFont, false);
+  assert.equal((await store.save({ useBuiltinFont: true })).useBuiltinFont, true);
+  assert.equal((await disk()).useBuiltinFont, true);
+  assert.equal((await new Store().load()).useBuiltinFont, true);
+  await store.save({ petSize: 1.2 });
+  assert.equal((await new Store().load()).useBuiltinFont, true);
+  assert.equal((await store.save({ useBuiltinFont: false })).useBuiltinFont, false);
+  assert.equal((await disk()).useBuiltinFont, false);
+  assert.equal((await new Store().load()).useBuiltinFont, false);
+});
+
+test('内置字体只接受布尔值，无效修改不改变内存或磁盘设置', async t => {
+  const { Store, disk } = await settingsFixture(t);
+  const store = new Store();
+  await store.save({ useBuiltinFont: true, bodyColor: '#ABCDEF' });
+  const before = await disk();
+  for (const value of [null, 0, 1, 'true', 'false', [], {}]) {
+    await assert.rejects(store.save({ useBuiltinFont: value, bodyColor: '#000000' }), /开关设置无效/);
+    assert.equal(store.getPublic().useBuiltinFont, true);
+    assert.equal(store.getPrivate().bodyColor, '#ABCDEF');
+    assert.deepEqual(await disk(), before);
   }
 });

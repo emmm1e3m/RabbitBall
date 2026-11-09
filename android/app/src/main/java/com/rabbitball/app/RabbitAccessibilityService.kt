@@ -49,6 +49,12 @@ class RabbitAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var edgePet: EdgePetOverlay? = null
+    private var searchWindow: AccessibilitySearchWindow? = null
+
+    fun showSearch(result: CaptureResult) {
+        searchWindow?.close()
+        searchWindow = AccessibilitySearchWindow(this).also { it.show(result) }
+    }
     private class ScreenshotRequest(val onResult: (CaptureResult) -> Unit)
     private var captureRequest: ScreenshotRequest? = null
     private val capturing: Boolean get() = captureRequest != null
@@ -149,6 +155,8 @@ class RabbitAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        searchWindow?.close()
+        searchWindow = null
         if (instance === this) instance = null
         cancelCapture()
         releasePet()
@@ -156,6 +164,8 @@ class RabbitAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        searchWindow?.close()
+        searchWindow = null
         handler.removeCallbacksAndMessages(null)
         if (instance === this) instance = null
         cancelCapture()

@@ -13,4 +13,10 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowAnimationStyle">@null</item>
     </style>
+    <style name="Theme.RabbitBall.Entry" parent="android:style/Theme.NoDisplay" />
+    <!-- 设置与前台相机使用独立方向；聊天由系统服务的悬浮窗口显示。 -->
+    <style name="Theme.RabbitBall.Main" parent="Theme.RabbitBall">
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowBackground">#FFFBFD</item>
+    </style>
 </resources>

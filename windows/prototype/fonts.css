@@ -7,10 +7,14 @@
 }
 
 :root {
-  --rabbit-font: RabbitBallText, 'Microsoft YaHei', sans-serif;
+  --rabbit-font: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
 }
 
-/* 普通文本与控件共用本地字体，公式仍由 KaTeX 的独立字体规则绘制。 */
+:root[data-builtin-font='true'] {
+  --rabbit-font: RabbitBallText, 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+}
+
+/* 普通文本按设置切换字体，公式仍由 KaTeX 的独立字体规则绘制。 */
 body, button, input, textarea, select, option {
   font-family: var(--rabbit-font);
 }

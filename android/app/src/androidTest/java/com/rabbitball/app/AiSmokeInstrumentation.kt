@@ -22,11 +22,23 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** 只连接本机模拟接口，验证 PC 同款发送契约，不使用真实 API Key。 */
 class AiSmokeInstrumentation : Instrumentation() {
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
+    private var checks: String? = null
+    override fun onCreate(arguments: Bundle?) {
+        super.onCreate(arguments)
+        checks = arguments?.getString("checks")
+        start()
+    }
 
     override fun onStart() {
         val results = Bundle()
         try {
+            if (checks == "history") {
+                encryptedSettingsAndTextHistory()
+                UiContractChecks.historyRetention(this)
+                results.putString("stream", "历史检查通过：0 条设置与输入校验、文字及图片清理、停止保存与重新启用、历史入口显示。\n")
+                finish(Activity.RESULT_OK, results)
+                return
+            }
             wholeScreenshotAndStream()
             deepSeekSearchAndConversation()
             searchProgressCountsRealCalls()
@@ -240,28 +252,91 @@ class AiSmokeInstrumentation : Instrumentation() {
                 }
             }
             check(runCatching { AppSettings.validate(test.copy(appearance = test.appearance.copy(petSize = Float.NaN))) }.isFailure)
-            check(runCatching { AppSettings.validate(test.copy(historyLimit = 0)) }.isFailure)
+            AppSettings.validate(test.copy(historyLimit = 0))
+            check(runCatching { AppSettings.validate(test.copy(historyLimit = -1)) }.isFailure)
 
-            val files = File(targetContext.cacheDir, "history-limit-${System.nanoTime()}").apply { mkdirs() }
-            try {
-                val history = ChatHistory(object : ContextWrapper(targetContext) { override fun getFilesDir(): File = files })
-                repeat(4) { index -> history.save("limit-$index", "第${index}条", listOf(ChatTurn("user", "问题$index"))) }
-                check(history.list().size == 3 && history.list().none { it.id == "limit-0" }) { "历史数量没有遵守设置" }
-                settings.save(test.copy(historyLimit = 1))
-                history.trim()
-                settings.save(test.copy(historyLimit = 3))
-                check(history.list().size == 1) { "缩小保留条数后旧历史只被隐藏，没有实际删除" }
-            } finally {
-                listOf("chat_history.json", "chat_history.json.bak", "chat_history.json.new").forEach { File(files, it).delete() }
-                files.delete()
-            }
+            historyPreviewsAndText(settings, test)
         } finally { settings.save(original) }
-        val testFiles = File(targetContext.cacheDir, "ai-history-test").apply { mkdirs() }
-        val history = ChatHistory(object : ContextWrapper(targetContext) { override fun getFilesDir(): File = testFiles })
-        val chat = history.save("test-chat", "文字历史", listOf(ChatTurn("user", "问题"), ChatTurn("assistant", "回答")))
-        check(history.list().first().id == chat.id && history.list().first().turns.last().content == "回答")
-        val json = File(testFiles, "chat_history.json").readText()
-        check(!json.contains("image") && !json.contains("bitmap") && !json.contains("base64"))
+    }
+
+    private fun historyPreviewsAndText(settings: AppSettings, config: AppConfig) {
+        val files = File(targetContext.cacheDir, "history-preview-${System.nanoTime()}").apply { mkdirs() }
+        val context = object : ContextWrapper(targetContext) { override fun getFilesDir(): File = files }
+        val file = File(files, "chat_history.json")
+        val source = Bitmap.createBitmap(1800, 1200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        val turns = listOf(ChatTurn("user", "问题"), ChatTurn("assistant", "回答"))
+        fun persistedPreviews(): List<String> {
+            val entries = JSONArray(file.readText())
+            return (0 until entries.length()).mapNotNull { entries.getJSONObject(it).optJSONObject("preview")?.optString("jpegBase64") }
+        }
+        try {
+            // 已有文字记录没有预览字段，升级后仍保留原有内容。
+            val legacyTurns = JSONArray().apply {
+                turns.forEach { put(JSONObject().put("role", it.role).put("content", it.content)) }
+            }
+            file.writeText(JSONArray().put(JSONObject().put("id", "legacy").put("title", "文字历史")
+                .put("updatedAt", 1L).put("turns", legacyTurns)).toString())
+            val history = ChatHistory(context)
+            check(history.list().single().let { it.id == "legacy" && it.turns == turns && it.preview == null }) {
+                "旧文字历史无法读取或被赋予了错误预览"
+            }
+
+            val preview = HistoryPreview.from(VisualContext(source, VisualSource.SCREEN))
+            check(!source.isRecycled) { "生成预览回收了仍在使用的原图" }
+            val saved = checkNotNull(history.save("with-preview", "截图提问", turns, preview))
+            val loaded = ChatHistory(context).list().single { it.id == saved.id }
+            check(loaded.turns == turns && loaded.preview?.source == VisualSource.SCREEN) { "历史往返丢失了文字或图片来源" }
+            val thumbnail = loaded.preview?.decode() ?: error("持久化的压缩预览无法解码")
+            try {
+                check(maxOf(thumbnail.width, thumbnail.height) <= 960 && thumbnail.width < source.width &&
+                    kotlin.math.abs(thumbnail.width.toFloat() / thumbnail.height - source.width.toFloat() / source.height) < .01f) {
+                    "预览未压缩至显示所需尺寸或改变了图片比例"
+                }
+            } finally { thumbnail.recycle() }
+            val followup = turns + ChatTurn("user", "追问")
+            history.save(saved.id, saved.title, followup)
+            check(ChatHistory(context).list().single { it.id == saved.id }.let { it.turns == followup && it.preview == preview }) {
+                "追问保存丢失了原有预览"
+            }
+            history.delete(saved.id)
+            check(ChatHistory(context).list().none { it.id == saved.id } && preview.jpegBase64 !in persistedPreviews()) {
+                "删除历史后仍保留记录或图片数据"
+            }
+
+            history.save("trim-old", "较早截图", turns, preview)
+            source.eraseColor(Color.BLUE)
+            val newest = HistoryPreview.from(VisualContext(source, VisualSource.CAMERA))
+            history.save("trim-new", "最新照片", turns, newest)
+            settings.save(config.copy(historyLimit = 1))
+            history.trim()
+            settings.save(config.copy(historyLimit = 3))
+            check(ChatHistory(context).list().single().let { it.id == "trim-new" && it.preview == newest } &&
+                preview.jpegBase64 !in persistedPreviews()) { "裁减历史没有连同旧预览删除，或删除了最新记录" }
+            repeat(4) { index -> history.save("limit-$index", "第${index}条", listOf(ChatTurn("user", "问题$index"))) }
+            val retained = ChatHistory(context).list()
+            check(retained.size == 3 && retained.none { it.id == "limit-0" || it.id == "trim-new" } &&
+                newest.jpegBase64 !in persistedPreviews()) { "保存时没有执行历史上限或清理淘汰的预览" }
+
+            history.save("before-disabled", "关闭前的图片", turns, preview)
+            settings.save(config.copy(historyLimit = 0))
+            check(settings.load().historyLimit == 0 && history.list().isEmpty()) { "0 条设置未保存或仍可读取旧历史" }
+            history.trim()
+            check(listOf(file, File(files, "chat_history.json.bak"), File(files, "chat_history.json.new")).none { it.exists() }) {
+                "关闭历史后仍保留文字或图片文件"
+            }
+            check(history.save("disabled", "不应保留", turns, newest) == null && !file.exists()) {
+                "关闭历史时新对话仍写入磁盘"
+            }
+            settings.save(config.copy(historyLimit = 3))
+            check(ChatHistory(context).list().isEmpty()) { "重新启用历史后旧记录再次出现" }
+            check(history.save(null, "重新启用", turns) != null && ChatHistory(context).list().size == 1) {
+                "重新启用后无法保存新记录"
+            }
+        } finally {
+            source.recycle()
+            listOf("chat_history.json", "chat_history.json.bak", "chat_history.json.new").forEach { File(files, it).delete() }
+            files.delete()
+        }
     }
 
     private fun promptOverridesAndSession() {

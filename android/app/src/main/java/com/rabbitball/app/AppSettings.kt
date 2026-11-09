@@ -90,7 +90,7 @@ class AppSettings(context: Context) {
             validate(config.model)
             require(config.appearance.petSize.isFinite() && config.appearance.petSize in .6f..1.6f) { "宠物尺寸应为 60% 到 160%。" }
             require((config.appearance.bodyColor ushr 24) == 255 && (config.appearance.eyeColor ushr 24) == 255) { "请选择不透明的球色和眼睛色。" }
-            require(config.historyLimit >= 1) { "历史记录保留条数应为正整数。" }
+            require(config.historyLimit >= 0) { "历史记录保留条数应为非负整数，0 表示不保留。" }
         }
 
         fun validate(config: ModelConfig) {

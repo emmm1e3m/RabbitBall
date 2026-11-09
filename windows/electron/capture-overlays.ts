@@ -40,6 +40,7 @@ export class CaptureOverlays {
     context: CaptureContext;
     shortcut: readonly string[];
     color: string;
+    useBuiltinFont?: boolean;
   }): Promise<void> {
     this.close();
     const sessionGeneration = this.sessionGeneration;
@@ -58,7 +59,7 @@ export class CaptureOverlays {
         entry.viewport.bounds = window.getContentBounds();
         this.send(entry, {
           type: 'start', sessionId: this.sessionId, context: this.context!, backgroundBitmap: { data: background.toBitmap(), ...background.getSize() },
-          width: entry.viewport.bounds.width, height: entry.viewport.bounds.height, shortcut: [...options.shortcut], color: options.color,
+          width: entry.viewport.bounds.width, height: entry.viewport.bounds.height, shortcut: [...options.shortcut], color: options.color, useBuiltinFont: options.useBuiltinFont ?? false,
         });
         entry.active = true;
         if (this.lastFrame) this.sendFrame(entry, this.lastFrame.start, this.lastFrame.end);
@@ -137,6 +138,7 @@ export class CaptureOverlays {
     // 页面在启动及布局变化时预载，长按只更新快照，不再冷启动渲染进程。
     this.preparing = Promise.all(viewports.map(async viewport => {
       const window = new BrowserWindow({
+        icon: path.join(app.getAppPath(), 'resources', 'icons', 'rabbitball.ico'),
         ...viewport.bounds, show: false, frame: false, transparent: true, focusable: false,
         resizable: false, thickFrame: false, hasShadow: false, skipTaskbar: true,
         fullscreenable: false, backgroundColor: '#00000000',

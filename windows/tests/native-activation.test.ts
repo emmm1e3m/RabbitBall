@@ -77,7 +77,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
 
   // 执行真正的主进程函数，只移除模块导入与应用启动，替换 Electron 边界。
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const startup = source.indexOf('\nif (!app.requestSingleInstanceLock())');
+  const startup = source.indexOf('\nconst quitRequested =');
   assert.ok(startup > 0, '应用启动入口必须与待测函数分开');
   const module = source.slice(0, startup)
     .replace(/^import .*;\r?\n/gm, '')
