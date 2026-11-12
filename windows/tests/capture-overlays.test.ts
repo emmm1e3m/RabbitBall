@@ -23,6 +23,7 @@ function harness(loads: Promise<void>[] = [], contentHeightOffsets: number[] = [
     calls: string[] = [];
     destroyed = false;
     visible = false;
+    ignoresMouse = false;
     loadedFile = '';
     handlers = new Map<string, () => void>();
     webHandlers = new Map<string, () => void>();
@@ -41,7 +42,7 @@ function harness(loads: Promise<void>[] = [], contentHeightOffsets: number[] = [
     }
     setMenu() {}
     setAlwaysOnTop() {}
-    setIgnoreMouseEvents() {}
+    setIgnoreMouseEvents(ignore: boolean) { this.ignoresMouse = ignore; }
     on(name: string, handler: () => void) { this.handlers.set(name, handler); }
     loadFile(file: string) { this.loadedFile = file; return loads.shift() ?? Promise.resolve(); }
     isDestroyed() { return this.destroyed; }
@@ -111,6 +112,7 @@ test('每屏背景和跨屏选框独立投影，混合 DPI 与负坐标不共用
     const window = app.windows[index];
     assert.equal(window.visible, true);
     assert.equal(window.options.focusable, false);
+    assert.equal(window.ignoresMouse, true, '截图浮层只展示选区，输入仍由原生钩子统一处理');
     assert.equal(window.options.show, false);
     assert.equal(window.options.x, app.options.viewports[index].bounds.x);
     assert.deepEqual(window.bounds, app.options.viewports[index].bounds);

@@ -174,3 +174,29 @@ test('内置字体只接受布尔值，无效修改不改变内存或磁盘设�
     assert.deepEqual(await disk(), before);
   }
 });
+
+test('大爆炸插件与模式默认、停用归一化和持久重载一致，非法开关不写入', async t => {
+  const { Store, file, disk } = await settingsFixture(t);
+  const store = new Store(), initial = await store.load();
+  assert.equal(initial.graphPluginEnabled, true); assert.equal(initial.graphModeEnabled, false);
+  assert.equal((await store.save({ graphModeEnabled: true })).graphModeEnabled, true);
+  const disabled = await store.save({ graphPluginEnabled: false });
+  assert.equal(disabled.graphPluginEnabled, false); assert.equal(disabled.graphModeEnabled, false);
+  assert.equal((await disk()).graphModeEnabled, false);
+  const reloaded = new Store(); await reloaded.load();
+  const enabled = await reloaded.save({ graphPluginEnabled: true });
+  assert.equal(enabled.graphPluginEnabled, true); assert.equal(enabled.graphModeEnabled, false);
+  assert.equal((await new Store().load()).graphModeEnabled, false);
+  const before = await disk();
+  for (const key of ['graphPluginEnabled', 'graphModeEnabled']) {
+    for (const invalid of [null, 0, 1, 'true', 'false', [], {}]) {
+      await assert.rejects(reloaded.save({ [key]: invalid }), /开关设置无效/);
+      assert.equal(reloaded.getPublic().graphPluginEnabled, true);
+      assert.equal(reloaded.getPublic().graphModeEnabled, false);
+      assert.deepEqual(await disk(), before);
+    }
+  }
+  await writeFile(file, JSON.stringify({ graphPluginEnabled: false, graphModeEnabled: true }), 'utf8');
+  const normalized = await new Store().load();
+  assert.equal(normalized.graphPluginEnabled, false); assert.equal(normalized.graphModeEnabled, false);
+});

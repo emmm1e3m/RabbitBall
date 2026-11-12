@@ -35,12 +35,14 @@
   let session=null,lastPoint=null,paintFrame=0;
   const emit=(name,detail)=>document.dispatchEvent(new CustomEvent('selection:'+name,{detail}));
   const facade=()=>window.RabbitAssistant;
+  const graphMode=()=>{const settings=window.RabbitSettings?.getSnapshot().settings;return !window.rabbitDesktop&&settings?.graphPluginEnabled!==false&&settings?.graphModeEnabled===true;};
   const clamp=(value,max)=>Math.max(0,Math.min(max,value));
   function point(x,y){return{x:clamp(x,innerWidth),y:clamp(y,innerHeight)};}
   function rectangle(drag){return{x:Math.min(drag.start.x,drag.end.x),y:Math.min(drag.start.y,drag.end.y),width:Math.abs(drag.end.x-drag.start.x),height:Math.abs(drag.end.y-drag.start.y)};}
   const valid=rect=>rect.width>=4&&rect.height>=4;
+  function completionLabel(){return session?.purpose==='images'?'松开鼠标完成':session?.graph?'松开进入图谱':'松开提问';}
   function updateStatus(){
-    statusTitle.textContent=(session?.context?.demo?'演示 · ':'')+'按住 '+shortcutLabel()+' 连续截图 · 松开提问';
+    statusTitle.textContent=(session?.context?.demo?'演示 · ':'')+(session?.purpose==='images'?'拖动选择截图':'按住 '+shortcutLabel()+' 连续截图')+' · '+completionLabel();
     statusCount.textContent=session?.count?'已选 '+session.count+' 张':'';
   }
   function renderBox(){
@@ -60,20 +62,30 @@
     const animation=flash.animate([{opacity:.9},{opacity:0}],{duration:matchMedia('(prefers-reduced-motion: reduce)').matches?100:200,easing:'ease-out'});
     animation.finished.then(()=>flash.remove(),()=>flash.remove());
   }
+  function releasePointer(current){
+    const pointerId=current.pointerId;current.pointerId=null;
+    if(pointerId!==null&&root.hasPointerCapture(pointerId))root.releasePointerCapture(pointerId);
+  }
+  function discardDrag(current){
+    current.drag=null;releasePointer(current);renderBox();
+  }
   function hide(cancelled){
     const previous=session;if(!previous)return;
     session=null;cancelAnimationFrame(paintFrame);paintFrame=0;
-    if(previous.pointerId!==null&&root.hasPointerCapture(previous.pointerId))root.releasePointerCapture(previous.pointerId);
+    releasePointer(previous);
+    for(const pointerId of previous.touches)if(root.hasPointerCapture(pointerId))root.releasePointerCapture(pointerId);
+    previous.touches.clear();
     root.classList.remove('is-active','is-selecting');background.removeAttribute('src');bitmap.width=bitmap.height=0;box.style.display='none';
     root.querySelectorAll('.capture-confirm').forEach(element=>{element.getAnimations().forEach(animation=>animation.cancel());element.remove();});
     if(previous.visible)emit('close',{sessionId:previous.id,cancelled});
+    if(cancelled)previous.resolveCapture?.(null);
   }
   function show(data,native,visible=true){
     if(session)hide(true);
     if(data.shortcut)activationShortcut=shortcut.normalizeShortcut(data.shortcut);
     if(data.color)root.style.setProperty('--capture-accent',data.color);
     if(typeof data.useBuiltinFont==='boolean')document.documentElement.dataset.builtinFont=String(data.useBuiltinFont);
-    const current={id:data.sessionId,native,visible,context:data.context,drag:null,frame:null,pointerId:null,pending:Promise.resolve(),finishing:false,failed:false,count:data.context?.images?.length??0};
+    const current={id:data.sessionId,native,visible,purpose:data.purpose,graph:data.purpose==='graph'||!native&&graphMode(),backgroundImageDataUrl:data.backgroundImageDataUrl,context:data.context,drag:null,frame:null,pointerId:null,touches:new Set(),pending:Promise.resolve(),finishing:false,failed:false,count:data.purpose==='images'?0:data.context?.images?.length??0};
     session=current;background.hidden=!!data.backgroundBitmap;bitmap.hidden=!data.backgroundBitmap;root.dataset.demo=String(!!data.context?.demo);
     if(data.backgroundBitmap){
       const {data:pixels,width,height}=data.backgroundBitmap;
@@ -83,7 +95,7 @@
       bitmap.getContext('2d',{alpha:false}).putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer,pixels.byteOffset,pixels.byteLength),width,height),0,0);
     }else background.src=data.backgroundImageDataUrl;
     if(visible){
-      root.classList.add('is-active');updateStatus();announcement.textContent='截图模式已开启，按住 '+shortcutLabel()+' 拖动选择，松开提问。';
+      root.classList.add('is-active');updateStatus();announcement.textContent=current.purpose==='images'?'拖动选择截图，松开鼠标完成，Esc 取消。':'截图模式已开启，按住 '+shortcutLabel()+' 拖动选择，'+completionLabel()+'。';
       emit('open',{sessionId:current.id,context:data.context,demo:!native});
     }
     if(data.dragStart){const start=point(data.dragStart.x,data.dragStart.y);current.drag={start,end:lastPoint||start};schedulePaint();}
@@ -95,7 +107,7 @@
       if(session!==current)return;
       const result=await facade().demoCaptureRegion(rect);
       if(session!==current)return;
-      current.context=result.context;current.count++;updateStatus();confirm(result.rect);announcement.textContent='已添加选区 '+current.count;
+      current.context=result.context;current.count=result.context.images.length;updateStatus();confirm(result.rect);announcement.textContent='已添加选区 '+current.count;
     }).catch(error=>{
       if(session!==current||error.name==='AbortError')return;
       current.failed=true;emit('error',{message:error.message});
@@ -103,13 +115,21 @@
   }
   function commitDrag(current){
     if(!current.drag)return;
-    const rect=rectangle(current.drag);current.drag=null;renderBox();
+    const rect=rectangle(current.drag);current.drag=null;releasePointer(current);renderBox();
     if(!current.native)queueRegion(current,rect);
   }
   function startDemo(visible=true){
     if(session)return;
     try{show(facade().demoCaptureStart(),false,visible);}
     catch(error){emit('error',{message:error.message});}
+  }
+  function captureImages(){
+    if(window.rabbitDesktop)return Promise.reject(new Error('请使用桌面截图服务。'));
+    cancel();
+    return new Promise((resolve,reject)=>{
+      try{const current=show({...facade().demoCaptureStart(),purpose:'images'},false);current.resolveCapture=resolve;}
+      catch(error){reject(error);}
+    });
   }
   async function finishDemo(){
     const current=session;if(!current||current.native||current.finishing)return;
@@ -118,9 +138,36 @@
     if(session!==current)return;
     if(current.failed){cancel();return;}
     try{
+      if(current.purpose==='images'){
+        if(!current.count){cancel();return;}
+        const context=await facade().demoCaptureEnd();if(session!==current)return;
+        hide(false);current.resolveCapture(context.images);return;
+      }
+      let workspace,target;
+      if(current.graph){
+        if(!window.RabbitGraphDemo||!window.RabbitGraph)throw new Error('图谱演示尚未准备好，请刷新后重试。');
+        workspace=await window.RabbitGraphDemo.graphOpen(window.RabbitGraph.getSnapshot().workspaceId||undefined);
+        if(session!==current)return;
+        target=workspace.graphs.find(g=>g.id===workspace.lastGraphId)||workspace.graphs[0];
+        if(!target||current.visible&&target.nodes.length){
+          workspace=await window.RabbitGraphDemo.graphMutate(workspace.id,{type:'create-graph'});
+          if(session!==current)return;
+          target=workspace.graphs.find(g=>g.id===workspace.lastGraphId);
+        }
+        if(target.nodes.length){
+          facade().demoCaptureCancel();hide(false);
+          window.RabbitChat?.close?.();window.RabbitSettings?.close?.();
+          await window.RabbitGraph.open({activationId:Date.now(),view:'graph',workspaceId:workspace.id,backgroundImageDataUrl:current.backgroundImageDataUrl});return;
+        }
+      }
       const context=await facade().demoCaptureEnd();if(session!==current)return;
-      hide(false);await window.RabbitChat.activate(context);
-    }catch(error){if(session===current){emit('error',{message:error.message});cancel();}}
+      hide(false);
+      if(current.graph){
+        window.RabbitChat?.close?.();window.RabbitSettings?.close?.();
+        await window.RabbitGraphDemo.graphCaptureContext({workspaceId:workspace.id,graphId:target.id},context,current.backgroundImageDataUrl);
+      }
+      else await window.RabbitChat.activate(context);
+    }catch(error){if(error.name!=='AbortError')emit('error',{message:error.message});if(session===current)cancel();}
   }
   function cancel(notify=true){
     const current=session;if(!current)return;
@@ -147,49 +194,71 @@
   }
   root.addEventListener('pointerdown',event=>{
     if(!session||session.native||session.finishing||event.button!==0)return;
-    event.preventDefault();lastPoint=point(event.clientX,event.clientY);session.drag={start:lastPoint,end:lastPoint};session.pointerId=event.pointerId;root.setPointerCapture(event.pointerId);schedulePaint();
+    const current=session;event.preventDefault();
+    if(event.pointerType==='touch'){
+      current.touches.add(event.pointerId);
+      // 双指操作放弃当前触屏选框，余下触点抬起前不能启动另一张截图。
+      if(current.touches.size>1){if(current.drag?.pointerType==='touch')discardDrag(current);return;}
+    }
+    if(current.pointerId!==null||event.isPrimary===false||current.touches.size&&event.pointerType!=='touch')return;
+    lastPoint=point(event.clientX,event.clientY);current.drag={start:lastPoint,end:lastPoint,pointerType:event.pointerType};current.pointerId=event.pointerId;root.setPointerCapture(event.pointerId);schedulePaint();
   });
   root.addEventListener('pointermove',event=>{
-    if(!session||session.native||!session.drag||session.finishing)return;
+    if(!session||session.native||event.pointerId!==session.pointerId||!session.drag||session.finishing)return;
     lastPoint=point(event.clientX,event.clientY);session.drag.end=lastPoint;schedulePaint();
   });
   root.addEventListener('pointerup',event=>{
     if(!session||session.native||session.finishing)return;
+    session.touches.delete(event.pointerId);
+    if(event.pointerId!==session.pointerId)return;
     if(session.drag)session.drag.end=point(event.clientX,event.clientY);
-    commitDrag(session);if(root.hasPointerCapture(event.pointerId))root.releasePointerCapture(event.pointerId);session.pointerId=null;
+    const current=session;commitDrag(current);
+    if(current.purpose==='images')finishDemo();
   });
-  root.addEventListener('pointercancel',()=>{if(session&&!session.native){session.drag=null;renderBox();}});
+  const cancelPointer=event=>{
+    if(!session||session.native)return;
+    if(event.type==='pointercancel')session.touches.delete(event.pointerId);
+    if(event.pointerId===session.pointerId)discardDrag(session);
+  };
+  root.addEventListener('pointercancel',cancelPointer);
+  root.addEventListener('lostpointercapture',cancelPointer);
   root.addEventListener('contextmenu',event=>event.preventDefault());
   document.addEventListener('desktop:cursor',event=>{
     lastPoint=point(event.detail.x,event.detail.y);
     if(session?.native&&session.drag){session.drag.end=lastPoint;schedulePaint();}
   });
   document.addEventListener('keydown',event=>{
-    if(!session?.native||event.key!=='Escape')return;
+    if((!session?.native&&session?.purpose!=='images')||event.key!=='Escape')return;
     event.preventDefault();event.stopImmediatePropagation();cancel();
   },true);
   if(!window.rabbitDesktop){
-    let held=false,blocked=false,recording=false,holdTimer=0;
+    let held=false,blocked=false,recording=false,holdTimer=0,previousGraphMode=graphMode();
     const pressed=new Set();
     const clearHold=()=>{clearTimeout(holdTimer);holdTimer=0;};
     const cancelPress=()=>{blocked=true;held=false;clearHold();cancel();};
     const resetPress=()=>{pressed.clear();held=false;blocked=false;clearHold();cancel();};
     document.addEventListener('settings:recording',event=>{recording=event.detail.recording;resetPress();});
     document.addEventListener('settings:open',resetPress);
-    document.addEventListener('settings:saved',resetPress);
+    document.addEventListener('settings:saved',()=>{
+      const enabled=graphMode(),activate=enabled&&!previousGraphMode;previousGraphMode=enabled;resetPress();
+      if(activate){startDemo(false);finishDemo();}
+    });
     document.addEventListener('keydown',event=>{
+      if(session?.purpose==='images')return;
       if(recording||window.RabbitSettings?.getSnapshot().open)return;
       if(event.key==='Escape'&&(held||session)){cancelPress();event.preventDefault();event.stopImmediatePropagation();return;}
       if(!activationShortcut.includes(event.code))return;
       event.preventDefault();event.stopImmediatePropagation();
       pressed.add(event.code);
       if(event.repeat||held||blocked||!shortcut.matchesShortcut(activationShortcut,pressed))return;
+      if(window.RabbitGraph?.isOpen()){blocked=true;window.RabbitGraph.close();return;}
       const chat=window.RabbitChat?.getSnapshot();
       if(chat?.open||chat?.opening){blocked=true;window.RabbitChat.close();return;}
       held=true;
       holdTimer=setTimeout(()=>{holdTimer=0;if(held&&!blocked)startDemo();},500);
     },true);
     document.addEventListener('keyup',event=>{
+      if(session?.purpose==='images')return;
       if(recording||window.RabbitSettings?.getSnapshot().open||!activationShortcut.includes(event.code))return;
       event.preventDefault();event.stopImmediatePropagation();
       pressed.delete(event.code);
@@ -213,6 +282,6 @@
   document.addEventListener('settings:change',refreshShortcut);
   document.addEventListener('settings:saved',refreshShortcut);
   window.addEventListener('pagehide',()=>cancel());
-  window.RabbitCapture=Object.freeze({handleEvent,finishNative,cancel,
+  window.RabbitCapture=Object.freeze({handleEvent,finishNative,cancel,captureImages,
     getSnapshot:()=>({active:!!session,native:!!session?.native,finishing:!!session?.finishing,count:session?.count||0,sessionId:session?.id||null})});
 })();

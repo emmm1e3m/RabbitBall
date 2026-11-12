@@ -17,7 +17,7 @@
     { key: 'translate', group: '功能', label: '翻译', hint: '规定翻译语言、格式和范围；填写问题或直接点击快捷操作时均适用。' },
     { key: 'searchTool', group: '搜索工具', label: '联网搜索', hint: '统一规定何时联网搜索，以及如何组织搜索关键词。' }
   ];
-  const defaults = { bodyColor: '#F58DAA', eyeColor: '#F90040', useBuiltinFont: false, petSize: 1, reasoning: 'medium', maxToolRounds: 3, historyLimit: 10, launchAtLogin: false, pauseOnFullscreen: true, followMouse: true, autoCopyScreenshots: true, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT], apiBaseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', hasApiKey: false };
+  const defaults = { bodyColor: '#F58DAA', eyeColor: '#F90040', useBuiltinFont: false, petSize: 1, reasoning: 'medium', maxToolRounds: 3, historyLimit: 10, launchAtLogin: false, pauseOnFullscreen: true, followMouse: true, autoCopyScreenshots: true, graphPluginEnabled: true, graphModeEnabled: false, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT], apiBaseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', hasApiKey: false };
   const storeKey = 'rabbitball.appearance.v1';
   const emit = (name, detail = {}) => document.dispatchEvent(new CustomEvent('settings:' + name, { detail }));
   const validHex = value => typeof value === 'string' && /^#[\da-f]{6}$/i.test(value);
@@ -123,7 +123,7 @@
     #rabbit-settings-root { position:absolute;inset:0;z-index:30;display:grid;place-items:center;pointer-events:none; }
     #rabbit-settings-root * { box-sizing:border-box; }
     #rabbit-settings-root .rs-backdrop { position:absolute;inset:0;border:0;background:rgba(255,255,255,.82);opacity:0;transition:opacity .24s;pointer-events:none; }
-    #rabbit-settings-root.is-open .rs-backdrop { opacity:1;pointer-events:auto; }
+    #rabbit-settings-root.is-open .rs-backdrop { opacity:1; }
     #rabbit-settings-root .rs-panel { position:relative;width:min(360px,calc(100% - 32px));max-height:calc(100% - 32px);display:flex;flex-direction:column;background:#fff;border:1px solid var(--rb-line);border-radius:20px;box-shadow:0 18px 60px var(--rb-shadow);opacity:0;transform:translateY(12px) scale(.97);transform-origin:center;transition:opacity .2s,transform .34s cubic-bezier(.22,1,.36,1);pointer-events:none;overflow:hidden; }
     #rabbit-settings-root.is-open .rs-panel { opacity:1;transform:translateY(0) scale(1);pointer-events:auto; }
     #rabbit-settings-root.is-pet-dragging .rs-panel { transition:opacity .2s; }
@@ -159,6 +159,14 @@
     #rabbit-settings-root .rs-clear-key { position:absolute;right:4px;top:4px;display:grid;place-items:center;width:29px;height:29px;border:0;background:#fff;color:var(--rb-text-muted);border-radius:7px;cursor:pointer; }
     #rabbit-settings-root .rs-clear-key[hidden] { display:none; }
     #rabbit-settings-root .rs-hint { margin:0;color:var(--rb-text-muted);font-size:12px;line-height:1.6; }
+    #rabbit-settings-root .rs-plugin-actions { display:flex;align-items:center;gap:10px; }
+    #rabbit-settings-root .rs-plugin-action { display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--rb-line);border-radius:10px;background:#fff;color:var(--rb-text-secondary);cursor:pointer;transition:color .18s,background .18s,transform .24s cubic-bezier(.22,1,.36,1); }
+    #rabbit-settings-root .rs-plugin-action svg { width:16px;height:16px; }
+    #rabbit-settings-root .rs-plugin-action svg > * { stroke-width:2px;vector-effect:non-scaling-stroke; }
+    #rabbit-settings-root .rs-plugin-action:hover:not(:disabled) { color:var(--rb-accent);background:var(--rb-soft);transform:translateY(-1px); }
+    #rabbit-settings-root .rs-plugin-action:active:not(:disabled) { transform:translateY(0); }
+    #rabbit-settings-root .rs-plugin-action:focus-visible { outline:2px solid var(--rb-accent);outline-offset:3px; }
+    #rabbit-settings-root .rs-plugin-action:disabled { opacity:.4;cursor:default; }
     #rabbit-settings-root .rs-size { -webkit-appearance:none;appearance:none;width:100%;height:20px;margin:0;background:transparent;accent-color:var(--rb-accent);cursor:pointer; }
     #rabbit-settings-root .rs-size::-webkit-slider-runnable-track { height:4px;border:0;border-radius:4px;background:var(--rb-line); }
     #rabbit-settings-root .rs-size::-webkit-slider-thumb { -webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:var(--rb-accent); }
@@ -206,8 +214,15 @@
   const root = document.createElement('div');
   root.id = 'rabbit-settings-root';
   const closeIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
+  const graphActions = [
+    { action: 'open', label: '进入图谱', icon: '<circle cx="5" cy="12" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m7.2 10.8 8.6-4.6M7.2 13.2l8.6 4.6"/>' },
+    { action: 'reveal', label: '打开文档文件夹', icon: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v1M3 7h16a2 2 0 0 1 2 2l-2 10H3Z"/>' },
+    { action: 'rename-graph', label: '重命名当前图谱', icon: '<path d="m14 5 5 5M4 20l5-1L20 8a3.5 3.5 0 0 0-5-5L4 14Z"/>' },
+    { action: 'undo', label: '撤销（Ctrl+Z）', icon: '<path d="M4 4v6h6M4 10a8 8 0 1 1 1 7"/>' },
+    { action: 'redo', label: '重做（Ctrl+Shift+Z / Ctrl+Y）', icon: '<path d="M20 4v6h-6M20 10a8 8 0 1 0-1 7"/>' }
+  ];
   root.innerHTML = `
-    <button class="rs-backdrop" type="button" aria-label="取消设置" tabindex="-1"></button>
+    <div class="rs-backdrop" aria-hidden="true"></div>
     <section class="rs-panel" role="dialog" aria-modal="true" aria-label="设置" aria-hidden="true" inert>
       <header class="rs-header"><h2>设置</h2><button class="rs-close" type="button" aria-label="关闭设置，放弃未保存的修改" title="关闭设置">${closeIcon}</button></header>
       <nav class="rs-tabs" role="tablist" aria-label="设置分类">
@@ -215,6 +230,7 @@
         <button class="rs-tab" id="rabbit-tab-appearance" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-appearance" tabindex="-1"><span>外观</span></button>
         <button class="rs-tab" id="rabbit-tab-general" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-general" tabindex="-1"><span>通用</span></button>
         <button class="rs-tab" id="rabbit-tab-prompts" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-prompts" tabindex="-1"><span>提示词</span></button>
+        <button class="rs-tab" id="rabbit-tab-plugins" type="button" role="tab" aria-selected="false" aria-controls="rabbit-page-plugins" tabindex="-1"><span>插件</span></button>
       </nav>
       <form class="rs-fields" id="rabbit-settings-form">
         <div class="rs-pages">
@@ -246,6 +262,11 @@
           <div class="rs-prompt-actions"><button class="rs-prompt-reset" id="rabbit-prompt-reset" type="button">恢复这项默认</button><button class="rs-prompt-reset" id="rabbit-prompts-reset" type="button">全部恢复默认</button></div>
           <p class="rs-hint">保存后在新对话中生效。</p>
         </section>
+        <section class="rs-tab-panel" id="rabbit-page-plugins" role="tabpanel" aria-labelledby="rabbit-tab-plugins" aria-hidden="true" inert>
+          <label class="rs-toggle"><span class="rs-toggle-copy"><span>大爆炸</span><small>把屏幕内容展开为知识图谱。</small></span><span class="rs-switch"><input id="rabbit-graph-plugin" type="checkbox" role="switch" aria-label="启用大爆炸插件"><i aria-hidden="true"></i></span></label>
+          <div class="rs-plugin-actions" role="group" aria-label="大爆炸操作">${graphActions.map(({ action, label, icon }) => `<button class="rs-plugin-action" type="button" data-graph-action="${action}" aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg></button>`).join('')}</div>
+          <p class="rs-hint">在功能栏开启大爆炸即进入图谱，之后可用启动键进入或退出。关闭插件会保留已有工作区。</p>
+        </section>
         </div>
       </form>
       <footer class="rs-footer"><p class="rs-status" role="status" aria-live="polite"></p><button class="rs-save" type="submit" form="rabbit-settings-form">保存</button></footer>
@@ -257,12 +278,16 @@
   const model = $('#rabbit-model'), reasoning = $('#rabbit-reasoning'), toolRounds = $('#rabbit-tool-rounds'), historyLimit = $('#rabbit-history-limit'), size = $('#rabbit-pet-size'), bodyInput = $('#rabbit-body-color'), eyeInput = $('#rabbit-eye-color');
   const startup = $('#rabbit-launch-at-login'), fullscreen = $('#rabbit-pause-fullscreen'), follow = $('#rabbit-follow-mouse'), autoCopy = $('#rabbit-auto-copy-screenshots');
   const builtinFont = $('#rabbit-use-builtin-font');
+  const graphPlugin = $('#rabbit-graph-plugin');
+  const graphButtons = [...root.querySelectorAll('.rs-plugin-action')];
   const shortcutButton = $('#rabbit-activation-shortcut'), shortcutKeys = $('.rs-shortcut-keys'), shortcutHint = $('#rabbit-shortcut-hint');
   const saveButton = $('.rs-save'), status = $('.rs-status');
   const promptKey = $('#rabbit-prompt-key'), promptEditor = $('#rabbit-prompt-editor'), promptHint = $('#rabbit-prompt-hint');
   promptKey.value = promptFields[0].key;
   const tabs = [...root.querySelectorAll('.rs-tab')], pages = [...root.querySelectorAll('.rs-tab-panel')];
-  let activeTab = 0, openVersion = 0, recording = false, recordingReady = false, recordingVersion = 0;
+  const tabNames = ['model', 'appearance', 'general', 'prompts', 'plugins'];
+  let activeTab = 0, openVersion = 0, recording = false, recordingReady = false, recordingVersion = 0, composing = false;
+  const composingKey = event => composing || event.isComposing || event.keyCode === 229;
   const recordingKeys = new Set();
   let saved = { ...defaults, prompts: {} }, draft = { ...defaults, prompts: {} }, openState = false, saving = false, keyCleared = false, sessionApiKey = '', returnFocus = null, loadError = '';
   let petDrag = false, petOffset = null, petPosition = null, panelOffset = { x: 0, y: 0 };
@@ -280,6 +305,8 @@
       pauseOnFullscreen: typeof value.pauseOnFullscreen === 'boolean' ? value.pauseOnFullscreen : defaults.pauseOnFullscreen,
       followMouse: typeof value.followMouse === 'boolean' ? value.followMouse : defaults.followMouse,
       autoCopyScreenshots: typeof value.autoCopyScreenshots === 'boolean' ? value.autoCopyScreenshots : defaults.autoCopyScreenshots,
+      graphPluginEnabled: typeof value.graphPluginEnabled === 'boolean' ? value.graphPluginEnabled : defaults.graphPluginEnabled,
+      graphModeEnabled: value.graphPluginEnabled !== false && value.graphModeEnabled === true,
       activationShortcut: shortcut.normalizeShortcut(value.activationShortcut ?? defaults.activationShortcut),
       apiBaseUrl: typeof value.apiBaseUrl === 'string' ? value.apiBaseUrl : defaults.apiBaseUrl,
       model: typeof value.model === 'string' ? value.model : defaults.model,
@@ -359,6 +386,8 @@
     startup.checked = draft.launchAtLogin; startup.disabled = !bridge;
     fullscreen.checked = draft.pauseOnFullscreen; follow.checked = draft.followMouse;
     autoCopy.checked = draft.autoCopyScreenshots;
+    graphPlugin.checked = draft.graphPluginEnabled;
+    syncGraphActions();
     renderShortcut();
     $('#rabbit-startup-note').hidden = !!bridge;
     syncOutputs(); clearKey.hidden = !saved.hasApiKey;
@@ -410,9 +439,12 @@
     $('#rabbit-body-value').textContent = draft.bodyColor;
     $('#rabbit-eye-value').textContent = draft.eyeColor;
   }
+  function syncGraphActions() {
+    for (const button of graphButtons) button.disabled = saving || !saved.graphPluginEnabled || !draft.graphPluginEnabled;
+  }
   function preview() {
-    draft = { ...draft, model: model.value, reasoning: reasoning.value, maxToolRounds: Number(toolRounds.value), historyLimit: historyLimit.value.trim() ? Number(historyLimit.value) : Number.NaN, petSize: Number(size.value), bodyColor: bodyInput.value.toUpperCase(), eyeColor: eyeInput.value.toUpperCase(), useBuiltinFont: builtinFont.checked, launchAtLogin: !!bridge && startup.checked, pauseOnFullscreen: fullscreen.checked, followMouse: follow.checked, autoCopyScreenshots: autoCopy.checked };
-    syncOutputs(); applySettings(draft); layout();
+    draft = { ...draft, model: model.value, reasoning: reasoning.value, maxToolRounds: Number(toolRounds.value), historyLimit: historyLimit.value.trim() ? Number(historyLimit.value) : Number.NaN, petSize: Number(size.value), bodyColor: bodyInput.value.toUpperCase(), eyeColor: eyeInput.value.toUpperCase(), useBuiltinFont: builtinFont.checked, launchAtLogin: !!bridge && startup.checked, pauseOnFullscreen: fullscreen.checked, followMouse: follow.checked, autoCopyScreenshots: autoCopy.checked, graphPluginEnabled: graphPlugin.checked, graphModeEnabled: graphPlugin.checked && draft.graphModeEnabled };
+    syncOutputs(); syncGraphActions(); applySettings(draft); layout();
   }
   const ready = (async () => {
     try {
@@ -425,10 +457,13 @@
     draft = copySettings(saved); promptStore.commit(saved.prompts); applySettings(saved); fillForm();
     return copySettings(saved);
   })();
-  async function open() {
+  async function open(options = {}) {
     const version = ++openVersion;
     await ready;
-    if (version !== openVersion || openState) return;
+    if (version !== openVersion) return;
+    const requestedTab = tabNames.indexOf(options.tab);
+    if (requestedTab >= 0) selectTab(requestedTab);
+    if (openState) return;
     returnFocus = document.activeElement; draft = copySettings(saved); keyCleared = false; status.textContent = loadError; fillForm();
     petOffset = null; petPosition = null; panelOffset = { x: 0, y: 0 }; panel.style.translate = '0px 0px';
     openState = true; root.classList.add('is-open'); scene.classList.add('is-settings-open'); panel.inert = false; panel.setAttribute('aria-hidden', 'false');
@@ -440,7 +475,7 @@
   function close(commit = false) {
     openVersion++;
     if (!openState || saving) return;
-    stopRecording();
+    stopRecording(); composing = false;
     endPetDrag(); scene.classList.remove('is-settings-open');
     if (!commit) applySettings(saved);
     openState = false; root.classList.remove('is-open'); panel.inert = true; panel.setAttribute('aria-hidden', 'true'); keyInput.value = '';
@@ -456,12 +491,12 @@
       status.textContent = invalid ? `${invalid.label}不能为空，且需在 20000 字以内。` : '提示词总长度需在 80000 字以内。';
       promptEditor.focus({ preventScroll: true }); return;
     }
-    preview(); saving = true; saveButton.disabled = true; saveButton.textContent = '保存中'; status.textContent = '';
+    preview(); saving = true; syncGraphActions(); saveButton.disabled = true; saveButton.textContent = '保存中'; status.textContent = '';
     try {
       if (!await recordingFinished) throw new Error('未能结束录制，请重新打开设置。');
       if (!Number.isSafeInteger(draft.maxToolRounds) || draft.maxToolRounds < 1) throw new Error('工具调用轮数上限应为正整数。');
       if (!Number.isSafeInteger(draft.historyLimit) || draft.historyLimit < 0) throw new Error('历史记录保留条数应为非负整数。');
-      const patch = { bodyColor: draft.bodyColor, eyeColor: draft.eyeColor, useBuiltinFont: draft.useBuiltinFont, petSize: draft.petSize, model: draft.model, reasoning: draft.reasoning, maxToolRounds: draft.maxToolRounds, historyLimit: draft.historyLimit, launchAtLogin: draft.launchAtLogin, pauseOnFullscreen: draft.pauseOnFullscreen, followMouse: draft.followMouse, autoCopyScreenshots: draft.autoCopyScreenshots, activationShortcut: [...draft.activationShortcut], prompts: { ...draft.prompts } };
+      const patch = { bodyColor: draft.bodyColor, eyeColor: draft.eyeColor, useBuiltinFont: draft.useBuiltinFont, petSize: draft.petSize, model: draft.model, reasoning: draft.reasoning, maxToolRounds: draft.maxToolRounds, historyLimit: draft.historyLimit, launchAtLogin: draft.launchAtLogin, pauseOnFullscreen: draft.pauseOnFullscreen, followMouse: draft.followMouse, autoCopyScreenshots: draft.autoCopyScreenshots, graphPluginEnabled: draft.graphPluginEnabled, graphModeEnabled: draft.graphModeEnabled, activationShortcut: [...draft.activationShortcut], prompts: { ...draft.prompts } };
       const enteredKey = keyInput.value.trim();
       if (enteredKey) patch.apiKey = enteredKey;
       else if (keyCleared) patch.apiKey = '';
@@ -478,11 +513,10 @@
       emit('saved', { settings: bridge ? { ...saved } : { ...saved, apiKey: sessionApiKey } });
       saving = false; close(true);
     } catch (error) { status.textContent = error instanceof Error ? error.message : '未能保存，请重试。'; }
-    finally { saving = false; saveButton.disabled = false; saveButton.textContent = '保存'; }
+    finally { saving = false; syncGraphActions(); saveButton.disabled = false; saveButton.textContent = '保存'; }
   }
   root.querySelector('form').addEventListener('submit', save);
   $('.rs-close').addEventListener('click', () => close());
-  $('.rs-backdrop').addEventListener('click', () => close());
   shortcutButton.addEventListener('click', startRecording);
   $('#rabbit-shortcut-reset').addEventListener('click', () => { stopRecording(); draft = { ...draft, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT] }; renderShortcut(); });
   for (const type of ['keydown', 'keyup']) document.addEventListener(type, event => {
@@ -504,7 +538,7 @@
     }
   }, true);
   shortcutButton.addEventListener('blur', stopRecording);
-  window.addEventListener('blur', stopRecording);
+  window.addEventListener('blur', () => { composing = false; stopRecording(); });
   window.addEventListener('pagehide', stopRecording);
   keyInput.addEventListener('input', () => {
     if (keyInput.value.trim()) { keyCleared = false; keyInput.placeholder = saved.hasApiKey ? '已配置，输入以替换' : '填写 DeepSeek API Key'; }
@@ -512,7 +546,16 @@
   });
   clearKey.addEventListener('click', () => { keyCleared = true; keyInput.value = ''; keyInput.placeholder = '保存后清除密钥'; clearKey.hidden = true; });
   for (const input of [model, reasoning, toolRounds, historyLimit, size, bodyInput, eyeInput]) input.addEventListener('input', preview);
-  for (const input of [startup, fullscreen, follow, autoCopy, builtinFont]) input.addEventListener('change', preview);
+  for (const input of [startup, fullscreen, follow, autoCopy, builtinFont, graphPlugin]) input.addEventListener('change', preview);
+  for (const button of graphButtons) button.addEventListener('click', () => {
+    if (button.disabled || saving || !openState) return;
+    const action = button.dataset.graphAction;
+    status.textContent = '';
+    document.dispatchEvent(new CustomEvent(action === 'reveal' ? 'graph:reveal' : 'graph:activate', { detail: { action: action === 'open' ? undefined : action } }));
+  });
+  document.addEventListener('graph:entry-error', event => {
+    if (openState) status.textContent = event.detail.message;
+  });
   promptKey.addEventListener('change', fillPrompt);
   promptEditor.addEventListener('input', editPrompt);
   $('#rabbit-prompt-reset').addEventListener('click', () => { const prompts = { ...draft.prompts }; delete prompts[promptKey.value]; draft = { ...draft, prompts }; fillPrompt(); });
@@ -520,6 +563,7 @@
   tabs.forEach((tab, index) => {
     tab.addEventListener('click', () => selectTab(index));
     tab.addEventListener('keydown', event => {
+      if (composingKey(event)) return;
       let next = activeTab;
       if (event.key === 'ArrowRight') next++;
       else if (event.key === 'ArrowLeft') next--;
@@ -530,8 +574,11 @@
     });
   });
   for (const type of ['pointerdown', 'pointerup', 'pointermove', 'click', 'dblclick']) root.addEventListener(type, event => event.stopPropagation());
+  root.addEventListener('compositionstart', () => { composing = true; });
+  root.addEventListener('compositionend', () => { composing = false; });
   root.addEventListener('keydown', event => {
     event.stopPropagation();
+    if (composingKey(event)) return;
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key === 'Tab') {
       const targets = [...panel.querySelectorAll('button:not([disabled]):not([hidden]),input:not([disabled]),select:not([disabled]),textarea:not([disabled])')].filter(element => element.tabIndex >= 0 && !element.closest('[inert]'));
@@ -548,7 +595,21 @@
     button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-1 3-3 1v4l-2 1 2 2v4l3 1 1 2h6l1-2 3-1v-4l2-2-2-1V7l-3-1-1-3H9Z"/><circle cx="12" cy="12" r="3"/></svg>';
     button.addEventListener('click', () => openState ? close() : open()); header.appendChild(button);
   }
-  window.RabbitSettings = Object.freeze({ open, close: () => close(), toggle: () => openState ? close() : open(), beginPetDrag, movePetDrag, endPetDrag,
+  async function setGraphMode(enabled) {
+    await ready;
+    if (enabled && !saved.graphPluginEnabled) throw new Error('请先在设置中启用大爆炸插件。');
+    const patch = { graphModeEnabled: enabled };
+    if (bridge) saved = normalize(await bridge.saveSettings(patch));
+    else {
+      const next = normalize({ ...saved, ...patch });
+      const { hasApiKey, ...publicConfig } = next;
+      localStorage.setItem(storeKey, JSON.stringify(publicConfig)); saved = next;
+    }
+    draft = { ...draft, graphModeEnabled: saved.graphModeEnabled };
+    applySettings(saved); emit('saved', { settings: copySettings(saved) });
+    return copySettings(saved);
+  }
+  window.RabbitSettings = Object.freeze({ open, close: () => close(), toggle: () => openState ? close() : open(), beginPetDrag, movePetDrag, endPetDrag, setGraphMode,
     applySettings: value => { saved = normalize(value); if (!openState) draft = copySettings(saved); promptStore.commit(saved.prompts); return applySettings(saved); }, ready,
-    getSnapshot: () => ({ open: openState, saving, recording, tab: ['model', 'appearance', 'general', 'prompts'][activeTab], settings: copySettings(saved), draft: copySettings(draft), palette: { ...palette, sphere: [...palette.sphere] } }) });
+    getSnapshot: () => ({ open: openState, saving, recording, tab: tabNames[activeTab], settings: copySettings(saved), draft: copySettings(draft), palette: { ...palette, sphere: [...palette.sphere] } }) });
 })();

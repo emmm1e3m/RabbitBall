@@ -16,7 +16,9 @@ export interface NativeConfiguration {
 export interface WindowsNative {
   ready: Promise<void>;
   configure(configuration: NativeConfiguration): Promise<void>;
+  beginSelection(): Promise<number>;
   cancelCapture(captureId: number): void;
+  prepareOverlayWindow(handle: string): Promise<boolean>;
   focusWindow(handle: string): Promise<boolean>;
   cancelFocus(): void;
   stop(): void;
@@ -28,7 +30,8 @@ interface NativeCallbacks {
   onTriggerEnd(captureId: number): void;
   onTriggerCancel(captureId: number): void;
   onSelectionPointer(captureId: number, phase: 'down' | 'up', point: { x: number; y: number }): void;
-  onPointerDown(): void;
+  onPointerDown(point: { x: number; y: number }): void;
+  onPointerUp(point: { x: number; y: number }): void;
   onFullscreen(fullscreen: boolean): void;
   onError(): void;
 }
@@ -40,12 +43,25 @@ export function createWindowsNative(callbacks: NativeCallbacks): WindowsNative {
   const bootstrap = '$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::ReadLine())); & ([ScriptBlock]::Create($source)) -IgnoreProcessId ' + process.pid;
   const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', bootstrap], { windowsHide: true, stdio: 'pipe' });
   let stopped = false, initialized = false, buffer = '';
+  let manualCaptureId: number | undefined;
   let pendingFocus: { id: string; resolve(focused: boolean): void; timer: ReturnType<typeof setTimeout> } | undefined;
+  const overlayPreparations = new Map<string, { resolve(prepared: boolean): void; timer: ReturnType<typeof setTimeout> }>();
   const configurations = new Map<string, { resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
+  const selections = new Map<string, { resolve(captureId: number): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   let finish: () => void;
   let fail: (error: Error) => void;
   const ready = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
   const timer = setTimeout(failure, 7000);
+  function deliverInput(callback: () => void, completedCaptureId?: number): void {
+    const deliver = () => {
+      if (stopped) return;
+      callback();
+      if (completedCaptureId !== undefined && manualCaptureId === completedCaptureId) manualCaptureId = undefined;
+    };
+    // 先让开始回执的 await 登记所属捕获；同批后续输入也排队，避免普通点击越过框选结束。
+    if (manualCaptureId === undefined) deliver();
+    else queueMicrotask(deliver);
+  }
   function closeChild(): void {
     // EOF 让原生线程正常解除钩子；进程未退出时再终止。
     child.stdin.end();
@@ -57,8 +73,12 @@ export function createWindowsNative(callbacks: NativeCallbacks): WindowsNative {
     if (stopped) return;
     stopped = true;
     if (pendingFocus) { clearTimeout(pendingFocus.timer); pendingFocus.resolve(false); pendingFocus = undefined; }
+    for (const pending of overlayPreparations.values()) { clearTimeout(pending.timer); pending.resolve(false); }
+    overlayPreparations.clear();
     for (const pending of configurations.values()) { clearTimeout(pending.timer); pending.reject(new Error('全局触发配置未能应用。')); }
     configurations.clear();
+    for (const pending of selections.values()) { clearTimeout(pending.timer); pending.reject(new Error('屏幕框选未能开始。')); }
+    selections.clear();
     clearTimeout(timer);
     closeChild();
     if (!initialized) fail(new Error('Windows 全局启动键未能启动。'));
@@ -73,22 +93,41 @@ export function createWindowsNative(callbacks: NativeCallbacks): WindowsNative {
       const line = buffer.slice(0, separator).trim(); buffer = buffer.slice(separator + 1);
       if (!line) continue;
       try {
-        const event = JSON.parse(line) as { type?: unknown; fullscreen?: unknown; phase?: unknown; x?: unknown; y?: unknown; captureId?: unknown; requestId?: unknown; focused?: unknown };
+        const event = JSON.parse(line) as { type?: unknown; fullscreen?: unknown; phase?: unknown; x?: unknown; y?: unknown; captureId?: unknown; requestId?: unknown; focused?: unknown; prepared?: unknown };
         const captureId = typeof event.captureId === 'number' && Number.isSafeInteger(event.captureId) && event.captureId > 0 ? event.captureId : undefined;
         if (event.type === 'ready' && !initialized) { initialized = true; clearTimeout(timer); finish(); }
         else if (event.type === 'fullscreen' && typeof event.fullscreen === 'boolean') callbacks.onFullscreen(event.fullscreen);
-        else if (event.type === 'trigger-begin' && captureId !== undefined) callbacks.onTriggerBegin(captureId);
-        else if (event.type === 'trigger-hold' && captureId !== undefined) callbacks.onTriggerHold(captureId);
-        else if (event.type === 'trigger-end' && captureId !== undefined) callbacks.onTriggerEnd(captureId);
-        else if (event.type === 'trigger-cancel' && captureId !== undefined) callbacks.onTriggerCancel(captureId);
-        else if (event.type === 'selection-pointer' && captureId !== undefined && (event.phase === 'down' || event.phase === 'up') && typeof event.x === 'number' && Number.isFinite(event.x) && typeof event.y === 'number' && Number.isFinite(event.y)) callbacks.onSelectionPointer(captureId, event.phase, { x: event.x, y: event.y });
-        else if (event.type === 'pointer-down') callbacks.onPointerDown();
+        else if (event.type === 'trigger-begin' && captureId !== undefined) deliverInput(() => callbacks.onTriggerBegin(captureId));
+        else if (event.type === 'trigger-hold' && captureId !== undefined) deliverInput(() => callbacks.onTriggerHold(captureId));
+        else if (event.type === 'trigger-end' && captureId !== undefined) deliverInput(() => callbacks.onTriggerEnd(captureId), captureId);
+        else if (event.type === 'trigger-cancel' && captureId !== undefined) deliverInput(() => callbacks.onTriggerCancel(captureId), captureId);
+        else if (event.type === 'selection-pointer' && captureId !== undefined && (event.phase === 'down' || event.phase === 'up') && typeof event.x === 'number' && Number.isFinite(event.x) && typeof event.y === 'number' && Number.isFinite(event.y)) {
+          const { phase, x, y } = event;
+          deliverInput(() => callbacks.onSelectionPointer(captureId, phase, { x, y }));
+        }
+        else if ((event.type === 'pointer-down' || event.type === 'pointer-up') && typeof event.x === 'number' && Number.isFinite(event.x) && typeof event.y === 'number' && Number.isFinite(event.y)) {
+          const { x, y } = event;
+          const callback = event.type === 'pointer-down' ? callbacks.onPointerDown : callbacks.onPointerUp;
+          deliverInput(() => callback({ x, y }));
+        }
         else if (event.type === 'focus-result' && typeof event.requestId === 'string' && typeof event.focused === 'boolean') {
           if (pendingFocus?.id === event.requestId) { clearTimeout(pendingFocus.timer); pendingFocus.resolve(event.focused); pendingFocus = undefined; }
+        }
+        else if (event.type === 'overlay-window-prepared' && typeof event.requestId === 'string' && typeof event.prepared === 'boolean') {
+          const pending = overlayPreparations.get(event.requestId);
+          if (pending) { clearTimeout(pending.timer); overlayPreparations.delete(event.requestId); pending.resolve(event.prepared); }
         }
         else if (event.type === 'configured' && typeof event.requestId === 'string') {
           const pending = configurations.get(event.requestId);
           if (pending) { clearTimeout(pending.timer); configurations.delete(event.requestId); pending.resolve(); }
+        }
+        else if (event.type === 'selection-started' && typeof event.requestId === 'string' && (captureId !== undefined || event.captureId === 0)) {
+          const pending = selections.get(event.requestId);
+          if (pending) {
+            clearTimeout(pending.timer); selections.delete(event.requestId);
+            if (captureId !== undefined) { manualCaptureId = captureId; pending.resolve(captureId); }
+            else pending.reject(new Error('当前无法开始屏幕框选。'));
+          }
         }
         else { failure(); return; }
       } catch { failure(); return; }
@@ -113,7 +152,26 @@ export function createWindowsNative(callbacks: NativeCallbacks): WindowsNative {
         child.stdin.write(JSON.stringify({ type: 'configure', requestId: id, ...configuration }) + '\n');
       });
     },
+    beginSelection() {
+      if (stopped) return Promise.reject(new Error('全局触发助手不可用。'));
+      const id = randomUUID();
+      return new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(failure, 7000); timer.unref();
+        selections.set(id, { resolve, reject, timer });
+        child.stdin.write(JSON.stringify({ type: 'begin-selection', requestId: id }) + '\n');
+      });
+    },
     cancelCapture(captureId) { if (!stopped) child.stdin.write(JSON.stringify({ type: 'cancel-capture', captureId }) + '\n'); },
+    prepareOverlayWindow(handle) {
+      if (stopped) return Promise.resolve(false);
+      const id = randomUUID();
+      return new Promise<boolean>(resolve => {
+        const timer = setTimeout(() => { overlayPreparations.delete(id); resolve(false); }, 3000);
+        timer.unref();
+        overlayPreparations.set(id, { resolve, timer });
+        child.stdin.write(JSON.stringify({ type: 'prepare-overlay-window', requestId: id, handle }) + '\n');
+      });
+    },
     focusWindow(handle) {
       if (stopped) return Promise.resolve(false);
       cancelFocus();
@@ -126,6 +184,16 @@ export function createWindowsNative(callbacks: NativeCallbacks): WindowsNative {
       });
     },
     cancelFocus,
-    stop() { if (stopped) return; cancelFocus(); for (const pending of configurations.values()) { clearTimeout(pending.timer); pending.reject(new Error('全局触发助手已关闭。')); } configurations.clear(); stopped = true; clearTimeout(timer); closeChild(); if (!initialized) finish(); },
+    stop() {
+      if (stopped) return;
+      cancelFocus();
+      for (const pending of overlayPreparations.values()) { clearTimeout(pending.timer); pending.resolve(false); }
+      overlayPreparations.clear();
+      for (const pending of configurations.values()) { clearTimeout(pending.timer); pending.reject(new Error('全局触发助手已关闭。')); }
+      configurations.clear();
+      for (const pending of selections.values()) { clearTimeout(pending.timer); pending.reject(new Error('屏幕框选已取消。')); }
+      selections.clear();
+      stopped = true; clearTimeout(timer); closeChild(); if (!initialized) finish();
+    },
   };
 }

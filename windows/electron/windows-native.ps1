@@ -19,7 +19,7 @@ using System.Web.Script.Serialization;
 
 namespace RabbitBall {
     public static class WindowsNative {
-        const uint WM_QUIT = 0x0012, WM_TIMER = 0x0113, WM_CONFIGURE = 0x8001, WM_CANCEL_CAPTURE = 0x8002;
+        const uint WM_QUIT = 0x0012, WM_TIMER = 0x0113, WM_CONFIGURE = 0x8001, WM_CANCEL_CAPTURE = 0x8002, WM_BEGIN_SELECTION = 0x8003;
         const uint WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
         const uint WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205;
         const uint WM_MBUTTONDOWN = 0x0207, WM_MBUTTONUP = 0x0208;
@@ -40,7 +40,7 @@ namespace RabbitBall {
         sealed class TriggerState {
             readonly Dictionary<int, HeldKey> held = new Dictionary<int, HeldKey>();
             NativeConfig config = new NativeConfig();
-            bool active, consumedLeftDown, holdEmitted;
+            bool active, consumedLeftDown, holdEmitted, manualSelection;
             long startedAt;
             public NativeConfig Config { get { return config; } }
             bool Armed { get { return config.inputEnabled && !config.recording; } }
@@ -59,6 +59,7 @@ namespace RabbitBall {
             }
             void EndCycle() {
                 active = false;
+                manualSelection = false;
                 // 组合完成或取消后须松开其成员，不能靠另一个成员的重复按下重入。
                 foreach (HeldKey key in held.Values) key.Eligible = false;
             }
@@ -128,7 +129,7 @@ namespace RabbitBall {
                 if (!down) {
                     if (held.TryGetValue(id, out existing)) {
                         decision.Suppress = existing.Suppress;
-                        if (active && Member(id)) {
+                        if (active && !manualSelection && Member(id)) {
                             decision.Hold = Hold(now).Hold;
                             decision.End = true;
                             EndCycle();
@@ -142,7 +143,7 @@ namespace RabbitBall {
                     decision.Suppress = existing.Suppress;
                     return decision;
                 }
-                if (active && id == 1 && !Member(id)) {
+                if (active && id == 1 && (manualSelection || !Member(id))) {
                     // 捕获中的 Escape 整次吞下，避免泄漏为系统 Alt+Esc。
                     Cancel(decision);
                     held.Add(id, new HeldKey { Raw = raw, Suppress = true });
@@ -171,6 +172,10 @@ namespace RabbitBall {
                     consumedLeftDown = false;
                     decision.Suppress = true;
                     decision.SelectionUp = active;
+                    if (active && manualSelection) {
+                        decision.End = true;
+                        EndCycle();
+                    }
                 } else if (button == 1 && down && active) {
                     decision.Hold = Hold(now).Hold;
                     if (holdEmitted) {
@@ -179,6 +184,12 @@ namespace RabbitBall {
                     }
                 }
                 return decision;
+            }
+            public bool BeginSelection() {
+                if (!Armed || active || consumedLeftDown) return false;
+                // 相机按钮直接进入单次框选，沿用长按的鼠标账本，不合成启动键事件。
+                active = manualSelection = holdEmitted = true;
+                return true;
             }
             public Decision Hold(long now) {
                 Decision decision = new Decision();
@@ -214,18 +225,20 @@ namespace RabbitBall {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
         [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
         [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+        [DllImport("user32.dll")] static extern IntPtr GetShellWindow();
         [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
         [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
-        [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr window);
-        [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr window);
-        [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int length);
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
         [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr window, out Rect rect);
         [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window, ref Point point);
         [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern uint GetWindowStyle(IntPtr window, int index);
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW")] static extern uint SetWindowStyle(IntPtr window, int index, uint style);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint extendedStyle, string className, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+        [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr window);
         [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
 
@@ -233,6 +246,7 @@ namespace RabbitBall {
         static IntPtr keyboardHook, mouseHook;
         static HookProc keyboardCallback, mouseCallback;
         static readonly ConcurrentQueue<NativeConfig> pendingConfigurations = new ConcurrentQueue<NativeConfig>();
+        static readonly ConcurrentQueue<string> pendingSelections = new ConcurrentQueue<string>();
         static uint hookThread;
         static int ignoreProcessId, captureId;
         static readonly Stopwatch clock = Stopwatch.StartNew();
@@ -304,9 +318,17 @@ namespace RabbitBall {
             catch (InvalidOperationException) { }
         }
 
+        static bool PrepareOverlayWindow(long handle) {
+            IntPtr target = new IntPtr(handle);
+            uint owner;
+            if (ignoreProcessId <= 0 || !IsWindow(target) || GetWindowThreadProcessId(target, out owner) == 0 || owner != (uint)ignoreProcessId) return false;
+            // 悬浮工具窗的透明边界不能作为其它 Chromium 窗口的整矩形遮挡。
+            uint style = GetWindowStyle(target, -20);
+            SetWindowStyle(target, -20, style | 0x00000080);
+            return IsWindow(target) && GetWindowThreadProcessId(target, out owner) != 0 && owner == (uint)ignoreProcessId && GetWindowStyle(target, -20) == (style | 0x00000080);
+        }
+
         static bool FocusOwnedWindow(string requestId, long handle) {
-            Message message;
-            PeekMessage(out message, IntPtr.Zero, 0, 0, 0);
             if (!CurrentFocusRequest(requestId)) return false;
             IntPtr target = new IntPtr(handle);
             uint owner;
@@ -316,31 +338,14 @@ namespace RabbitBall {
             if (!CurrentFocusRequest(requestId)) return false;
             if (GetForegroundWindow() == target) return true;
             SetForegroundWindow(target);
-            if (GetForegroundWindow() == target) return true;
-
-            uint foregroundOwner;
-            uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out foregroundOwner);
-            uint workerThread = GetCurrentThreadId();
-            bool attachedForeground = false, attachedTarget = false;
-            try {
-                if (!CurrentFocusRequest(requestId)) return false;
-                if (foregroundThread != 0 && foregroundThread != workerThread)
-                    attachedForeground = AttachThreadInput(workerThread, foregroundThread, true);
-                if (!CurrentFocusRequest(requestId)) return false;
-                if (targetThread != workerThread && targetThread != foregroundThread)
-                    attachedTarget = AttachThreadInput(workerThread, targetThread, true);
-                if (!CurrentFocusRequest(requestId)) return false;
-                BringWindowToTop(target);
-                if (!CurrentFocusRequest(requestId)) return false;
-                SetForegroundWindow(target);
-                if (!CurrentFocusRequest(requestId)) return false;
-                SetFocus(target);
-            } finally {
-                // 仅拆开本次确实建立的输入队列关联，且不在全局 hook 线程执行。
-                if (attachedTarget) AttachThreadInput(workerThread, targetThread, false);
-                if (attachedForeground) AttachThreadInput(workerThread, foregroundThread, false);
+            // 跨线程激活异步完成，只短暂观察结果；绝不合并外部应用的输入队列。
+            // 系统拒绝激活时保留可点击窗口，不用同步焦点调用强抢前台。
+            for (int attempt = 0; attempt < 15; attempt++) {
+                if (!CurrentFocusRequest(requestId) || !IsWindow(target)) return false;
+                if (GetForegroundWindow() == target) return true;
+                Thread.Sleep(10);
             }
-            return GetForegroundWindow() == target;
+            return CurrentFocusRequest(requestId) && GetForegroundWindow() == target;
         }
 
         static void FocusWorker(string requestId, long handle) {
@@ -404,16 +409,24 @@ namespace RabbitBall {
             else if (kind == WM_MBUTTONDOWN || kind == WM_MBUTTONUP) { button = 3; down = kind == WM_MBUTTONDOWN; }
             else if (kind == WM_XBUTTONDOWN || kind == WM_XBUTTONUP) { button = 3 + (int)(mouse.Data >> 16); down = kind == WM_XBUTTONDOWN; }
             Decision decision = state.Mouse(button, down, clock.ElapsedMilliseconds);
-            EmitTrigger(decision);
-            if (decision.SelectionDown || decision.SelectionUp) {
-                string phase = decision.SelectionDown ? "down" : "up";
-                Emit("{\"type\":\"selection-pointer\",\"captureId\":" + captureId + ",\"phase\":\"" + phase + "\",\"x\":" + mouse.Point.X + ",\"y\":" + mouse.Point.Y + "}");
-            } else if (down && !decision.Suppress) Emit("{\"type\":\"pointer-down\"}");
+            EmitMouseDecision(decision, mouse.Point, down, button);
             return decision.Suppress ? new IntPtr(1) : CallNextHookEx(mouseHook, code, message, data);
         }
 
+        static void EmitMouseDecision(Decision decision, Point point, bool down, int button = 1) {
+            // 单次框选必须先提交最后的区域，再通知主进程结束捕获。
+            if (!decision.End) EmitTrigger(decision);
+            if (decision.SelectionDown || decision.SelectionUp) {
+                string phase = decision.SelectionDown ? "down" : "up";
+                Emit("{\"type\":\"selection-pointer\",\"captureId\":" + captureId + ",\"phase\":\"" + phase + "\",\"x\":" + point.X + ",\"y\":" + point.Y + "}");
+            } else if (button != 0 && !decision.Suppress) Emit("{\"type\":\"pointer-" + (down ? "down" : "up") + "\",\"x\":" + point.X + ",\"y\":" + point.Y + "}");
+            if (decision.End) EmitTrigger(decision);
+        }
+
         static bool? ReadFullscreen(IntPtr window) {
-            if (window == IntPtr.Zero || !IsWindow(window) || IsIconic(window)) return false;
+            // 原生桌面同样铺满显示器；按句柄排除，不能只依赖 Progman/WorkerW 类名。
+            if (window == IntPtr.Zero || window == GetDesktopWindow() || window == GetShellWindow() ||
+                !IsWindow(window) || IsIconic(window)) return false;
             uint processId;
             if (GetWindowThreadProcessId(window, out processId) == 0) return false;
             if (ignoreProcessId > 0 && processId == (uint)ignoreProcessId) return null;
@@ -489,6 +502,17 @@ namespace RabbitBall {
             }
         }
 
+        static void BeginSelections() {
+            string requestId;
+            while (pendingSelections.TryDequeue(out requestId)) {
+                int started = 0;
+                if (state.BeginSelection()) { StopHoldTimer(); started = ++captureId; }
+                Emit(new JavaScriptSerializer().Serialize(new Dictionary<string, object> {
+                    { "type", "selection-started" }, { "requestId", requestId }, { "captureId", started }
+                }));
+            }
+        }
+
         static void ReadCommands() {
             try {
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -500,6 +524,17 @@ namespace RabbitBall {
                         throw new InvalidOperationException("原生助手配置格式无效。");
                     if (Object.Equals(type, "cancel-focus")) {
                         activeFocusRequest = null;
+                        continue;
+                    }
+                    if (Object.Equals(type, "prepare-overlay-window")) {
+                        object request, window;
+                        if (!command.TryGetValue("requestId", out request) || !(request is string) || !ValidRequestId((string)request))
+                            throw new InvalidOperationException("悬浮窗口请求编号无效。");
+                        long handle;
+                        bool prepared = command.TryGetValue("handle", out window) && window is string && TryHandle((string)window, out handle) && PrepareOverlayWindow(handle);
+                        Emit(serializer.Serialize(new Dictionary<string, object> {
+                            { "type", "overlay-window-prepared" }, { "requestId", request }, { "prepared", prepared }
+                        }));
                         continue;
                     }
                     if (Object.Equals(type, "focus-window")) {
@@ -521,6 +556,14 @@ namespace RabbitBall {
                         if (!command.TryGetValue("captureId", out requested) || !(requested is int) || (int)requested <= 0)
                             throw new InvalidOperationException("截图取消编号无效。");
                         PostThreadMessage(hookThread, WM_CANCEL_CAPTURE, new UIntPtr((uint)(int)requested), IntPtr.Zero);
+                        continue;
+                    }
+                    if (Object.Equals(type, "begin-selection")) {
+                        object request;
+                        if (!command.TryGetValue("requestId", out request) || !(request is string) || !ValidRequestId((string)request))
+                            throw new InvalidOperationException("屏幕框选请求编号无效。");
+                        pendingSelections.Enqueue((string)request);
+                        PostThreadMessage(hookThread, WM_BEGIN_SELECTION, UIntPtr.Zero, IntPtr.Zero);
                         continue;
                     }
                     if (!Object.Equals(type, "configure"))
@@ -578,6 +621,7 @@ namespace RabbitBall {
                         if (ShouldCancel(unchecked((int)message.WParam.ToUInt64()), captureId)) EmitTrigger(state.CancelCapture());
                     }
                     else if (message.Id == WM_CONFIGURE) ApplyConfigurations();
+                    else if (message.Id == WM_BEGIN_SELECTION) BeginSelections();
                     else if (message.Id == WM_TIMER && message.WParam == timer) PollFullscreen();
                     else { TranslateMessage(ref message); DispatchMessage(ref message); }
                 }
@@ -585,6 +629,7 @@ namespace RabbitBall {
                 if (failure != null) throw new InvalidOperationException(failure);
             } finally {
                 activeFocusRequest = null;
+                EmitTrigger(state.CancelCapture());
                 StopHoldTimer();
                 if (timer != UIntPtr.Zero) KillTimer(IntPtr.Zero, timer);
                 if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
@@ -618,9 +663,16 @@ namespace RabbitBall {
         static Decision Button(TriggerState state, int button, bool down, long time) { return state.Mouse(button, down, time); }
 
         public static void Validate() {
-            // 只运行状态机、坐标和序列化测试，不安装 hook 或发送真实输入。
+            // 只运行状态机、窗口分类、坐标和序列化测试，不安装 hook 或发送真实输入。
             TriggerState state;
             Decision decision;
+            foreach (IntPtr desktop in new IntPtr[] { IntPtr.Zero, GetDesktopWindow(), GetShellWindow() }) {
+                Assert(ReadFullscreen(desktop) == false);
+                state = Configured(MainKey(0x42));
+                decision = state.Key(Raw(0x42), true, 0, delegate { return ReadFullscreen(desktop) != true; });
+                Assert(decision.Begin && decision.Suppress);
+                Assert(Up(state, 0x42, 100).End);
+            }
             Rect monitor = new Rect { Left = -1920, Top = -1080, Right = 0, Bottom = 0 };
             Assert(FullscreenSurface(monitor, monitor, 0x80000000u));
             Assert(!FullscreenSurface(monitor, monitor, 0x00CF0000u));
@@ -828,6 +880,79 @@ namespace RabbitBall {
             Assert(!Down(state, 1, 507).Suppress && !Up(state, 1, 508).Suppress);
             Assert(Down(state, 0x38, 509).Begin);
 
+            // 相机入口不需要按住激活键；单次拖拽提交后自动结束，重复启动不替换当前捕获。
+            state = Configured(Mod(0x38));
+            Assert(state.BeginSelection() && !state.BeginSelection());
+            Assert(!state.Hold(1000).Hold);
+            decision = Down(state, 0x38);
+            Assert(decision.Suppress && !decision.Begin);
+            decision = Up(state, 0x38, 1);
+            Assert(decision.Suppress && !decision.End);
+            decision = Button(state, 1, true, 2);
+            Assert(decision.Suppress && decision.SelectionDown && !decision.Begin && !decision.Hold);
+            decision = Button(state, 1, false, 3);
+            Assert(decision.Suppress && decision.SelectionUp && decision.End && !decision.Hold);
+            Assert(!Button(state, 1, true, 4).Suppress && !Button(state, 1, false, 5).Suppress);
+            Assert(!state.CancelCapture().Cancel);
+            Assert(Down(state, 0x38, 6).Begin && !state.BeginSelection());
+            Assert(Up(state, 0x38, 7).End && state.BeginSelection());
+
+            // Escape 即使本身是配置键也取消手动框选；取消拖拽后仍吞掉配对的鼠标释放。
+            foreach (int shortcut in new int[] { 1, 0x38 }) {
+                state = Configured(MainKey(shortcut));
+                Assert(state.BeginSelection());
+                Assert(Button(state, 1, true, 0).SelectionDown);
+                decision = Down(state, 1, 1);
+                Assert(decision.Suppress && decision.Cancel);
+                Assert(!state.BeginSelection());
+                decision = Button(state, 1, false, 2);
+                Assert(decision.Suppress && !decision.SelectionUp && !decision.End);
+                Assert(Up(state, 1, 3).Suppress && state.BeginSelection());
+                Assert(state.CancelCapture().Cancel && !state.CancelCapture().Cancel);
+            }
+            foreach (bool recording in new bool[] { false, true }) {
+                state = Configured(Mod(0x38));
+                Assert(state.BeginSelection());
+                NativeConfig disabled = TestConfig(Mod(0x38));
+                disabled.inputEnabled = recording; disabled.recording = recording;
+                Assert(state.Apply(disabled).Cancel);
+                Assert(!state.BeginSelection() && !Button(state, 1, true, 0).Suppress);
+                state.Apply(TestConfig(Mod(0x38)));
+                Assert(state.BeginSelection());
+                Assert(state.CancelCapture().Cancel);
+            }
+
+            // 回执与真实输出路径共用：先回编号，最后一次 pointer-up 必须早于 trigger-end。
+            WindowsNative.state = Configured(Mod(0x38));
+            output = new BlockingCollection<string>();
+            pendingSelections.Enqueue("manual-start"); BeginSelections();
+            JavaScriptSerializer manualParser = new JavaScriptSerializer();
+            Dictionary<string, object> manualAck = manualParser.Deserialize<Dictionary<string, object>>(output.Take());
+            Assert(Object.Equals(manualAck["type"], "selection-started") && Object.Equals(manualAck["requestId"], "manual-start"));
+            Assert(Object.Equals(manualAck["captureId"], captureId) && captureId > 0);
+            EmitMouseDecision(Button(WindowsNative.state, 1, true, 0), new Point { X = -100, Y = 30 }, true);
+            EmitMouseDecision(Button(WindowsNative.state, 1, false, 1), new Point { X = 300, Y = 230 }, false);
+            Dictionary<string, object> manualDown = manualParser.Deserialize<Dictionary<string, object>>(output.Take());
+            Dictionary<string, object> manualUp = manualParser.Deserialize<Dictionary<string, object>>(output.Take());
+            Dictionary<string, object> manualEnd = manualParser.Deserialize<Dictionary<string, object>>(output.Take());
+            Assert(Object.Equals(manualDown["type"], "selection-pointer") && Object.Equals(manualDown["phase"], "down") && Object.Equals(manualDown["x"], -100));
+            Assert(Object.Equals(manualUp["type"], "selection-pointer") && Object.Equals(manualUp["phase"], "up") && Object.Equals(manualUp["y"], 230));
+            Assert(Object.Equals(manualEnd["type"], "trigger-end") && Object.Equals(manualEnd["captureId"], captureId));
+            Assert(output.Count == 0);
+            // 普通点击和释放都携带物理坐标；移动与滚轮不生成按键通知。
+            EmitMouseDecision(Button(WindowsNative.state, 1, true, 2), new Point { X = -640, Y = 210 }, true);
+            EmitMouseDecision(Button(WindowsNative.state, 1, false, 3), new Point { X = -630, Y = 220 }, false);
+            EmitMouseDecision(Button(WindowsNative.state, 2, true, 4), new Point { X = 1920, Y = -50 }, true);
+            Dictionary<string, object> firstClick = manualParser.Deserialize<Dictionary<string, object>>(output.Take());
+            Dictionary<string, object> firstRelease = manualParser.Deserialize<Dictionary<string, object>>(output.Take());
+            Dictionary<string, object> secondClick = manualParser.Deserialize<Dictionary<string, object>>(output.Take());
+            Assert(Object.Equals(firstClick["type"], "pointer-down") && Object.Equals(firstClick["x"], -640) && Object.Equals(firstClick["y"], 210));
+            Assert(Object.Equals(firstRelease["type"], "pointer-up") && Object.Equals(firstRelease["x"], -630) && Object.Equals(firstRelease["y"], 220));
+            Assert(Object.Equals(secondClick["type"], "pointer-down") && Object.Equals(secondClick["x"], 1920) && Object.Equals(secondClick["y"], -50));
+            EmitMouseDecision(Button(WindowsNative.state, 0, false, 5), new Point { X = 1940, Y = -40 }, false, 0);
+            Assert(output.Count == 0);
+            output.Dispose(); output = null;
+
             // 原有编号、焦点句柄边界与 JSON 转义验证继续保留。
             Assert(!ShouldCancel(1, 2) && ShouldCancel(2, 2) && !ShouldCancel(0, 2) && !ShouldCancel(0, 0) && !ShouldCancel(-1, 2));
             Assert(ValidRequestId("d430a1d8-664a-4979-a506-3934f7d49bd6"));
@@ -841,6 +966,32 @@ namespace RabbitBall {
             Assert(OwnsVisibleTarget(12, 12, true, true) && !OwnsVisibleTarget(0, 0, true, true));
             Assert(!OwnsVisibleTarget(12, 13, true, true));
             Assert(!OwnsVisibleTarget(12, 12, false, true) && !OwnsVisibleTarget(12, 12, true, false));
+            // 隐藏的自有 HWND 可在首次展示前准备；不改变输入样式、尺寸或前台窗口。
+            int originalIgnoreProcessId = ignoreProcessId;
+            ignoreProcessId = Process.GetCurrentProcess().Id;
+            IntPtr ownedOverlay = CreateWindowEx(0x08080020, "STATIC", "RabbitBall overlay validation", 0x80000000, 10, 20, 80, 60, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            Assert(ownedOverlay != IntPtr.Zero);
+            try {
+                uint beforeStyle = GetWindowStyle(ownedOverlay, -20);
+                IntPtr beforeForeground = GetForegroundWindow();
+                Rect beforeRect, afterRect;
+                Assert(GetClientRect(ownedOverlay, out beforeRect));
+                Assert(PrepareOverlayWindow(ownedOverlay.ToInt64()));
+                Assert(GetWindowStyle(ownedOverlay, -20) == (beforeStyle | 0x80));
+                Assert(!IsWindowVisible(ownedOverlay) && GetForegroundWindow() == beforeForeground);
+                Assert(GetClientRect(ownedOverlay, out afterRect) && beforeRect.Left == afterRect.Left && beforeRect.Top == afterRect.Top && beforeRect.Right == afterRect.Right && beforeRect.Bottom == afterRect.Bottom);
+                Assert(PrepareOverlayWindow(ownedOverlay.ToInt64()));
+                uint shellStyle = GetWindowStyle(GetShellWindow(), -20);
+                Assert(!PrepareOverlayWindow(GetShellWindow().ToInt64()));
+                Assert(GetWindowStyle(GetShellWindow(), -20) == shellStyle);
+                Assert(!PrepareOverlayWindow(0));
+                ignoreProcessId = 0;
+                Assert(!PrepareOverlayWindow(ownedOverlay.ToInt64()));
+            } finally {
+                DestroyWindow(ownedOverlay);
+                ignoreProcessId = originalIgnoreProcessId;
+            }
+            Assert(!PrepareOverlayWindow(ownedOverlay.ToInt64()));
             string escapedId = "test\n\"\\id";
             Dictionary<string, object> focusJson = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(FocusResultJson(escapedId, true));
             Assert(Object.Equals(focusJson["requestId"], escapedId) && Object.Equals(focusJson["focused"], true));

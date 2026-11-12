@@ -5,7 +5,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 try {
-    # 读取前台窗口元数据，可选只让该 HWND 绘制到内存，不改变焦点。
+    # 窗口截图由目标 HWND 绘制；屏幕框选与背景独立读取桌面像素。
     Add-Type -AssemblyName System.Drawing
     Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
@@ -208,7 +208,7 @@ namespace RabbitBall {
 '@
 
     function Invoke-Capture {
-        param([switch]$Capture, [switch]$CaptureDesktop, [int]$DesktopX, [int]$DesktopY, [int]$DesktopWidth, [int]$DesktopHeight)
+        param([switch]$Window, [switch]$Desktop, [int]$DesktopX, [int]$DesktopY, [int]$DesktopWidth, [int]$DesktopHeight)
         # 让窗口边界与鼠标位置都使用屏幕物理像素，避免高 DPI 下坐标被虚拟化。
         $previousDpiContext = [RabbitBall.ForegroundWindowNative]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
         if ($previousDpiContext -eq [IntPtr]::Zero) {
@@ -228,18 +228,7 @@ namespace RabbitBall {
             bounds = [ordered]@{ x = 0; y = 0; width = 0; height = 0 }
             cursor = [ordered]@{ x = $cursorPoint.X; y = $cursorPoint.Y }
         }
-        if ($CaptureDesktop) {
-            try {
-                $desktopResult = [RabbitBall.ForegroundWindowNative]::CaptureDesktop($DesktopX, $DesktopY, $DesktopWidth, $DesktopHeight)
-                $result.desktopBitmap = $desktopResult.ImageBitmap
-                $result.desktopWidth = $desktopResult.ImageWidth
-                $result.desktopHeight = $desktopResult.ImageHeight
-            } catch {
-                $result.desktopError = $_.Exception.GetBaseException().Message
-            }
-        }
-
-        if ($Capture -or -not $CaptureDesktop) {
+        if ($Window) {
             $windowHandle = [RabbitBall.ForegroundWindowNative]::SelectCaptureWindow(
                 [RabbitBall.ForegroundWindowNative]::GetForegroundWindow(), $IgnoreProcessId)
             if ($windowHandle -ne [IntPtr]::Zero) {
@@ -271,14 +260,12 @@ namespace RabbitBall {
                     } finally {
                         if ($null -ne $windowProcess) { $windowProcess.Dispose() }
                     }
-                    if ($Capture) {
-                        # PrintWindow 包含完整边框，坐标与实际截图使用同一范围。
-                        $captureResult = [RabbitBall.ForegroundWindowNative]::CaptureWindow($windowHandle)
-                        $windowRect = $captureResult.Bounds
-                        $result.imageBase64 = $captureResult.ImageBase64
-                        $result.imageWidth = $captureResult.ImageWidth
-                        $result.imageHeight = $captureResult.ImageHeight
-                    }
+                    # PrintWindow 包含完整边框，坐标与实际截图使用同一范围。
+                    $captureResult = [RabbitBall.ForegroundWindowNative]::CaptureWindow($windowHandle)
+                    $windowRect = $captureResult.Bounds
+                    $result.imageBase64 = $captureResult.ImageBase64
+                    $result.imageWidth = $captureResult.ImageWidth
+                    $result.imageHeight = $captureResult.ImageHeight
                     $result.bounds = [ordered]@{
                         x = $windowRect.Left
                         y = $windowRect.Top
@@ -288,6 +275,17 @@ namespace RabbitBall {
                 } catch {
                     $result.captureError = $_.Exception.GetBaseException().Message
                 }
+            }
+        }
+        if ($Desktop) {
+            try {
+                # 背景与窗口截图独立，任何一项失败都不替代另一项。
+                $desktopResult = [RabbitBall.ForegroundWindowNative]::CaptureDesktop($DesktopX, $DesktopY, $DesktopWidth, $DesktopHeight)
+                $result.desktopBitmap = $desktopResult.ImageBitmap
+                $result.desktopWidth = $desktopResult.ImageWidth
+                $result.desktopHeight = $desktopResult.ImageHeight
+            } catch {
+                $result.desktopError = $_.Exception.GetBaseException().Message
             }
         }
         return $result
@@ -310,9 +308,13 @@ namespace RabbitBall {
         $request = $line | ConvertFrom-Json
         try {
             if ($request.type -eq 'desktop') {
-                $result = Invoke-Capture -CaptureDesktop -DesktopX $request.bounds.x -DesktopY $request.bounds.y -DesktopWidth $request.bounds.width -DesktopHeight $request.bounds.height
+                $result = Invoke-Capture -Desktop -DesktopX $request.bounds.x -DesktopY $request.bounds.y -DesktopWidth $request.bounds.width -DesktopHeight $request.bounds.height
             } elseif ($request.type -eq 'window') {
-                $result = Invoke-Capture -Capture
+                if ($null -ne $request.backgroundBounds) {
+                    $result = Invoke-Capture -Window -Desktop -DesktopX $request.backgroundBounds.x -DesktopY $request.backgroundBounds.y -DesktopWidth $request.backgroundBounds.width -DesktopHeight $request.backgroundBounds.height
+                } else {
+                    $result = Invoke-Capture -Window
+                }
             } else { throw '未知截图请求。' }
             Write-CaptureResponse ([ordered]@{ type = 'result'; requestId = $request.requestId; result = $result }) $result
         } catch {

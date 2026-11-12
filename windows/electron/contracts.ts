@@ -1,3 +1,5 @@
+import type { GraphDesktop, GraphNodeRequest } from './graph-contracts.js';
+
 export type ReasoningLevel = 'low' | 'medium' | 'high';
 
 export interface PromptSettings {
@@ -25,6 +27,8 @@ export interface SettingsFields {
   pauseOnFullscreen: boolean;
   followMouse: boolean;
   autoCopyScreenshots: boolean;
+  graphPluginEnabled: boolean;
+  graphModeEnabled: boolean;
   activationShortcut: string[];
   prompts: PromptSettings;
 }
@@ -78,6 +82,7 @@ export interface AgentRequest {
   turnId: string;
   regenerate?: boolean;
   attachments?: Attachment[];
+  graphContext?: GraphNodeRequest;
 }
 
 export interface AgentEvent {
@@ -113,7 +118,10 @@ export interface HistoryEntry extends HistorySummary {
 
 export interface Activation {
   activationId: number;
-  view: 'prompt' | 'settings';
+  view: 'prompt' | 'settings' | 'graph';
+  workspaceId?: string;
+  graphAction?: 'rename-graph' | 'undo' | 'redo';
+  backgroundImageDataUrl?: string;
   context?: CaptureContext;
   anchor?: { x: number; y: number };
 }
@@ -134,16 +142,25 @@ export interface PointerPoint {
   y: number;
 }
 
+export interface GraphPinRegions {
+  rects: Array<{ x: number; y: number; width: number; height: number }>;
+}
+
+export interface GraphPinInteraction {
+  phase: 'down' | 'up';
+  point: PointerPoint;
+}
+
 export type CaptureEvent =
-  | { type: 'start'; sessionId: string; context: CaptureContext; backgroundImageDataUrl?: string; backgroundBitmap?: { data: Uint8Array; width: number; height: number }; width: number; height: number; dragStart?: PointerPoint; shortcut?: string[]; color?: string; useBuiltinFont?: boolean }
+  | { type: 'start'; sessionId: string; context: CaptureContext; purpose?: 'prompt' | 'graph' | 'images'; backgroundImageDataUrl?: string; backgroundBitmap?: { data: Uint8Array; width: number; height: number }; width: number; height: number; dragStart?: PointerPoint; shortcut?: string[]; color?: string; useBuiltinFont?: boolean }
   | { type: 'frame'; sessionId: string; rect?: { x: number; y: number; width: number; height: number } }
   | { type: 'pointer'; sessionId: string; phase: 'down' | 'up'; x: number; y: number }
   | { type: 'image'; sessionId: string; context: CaptureContext; rect: { x: number; y: number; width: number; height: number } }
   | { type: 'end' | 'cancel'; sessionId: string };
 
-export interface RabbitDesktop {
+export interface RabbitDesktop extends GraphDesktop {
   platform: NodeJS.Platform;
-  editText(action: 'cut' | 'copy' | 'selectAll'): Promise<void>;
+  editText(action: 'cut' | 'copy' | 'selectAll' | 'undo' | 'redo'): Promise<void>;
   readClipboardForPaste(): Promise<{ text?: string; imageDataUrl?: string }>;
   loadSettings(): Promise<PublicSettings>;
   saveSettings(patch: SettingsPatch): Promise<PublicSettings>;
@@ -162,10 +179,13 @@ export interface RabbitDesktop {
   onSuspended(listener: (suspended: boolean) => void): () => void;
   cancelCapture(): void;
   focusInput(activationId: number): Promise<boolean>;
+  playActivationEffect(origin: PointerPoint, activationId: number, color: string): void;
   setShortcutRecording(recording: boolean): Promise<void>;
   hidePanel(activationId: number): void;
   openSettings(): void;
   setInteractive(enabled: boolean, activationId?: number): void;
+  setGraphPinRegions(regions: GraphPinRegions): void;
+  graphPinInteraction(interaction: GraphPinInteraction): Promise<boolean>;
   reportPetPosition(point: PointerPoint): void;
   petViewportReady(transitionId: number): Promise<boolean>;
 }

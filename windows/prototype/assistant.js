@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const bridge = window.rabbitDesktop;
-  let currentContext = null, selectionSessionId = null, previousCaptureContext = null;
+  let currentContext = null;
   let demoSession = null, autoCopyScreenshots = true;
   const demoHistory=new Map();let historyLimit=10;
   const sortedHistory=()=>[...demoHistory.values()].sort((a,b)=>b.updatedAt-a.updatedAt);
@@ -117,7 +117,7 @@
       request.onPhase(context?.images.length ? 'scan' : 'think');
       bridge.sendMessage({ id, text: request.text, action: { chat: 'ask', search: 'search', extract: 'extract', translate: 'translate' }[request.intent] || 'ask',
         conversationId: request.conversationId, turnId: request.turnId, regenerate: !!request.regenerate,
-        contextId: context?.id, imageIds:context?.images.map(image=>image.id), attachments: request.attachments || [] }).catch(finish);
+        contextId: context?.id, imageIds:context?.images.map(image=>image.id), attachments: request.attachments || [], ...(request.graphContext?{graphContext:request.graphContext}:{}) }).catch(finish);
     });
   }
   async function demoSend(request) {
@@ -146,6 +146,14 @@
   const applySettings = event => { if (typeof event.detail.settings.autoCopyScreenshots==='boolean') autoCopyScreenshots=event.detail.settings.autoCopyScreenshots;if(Number.isSafeInteger(event.detail.settings.historyLimit)){historyLimit=event.detail.settings.historyLimit;trimHistory();} };
   document.addEventListener('settings:change',applySettings);
   document.addEventListener('settings:saved',applySettings);
+  const graphEntryError = error => document.dispatchEvent(new CustomEvent('graph:entry-error',{detail:{message:error.message||String(error)}}));
+  document.addEventListener('graph:activate',event=>{
+    void (bridge||window.RabbitGraphDemo).graphActivate(event.detail?.action).catch(graphEntryError);
+  });
+  document.addEventListener('graph:reveal',()=>{
+    const graphBridge=bridge||window.RabbitGraphDemo;
+    void graphBridge.graphOpen(window.RabbitGraph?.getSnapshot().workspaceId||undefined).then(workspace=>graphBridge.graphRevealDocument(workspace.id)).catch(graphEntryError);
+  });
   window.RabbitAssistant = Object.freeze({ mode: bridge ? 'desktop' : 'demo', captureContext, focusInput, demoCaptureStart, demoCaptureRegion, demoCaptureEnd, demoCaptureCancel, send: request => bridge ? nativeSend(request) : demoSend(request),
     listHistory:async()=>bridge?bridge.listHistory():sortedHistory().map(({id,title,updatedAt,thumbnail})=>({id,title,updatedAt,thumbnail})),
     getHistory:async id=>bridge?bridge.getHistory(id):structuredClone(demoHistory.get(id)||null),
@@ -153,30 +161,33 @@
   if (bridge) {
     let activeActivation = null, changingView = false, settingsEpoch;
     const hideIfClosed = activationId => {
-      if (activationId !== undefined && !changingView && !selectionSessionId && !window.RabbitChat?.getSnapshot().opening && !document.querySelector('#rabbit-capture-root.is-active,#rabbit-chat-root.is-open,#rabbit-settings-root.is-open')) bridge.hidePanel(activationId);
+      if (activationId !== undefined && !changingView && !window.RabbitGraph?.isOpen() && !window.RabbitChat?.getSnapshot().opening && !document.querySelector('#rabbit-capture-root.is-active,#rabbit-chat-root.is-open,#rabbit-settings-root.is-open')) bridge.hidePanel(activationId);
     };
-    bridge.onCaptureEvent(event => {
-      if (event.type==='start') { previousCaptureContext=currentContext;selectionSessionId=event.sessionId;currentContext=event.context; }
-      if (event.sessionId!==selectionSessionId) return;
-      if (event.type==='image') currentContext=event.context;
-      if (event.type==='cancel') { currentContext=previousCaptureContext;previousCaptureContext=null; }
-      window.RabbitCapture?.handleEvent(event);
-      if (event.type==='cancel') { selectionSessionId=null;hideIfClosed(activeActivation?.activationId); }
-    });
     bridge.onDismiss(activationId => {
-      if(activeActivation?.activationId===activationId)window.RabbitChat?.close();
+      if(activeActivation?.activationId===activationId){changingView=true;try{window.RabbitChat?.close();window.RabbitGraph?.close();}finally{changingView=false;}}
     });
     bridge.onActivate(async activation => {
       activeActivation=activation;
       try {
         if (activation.view === 'settings') {
           settingsEpoch=activation.activationId;
-          changingView=true;try { window.RabbitChat?.close(); } finally { changingView=false; }
+          changingView=true;try { window.RabbitChat?.close();window.RabbitGraph?.close(); } finally { changingView=false; }
           await window.RabbitSettings?.open();
         }
+        else if(activation.view==='graph'){
+          currentContext=null;
+          changingView=true;try{window.RabbitChat?.close();window.RabbitSettings?.close();}finally{changingView=false;}
+          try{await window.RabbitGraph?.open(activation);}
+          finally{
+            if(activeActivation===activation&&window.RabbitGraph?.isOpen()){
+              // 图谱呈现后结束待就绪阶段；附加操作失败也不能阻塞系统输入。
+              try{await bridge.focusInput(activation.activationId);}catch{/* 原生聚焦失败不撤销已打开的图谱。 */}
+            }
+          }
+        }
         else {
-          currentContext=activation.context||null;previousCaptureContext=null;window.RabbitCapture?.finishNative();selectionSessionId=null;
-          changingView=true;try { window.RabbitSettings?.close(); } finally { changingView=false; }
+          currentContext=activation.context||null;
+          changingView=true;try { window.RabbitSettings?.close();window.RabbitGraph?.close(); } finally { changingView=false; }
           await window.RabbitChat?.activate(currentContext,{anchor:activation.anchor,activationId:activation.activationId});
         }
       } finally {
@@ -189,6 +200,7 @@
     bridge.onSuspended(suspended => document.dispatchEvent(new CustomEvent('desktop:suspended', { detail: suspended })));
     bridge.onSettingsChanged(settings => window.RabbitSettings?.applySettings(settings));
     document.addEventListener('chat:close',event=>hideIfClosed(event.detail.activationId));
+    document.addEventListener('graph:close',event=>hideIfClosed(event.detail.activationId));
     document.addEventListener('settings:close',()=>hideIfClosed(settingsEpoch));
   }
 })();

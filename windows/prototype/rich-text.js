@@ -71,7 +71,7 @@
       maxExpand: 1000,
       macros: Object.create(null)
     });
-    return '<span class="rabbit-math' + (token.meta.display ? ' rabbit-math-display' : '') + '">' + formula + '</span>';
+    return '<span class="rabbit-math' + (token.meta.display ? ' rabbit-math-display' : '') + '" data-latex="' + markdown.utils.escapeHtml(token.content) + '">' + formula + '</span>';
   }
 
   function inlineMath(state, silent) {

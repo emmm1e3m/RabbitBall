@@ -42,44 +42,57 @@ test('助手启动只编译一次，分片响应和连续截图复用同一空�
   children[0].stdout.emit('data', Buffer.from('dy"}\n'));
   await ready;
   for (let i = 0; i < 2; i++) {
-    const capture = worker.capture({ type: 'desktop', bounds: { x: -100, y: 0, width: 100, height: 80 } }, new AbortController().signal);
+    const request = i === 0 ? { type: 'window' } : { type: 'desktop', bounds: { x: -100, y: 0, width: 100, height: 80 } };
+    const capture = worker.capture(request, new AbortController().signal);
     await Promise.resolve();
-    children[0].reply({ desktopImageBase64: 'image-' + i });
-    assert.equal((await capture).desktopImageBase64, 'image-' + i);
+    const { requestId, ...sent } = JSON.parse(children[0].lines.at(-1)!);
+    assert.deepEqual(sent, request);
+    children[0].reply({ title: 'image-' + i });
+    assert.equal((await capture).title, 'image-' + i);
   }
   assert.equal(children.length, 1);
   worker.stop();
   assert.equal(children[0].killed, true);
 });
 
-test('二进制像素按声明长度读取，跨块中文与像素中的换行不干扰协议', async () => {
+test('窗口图与独立背景同包返回，跨块中文与二进制换行不干扰协议', async () => {
   const { worker, children } = harness();
   const ready = worker.prepare(); children[0].emitLine({ type: 'ready' }); await ready;
-  const capture = worker.capture({ type: 'desktop', bounds: { x: 0, y: 0, width: 2, height: 1 } }, new AbortController().signal);
+  const bounds = { x: -2, y: 0, width: 2, height: 1 };
+  const capture = worker.capture({ type: 'window', backgroundBounds: bounds }, new AbortController().signal);
   await Promise.resolve();
-  const { requestId } = JSON.parse(children[0].lines.at(-1)!);
+  const { requestId, ...request } = JSON.parse(children[0].lines.at(-1)!);
+  assert.deepEqual(request, { type: 'window', backgroundBounds: bounds });
   const pixels = Buffer.from([10, 0, 255, 255, 0, 255, 10, 255]);
-  const header = Buffer.from(JSON.stringify({ type: 'result', requestId, bitmapBytes: 8, result: { title: '屏幕', desktopWidth: 2, desktopHeight: 1 } }) + '\n');
+  const metadata = { title: '屏幕', handle: '1234', bounds, cursor: { x: -1, y: 0 }, imageBase64: Buffer.from('window PNG').toString('base64'), imageWidth: 240, imageHeight: 160 };
+  const header = Buffer.from(JSON.stringify({ type: 'result', requestId, bitmapBytes: 8, result: { ...metadata, desktopWidth: 2, desktopHeight: 1 } }) + '\n');
   const chineseByte = header.indexOf(Buffer.from('屏')) + 1;
   children[0].stdout.emit('data', header.subarray(0, chineseByte));
   children[0].stdout.emit('data', Buffer.concat([header.subarray(chineseByte), pixels.subarray(0, 3)]));
   children[0].stdout.emit('data', pixels.subarray(3));
   const result = await capture;
   assert.equal(result.title, '屏幕');
+  assert.equal(result.handle, metadata.handle);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.bounds)), metadata.bounds);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.cursor)), metadata.cursor);
   assert.deepEqual(result.desktopBitmap, pixels);
+  assert.equal(result.imageBase64, metadata.imageBase64);
+  assert.equal(result.imageWidth, 240);
+  assert.equal(result.imageHeight, 160);
   worker.stop();
 });
 
-test('取消被外部窗口阻塞的截图会结束旧助手，新会话不受旧响应或退出影响', async () => {
+test('取消未完成的窗口截图会结束旧助手，新会话不受旧响应或退出影响', async () => {
   const { worker, children } = harness();
   const ready = worker.prepare(); children[0].emitLine({ type: 'ready' }); await ready;
   const controller = new AbortController();
-  const oldCapture = worker.capture({ type: 'window' }, controller.signal);
+  const request = { type: 'window' };
+  const oldCapture = worker.capture(request, controller.signal);
   await Promise.resolve();
   controller.abort();
   await assert.rejects(oldCapture, /取消/);
   assert.equal(children[0].killed, true);
-  const next = worker.capture({ type: 'window' }, new AbortController().signal);
+  const next = worker.capture(request, new AbortController().signal);
   children[1].emitLine({ type: 'ready' });
   await Promise.resolve();
   children[0].reply({ title: '旧图' }); children[0].emit('exit');

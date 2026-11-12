@@ -19,6 +19,8 @@ export const DEFAULT_SETTINGS: SettingsFields = {
   pauseOnFullscreen: true,
   followMouse: true,
   autoCopyScreenshots: true,
+  graphPluginEnabled: true,
+  graphModeEnabled: false,
   activationShortcut: [...DEFAULT_ACTIVATION_SHORTCUT],
   prompts: { ...DEFAULT_PROMPTS },
 };
@@ -34,7 +36,7 @@ export function validateSettingsPatch(value: unknown): SettingsPatch {
   const patch: SettingsPatch = {};
   if (input.activationShortcut !== undefined) patch.activationShortcut = normalizeShortcut(input.activationShortcut);
   if (input.prompts !== undefined) patch.prompts = normalizePromptOverrides(input.prompts);
-  for (const key of ['launchAtLogin', 'pauseOnFullscreen', 'followMouse', 'autoCopyScreenshots', 'useBuiltinFont'] as const) {
+  for (const key of ['launchAtLogin', 'pauseOnFullscreen', 'followMouse', 'autoCopyScreenshots', 'useBuiltinFont', 'graphPluginEnabled', 'graphModeEnabled'] as const) {
     if (input[key] === undefined) continue;
     if (typeof input[key] !== 'boolean') throw new Error('开关设置无效。');
     patch[key] = input[key];
@@ -94,6 +96,7 @@ export class SettingsStore {
     const patch = validateSettingsPatch(stored);
     const { apiKey: _discard, prompts, ...fields } = patch;
     this.fields = { ...DEFAULT_SETTINGS, ...fields, activationShortcut: [...(fields.activationShortcut ?? DEFAULT_ACTIVATION_SHORTCUT)], prompts: resolvePrompts(prompts) };
+    if (!this.fields.graphPluginEnabled) this.fields.graphModeEnabled = false;
     const encrypted = (stored as Partial<StoredSettings>).encryptedApiKey;
     if (typeof encrypted === 'string' && encrypted) {
       const decrypted = await safeStorage.decryptStringAsync(Buffer.from(encrypted, 'base64'));
@@ -115,6 +118,7 @@ export class SettingsStore {
     const patch = validateSettingsPatch(value);
     const { apiKey, prompts, ...fields } = patch;
     const nextFields: SettingsFields = { ...this.fields, ...fields, prompts: prompts === undefined ? this.fields.prompts : resolvePrompts(prompts) };
+    if (!nextFields.graphPluginEnabled) nextFields.graphModeEnabled = false;
     let encrypted = this.encryptedApiKey;
     if (apiKey !== undefined) {
       if (apiKey) {

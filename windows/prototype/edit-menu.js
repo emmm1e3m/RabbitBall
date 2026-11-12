@@ -14,11 +14,11 @@
   document.head.appendChild(style);
   const menu = document.createElement('div');
   menu.id = 'rabbit-edit-menu'; menu.hidden = true; menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', '编辑');
-  const actions = [['cut', '剪切', 'Ctrl+X'], ['copy', '复制', 'Ctrl+C'], ['paste', '粘贴', 'Ctrl+V'], ['selectAll', '全选', 'Ctrl+A']];
+  const actions = [['undo', '撤销', 'Ctrl+Z'], ['redo', '重做', 'Ctrl+Shift+Z / Ctrl+Y'], ['cut', '剪切', 'Ctrl+X'], ['copy', '复制', 'Ctrl+C'], ['paste', '粘贴', 'Ctrl+V'], ['selectAll', '全选', 'Ctrl+A']];
   menu.innerHTML = actions.map(([action, label, key]) => `<button type="button" role="menuitem" tabindex="-1" data-action="${action}"><span>${label}</span><kbd>${key}</kbd></button>`).join('');
   scene.appendChild(menu);
   const buttons = [...menu.querySelectorAll('button')];
-  let target = null, epoch = 0, editVersion = 0, activeIndex = -1;
+  let target = null, epoch = 0, editVersion = 0, activeIndex = -1, compositionTarget = null;
   const editable = element => element?.matches('textarea,input:not([type]),input[type="text"],input[type="search"],input[type="url"],input[type="tel"],input[type="email"],input[type="password"],input[type="number"]') && !element.disabled;
   const session = element => element.matches('.chat-input') ? window.RabbitChat?.getSnapshot().activation : null;
   function close() { menu.hidden = true; target = null; activeIndex = -1; }
@@ -39,26 +39,27 @@
       document.execCommand('insertText', false, content.text);
     }
   }
-  async function run(action) {
-    const element = target;
+  async function run(action, element = target) {
     close();
-    if (!element?.isConnected) return;
+    if (!element?.isConnected || !editable(element)) return;
+    if (['undo', 'redo', 'cut', 'paste'].includes(action) && (element.readOnly || compositionTarget === element)) return;
+    element.focus({ preventScroll: true });
     if (action === 'paste') await paste(element);
     else if (bridge) await bridge.editText(action);
     else document.execCommand(action);
   }
   function reportFailure(error) {
     // 编辑失败不改变原文与选区，便于用户重试。
-    console.warn('剪贴板操作未完成', error);
+    console.warn('编辑操作未完成', error);
   }
   document.addEventListener('contextmenu', event => {
     if (!editable(event.target)) { close(); return; }
     event.preventDefault(); event.stopPropagation();
     target = event.target; target.focus({ preventScroll: true });
-    const selected = target.selectionStart !== target.selectionEnd;
+    const selected = Number.isInteger(target.selectionStart) && Number.isInteger(target.selectionEnd) ? target.selectionStart !== target.selectionEnd : null;
     buttons.forEach(button => {
       const action = button.dataset.action;
-      button.disabled = ((action === 'cut' || action === 'copy') && !selected) || ((action === 'cut' || action === 'paste') && target.readOnly) || (action === 'selectAll' && !target.value);
+      button.disabled = ((action === 'cut' || action === 'copy') && !(selected ?? document.queryCommandEnabled(action))) || ((action === 'cut' || action === 'paste') && target.readOnly) || (action === 'selectAll' && !target.value) || (['undo', 'redo'].includes(action) && (target.readOnly || compositionTarget === target || !document.queryCommandEnabled(action)));
       button.classList.remove('is-active');
     });
     activeIndex = -1; menu.hidden = false;
@@ -85,6 +86,17 @@
     close(); void paste(event.target).catch(reportFailure);
   }, true);
   document.addEventListener('keydown', event => {
+    const element = event.target, key = event.key.toLowerCase();
+    const historyAction = (event.ctrlKey || event.metaKey) && !event.altKey ? key === 'z' ? event.shiftKey ? 'redo' : 'undo' : key === 'y' ? 'redo' : null : null;
+    if (historyAction && editable(element)) {
+      // 输入历史只交给浏览器原生编辑栈，不让同一按键触发画布结构撤销。
+      event.stopImmediatePropagation();
+      if (event.isComposing || event.keyCode === 229 || compositionTarget === element) return;
+      event.preventDefault(); editVersion++; close();
+      if (!element.readOnly) void run(historyAction, element).catch(reportFailure);
+      return;
+    }
+    if (event.isComposing || event.keyCode === 229 || compositionTarget === element) { close(); return; }
     if (menu.hidden) { editVersion++; return; }
     if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); close(); return; }
     if (['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
@@ -96,9 +108,11 @@
       buttons.forEach((button, index) => button.classList.toggle('is-active', index === activeIndex));
     } else { editVersion++; close(); }
   }, true);
+  document.addEventListener('compositionstart', event => { if (editable(event.target)) { compositionTarget = event.target; editVersion++; } }, true);
+  document.addEventListener('compositionend', event => { if (compositionTarget === event.target) compositionTarget = null; }, true);
   for (const name of ['input', 'select']) document.addEventListener(name, () => { editVersion++; }, true);
-  for (const name of ['chat:open', 'chat:close', 'settings:open', 'settings:close', 'selection:open', 'selection:close']) document.addEventListener(name, () => { epoch++; close(); });
+  for (const name of ['chat:open', 'chat:close', 'settings:open', 'settings:close', 'selection:open', 'selection:close', 'graph:open', 'graph:close', 'graph:contextchange']) document.addEventListener(name, () => { epoch++; close(); });
   window.addEventListener('resize', close);
-  window.addEventListener('blur', () => { epoch++; close(); });
+  window.addEventListener('blur', () => { epoch++; compositionTarget = null; close(); });
   window.RabbitEditMenu = Object.freeze({ paste, close, containsPoint });
 })();

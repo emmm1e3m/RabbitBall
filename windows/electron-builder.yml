@@ -5,6 +5,8 @@ directories:
 files:
   - dist-electron/**/*
   - prototype/index.html
+  - prototype/activation-effect.html
+  - prototype/activation-effect.js
   - prototype/capture.html
   - prototype/capture-host.js
   - prototype/capture-ui.js

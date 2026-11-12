@@ -17,15 +17,18 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
   let width = 1440, height = 900, now = 0, nextFrame = 0;
   const frames = new Map<number, (time: number) => void>();
   const listeners = new Map<string, Array<(event: any) => void>>();
+  const windowListeners = new Map<string, Array<(event: any) => void>>();
   const reports: Array<{ time: number; point: Point }> = [];
   const interactiveChanges: boolean[] = [];
+  const hitTests: Point[] = [];
   let hitAncestors: string[] = [];
   const ready: number[] = [];
   const acknowledgements = new Map<number, (accepted: boolean) => void>();
   class Element {
-    textContent = ''; innerHTML = ''; dataset = {}; style: any = {};
+    textContent = ''; innerHTML = ''; dataset = {}; style: any = {}; computed: any = {}; hidden = false; inert = false; parentElement: Element | null = null;
     handlers = new Map<string, Array<(event: any) => void>>();
     captured = new Set<number>();
+    bounds?: {left:number;top:number;width:number;height:number};
     classList = { add() {}, remove() {}, toggle() {} };
     setAttribute() {} removeAttribute() {} appendChild(node: Element) { return node; }
     addEventListener(type: string, handler: (event: any) => void) {
@@ -33,16 +36,19 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
       this.handlers.get(type)!.push(handler);
     }
     querySelector() { return new Element(); }
-    getBoundingClientRect() { return { left: sceneOrigin.x, top: sceneOrigin.y, width, height }; }
+    getBoundingClientRect() { return this.bounds ?? { left: sceneOrigin.x, top: sceneOrigin.y, width, height }; }
     setPointerCapture(id: number) { this.captured.add(id); }
     hasPointerCapture(id: number) { return this.captured.has(id); }
     releasePointerCapture(id: number) { this.captured.delete(id); }
   }
   const elements = new Map<string, Element>();
   const window: any = {
-    addEventListener() {},
+    addEventListener(type: string, handler: (event: any) => void) {
+      if (!windowListeners.has(type)) windowListeners.set(type, []);
+      windowListeners.get(type)!.push(handler);
+    },
     rabbitDesktop: {
-      setInteractive(enabled: boolean) { interactiveChanges.push(enabled); },
+      setInteractive(value: boolean) { interactiveChanges.push(value); },
       reportPetPosition(point: Point) { reports.push({ time: now, point: { ...point } }); },
       petViewportReady(id: number) {
         ready.push(id);
@@ -54,7 +60,7 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
     documentElement: new Element(),
     getElementById(id: string) { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
     querySelectorAll: (selector: string) => selector === '.eye-open' ? [new Element(), new Element()] : [],
-    createElementNS: () => new Element(), elementFromPoint: () => hitAncestors.length ? { closest: (selectors: string) => selectors.split(',').some(selector => hitAncestors.includes(selector)) } : null,
+    createElementNS: () => new Element(), elementFromPoint: (x: number,y: number) => { hitTests.push({x,y});return hitAncestors.length ? { closest: (selectors: string) => selectors.split(',').some(selector => hitAncestors.includes(selector)) } : null; },
     addEventListener(type: string, handler: (event: any) => void) {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type)!.push(handler);
@@ -66,12 +72,13 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
   const instrumented = script.replace("window.addEventListener('pagehide'", "window.__motionTest={state:()=>JSON.parse(JSON.stringify(S)),hearts:()=>hearts.map(({birth,scale})=>({birth,scale})),rebase:rebaseViewport,measure};\n    window.addEventListener('pagehide'");
   vm.runInNewContext(instrumented, {
     window, document, performance: { now: () => now }, matchMedia: () => ({ matches: false }),
+    getComputedStyle: (element: Element) => ({ display:'block',visibility:'visible',opacity:'1',overflowX:'visible',overflowY:'visible',...element.computed,...element.style }),
     ResizeObserver: class { observe() {} }, setTimeout: () => 1, clearTimeout() {},
     requestAnimationFrame(run: (time: number) => void) { frames.set(++nextFrame, run); return nextFrame; },
     cancelAnimationFrame(id: number) { frames.delete(id); },
   }, { filename: 'rabbit-animation.js' });
   return {
-    reports, ready, interactiveChanges,
+    reports, ready, interactiveChanges, hitTests,
     hover(ancestors: string[]) { hitAncestors = ancestors; },
     acknowledge(id: number, accepted: boolean) {
       assert.ok(acknowledgements.has(id), '先等待真实就绪请求，再返回主进程确认');
@@ -81,10 +88,11 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
     state: () => JSON.parse(JSON.stringify(window.__motionTest.state())),
     setChat(chat: any) { window.RabbitChat = chat; },
     setSettings(settings: any) { window.RabbitSettings = settings; },
+    pause() { window.RabbitBallDemo.pause(); },
     hearts: () => window.__motionTest.hearts(),
     petEvent(type: string, point: Point, values: Record<string, unknown> = {}) {
       const element = elements.get('pet')!;
-      const event = { pointerId: 1, button: 0, detail: 1, currentTarget: element,
+      const event = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, detail: 1, currentTarget: element,
         clientX: point.x + sceneOrigin.x, clientY: point.y + sceneOrigin.y,
         preventDefault() {}, stopPropagation() {}, ...values };
       for (const handler of element.handlers.get(type) ?? []) handler(event);
@@ -92,6 +100,7 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
     dispatch(type: string, detail: unknown) {
       for (const handler of listeners.get(type) ?? []) handler({ detail });
     },
+    windowEvent(type: string) { for (const handler of windowListeners.get(type) ?? []) handler({}); },
     approach(point: Point) { window.RabbitBallDemo.approach(point); },
     cursor(x: number, y: number, viewport = primary, followBounds = otherScreen, transitionId?: number, resetEntry = false) {
       for (const handler of listeners.get('desktop:cursor') ?? []) handler({ detail: { x, y, viewport, followBounds, transitionId, resetEntry } });
@@ -115,6 +124,27 @@ test('聊天外置历史按钮及其SVG参与原生鼠标命中，离开组件�
     app.hover(ancestors);app.tick(1);assert.equal(app.interactiveChanges.at(-1),true);
     app.hover([]);app.tick(1);assert.equal(app.interactiveChanges.at(-1),false);
   }
+});
+
+test('动画暂停后仍更新系统命中，进入与离开兔球都不依赖视觉渲染', () => {
+  const app=animation();app.pause();const frame=app.state().frame;
+  app.hover(['#pet']);app.tick(1);assert.equal(app.interactiveChanges.at(-1),true);
+  app.hover([]);app.tick(1);assert.equal(app.interactiveChanges.at(-1),false);
+  assert.equal(app.state().frame,frame);
+});
+
+test('原生命中只上报布尔状态，按住兔球与激活图谱时维持输入', () => {
+  const app=animation(),point={x:240,y:200};app.tick(1);
+  assert.equal(app.interactiveChanges.at(-1),false);
+  const reports=app.interactiveChanges.length;app.tick(3);assert.equal(app.interactiveChanges.length,reports);
+  app.petEvent('pointerdown',point,{pointerType:'touch',pointerId:8});
+  assert.equal(app.interactiveChanges.at(-1),true,'按下立即接收拖动，不等待下一帧');
+  app.petEvent('pointerup',point,{pointerType:'touch',pointerId:8});
+  assert.equal(app.interactiveChanges.at(-1),false);
+  app.dispatch('graph:open',{activationId:8});app.tick(1);
+  assert.equal(app.interactiveChanges.at(-1),true);
+  app.dispatch('graph:close',{});app.tick(1);
+  assert.equal(app.interactiveChanges.at(-1),false);
 });
 
 test('鼠标停在另一显示器后兔球沿动画飞出旧视口，重新测量不把目标夹回旧屏', () => {
@@ -490,7 +520,7 @@ test('未激活时开启跟随也可以拖动，关闭跟随仍以弹簧追随�
 test('连续点击每次产生五颗双倍爱心，复用固定粒子池，拖动不误触发', () => {
   const app=animation(),point={x:600,y:450};
   for(let detail=1;detail<=12;detail++){
-    app.tick(2);app.petEvent('click',point,{detail});
+    app.tick(2);app.petEvent('pointerdown',point);app.petEvent('pointerup',point);app.petEvent('click',point,{detail});
     const hearts=app.hearts();
     assert.equal(hearts.length,14);
     const newest=hearts.filter((heart:any)=>heart.birth===app.state().t);
@@ -510,10 +540,60 @@ test('设置打开时拖动兔球带动面板并保留位置，轻点不关闭�
   }});
   app.dispatch('settings:open',{bounds:{x:540,y:200,width:360,height:500}});app.tick(120);
   const start={x:app.state().x.x,y:app.state().y.x};
-  app.petEvent('click',start);assert.equal(app.state().settingsOpen,true);
+  app.petEvent('pointerdown',start);app.petEvent('pointerup',start);app.petEvent('click',start);assert.equal(app.state().settingsOpen,true);
   app.petEvent('pointerdown',start);const end={x:start.x+120,y:start.y+60};
   app.petEvent('pointermove',end);app.tick(3);samePoint({x:app.state().x.x,y:app.state().y.x},end);
   app.petEvent('pointerup',end);app.measure();app.tick(120);
   assert.equal(starts,1);assert.equal(ends,1);assert.equal(app.state().settingsOpen,true);
   samePoint({x:app.state().x.x,y:app.state().y.x},end);
+});
+
+test('兔球轻点只由所属主指针触发，第二触点和取消不能开关图谱会话', () => {
+  const app=animation(),point={x:600,y:450};let opened=0;
+  app.setChat({getSnapshot:()=>({open:false,opening:false}),activateGraph(){opened++;}});
+  app.dispatch('graph:open',{activationId:7});
+  const first={pointerId:11,pointerType:'touch',isPrimary:true},second={pointerId:12,pointerType:'touch',isPrimary:false};
+  app.petEvent('pointerdown',point,first);
+  app.petEvent('pointerdown',point,second);app.petEvent('pointerup',point,second);app.petEvent('click',point,second);
+  assert.equal(opened,0);assert.equal(app.state().drag.id,11);
+  app.petEvent('pointercancel',point,first);app.petEvent('click',point,first);
+  assert.equal(opened,0);assert.equal(app.state().drag,null);
+  for(const pointerType of ['mouse','touch','pen']){
+    const pointer={pointerId:21,pointerType,isPrimary:true};
+    app.petEvent('pointerdown',point,pointer);app.petEvent('pointermove',{x:point.x+20,y:point.y},pointer);
+    app.petEvent('pointerup',{x:point.x+20,y:point.y},pointer);app.petEvent('click',point,pointer);
+    const before=opened;
+    // 新轻点不受上一次拖动后的任意时间窗口影响。
+    app.petEvent('pointerdown',point,pointer);app.petEvent('pointerup',point,pointer);app.petEvent('click',point,pointer);
+    assert.equal(opened,before+1);
+  }
+  assert.equal(opened,3);
+  app.petEvent('click',point,{detail:0,pointerId:-1,pointerType:''});assert.equal(opened,4,'键盘点击继续工作');
+});
+
+test('兔球拖动在失焦、暂停和离页时结束，迟到移动不恢复拖动', () => {
+  for(const transition of ['blur','suspended','pagehide','pause','graph-close']){
+    const app=animation(),point={x:600,y:450};let ended=0;
+    app.setChat({close(){},beginPetDrag(){},endPetDrag(){ended++;},movePetDrag:(value:Point)=>value});
+    app.dispatch('chat:open',{bounds:{x:100,y:100,width:360,height:94},petPosition:point});
+    app.petEvent('pointerdown',point);app.petEvent('pointermove',{x:650,y:480});
+    if(transition==='suspended')app.dispatch('desktop:suspended',true);
+    else if(transition==='pause')app.pause();
+    else if(transition==='graph-close')app.dispatch('graph:close',{});
+    else app.windowEvent(transition);
+    assert.equal(ended,1);assert.equal(app.state().drag,null);
+    const settled={x:app.state().tx,y:app.state().ty};
+    app.petEvent('pointermove',{x:900,y:700});app.petEvent('pointerup',{x:900,y:700});
+    assert.equal(ended,1);samePoint({x:app.state().tx,y:app.state().ty},settled);
+  }
+});
+
+test('命中查询使用当前场景的DOM坐标，设置与编辑菜单沿用本体输入机制', () => {
+  const origin={x:80,y:45},app=animation(origin);app.cursor(500,300);app.tick(1);
+  const pointer=app.state().pointer;
+  samePoint(app.hitTests.at(-1)!,{x:pointer.x+origin.x,y:pointer.y+origin.y});
+  for(const target of ['#rabbit-settings-root.is-open','#rabbit-edit-menu']){
+    app.hover([target]);app.tick(1);assert.equal(app.interactiveChanges.at(-1),true);
+    app.hover([]);app.tick(1);assert.equal(app.interactiveChanges.at(-1),false);
+  }
 });

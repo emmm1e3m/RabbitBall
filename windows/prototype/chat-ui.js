@@ -16,7 +16,7 @@
     #rabbit-chat-root.capture-suspended .chat-shell { opacity:0;pointer-events:none; }
     #rabbit-chat-root .chat-panel { position:absolute;left:0;right:0;bottom:0;height:56px;overflow:hidden;border:1px solid var(--chat-line);border-radius:22px;background:#fff;box-shadow:0 8px 30px #a4678210;transition:height .42s cubic-bezier(.22,1,.36,1),box-shadow .3s; }
     #rabbit-chat-root.is-expanded .chat-panel { height:var(--expanded-height);box-shadow:0 12px 38px #a4678212; }
-    #rabbit-chat-root .chat-history { position:absolute;left:19px;right:19px;top:35px;bottom:70px;overflow-y:auto;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:thin;scrollbar-color:var(--chat-line) transparent;opacity:0;transform:translateY(10px);pointer-events:none;transition:opacity .2s,transform .3s; }
+    #rabbit-chat-root .chat-history { position:absolute;left:19px;right:19px;top:35px;bottom:70px;overflow-y:auto;overscroll-behavior:contain;touch-action:auto;scrollbar-width:thin;scrollbar-color:var(--chat-line) transparent;opacity:0;transform:translateY(10px);pointer-events:none;transition:opacity .2s,transform .3s; }
     #rabbit-chat-root.is-expanded .chat-history { opacity:1;transform:translateY(0);pointer-events:auto;transition-delay:.12s; }
     #rabbit-chat-root .chat-collapse { position:absolute;z-index:2;right:9px;top:8px;width:25px;height:25px;display:grid;place-items:center;border:0;border-radius:50%;background:#fff;color:var(--chat-muted);opacity:0;pointer-events:none;transition:opacity .18s,background .2s; }
     #rabbit-chat-root .chat-collapse svg { width:16px;height:16px; }
@@ -67,8 +67,12 @@
     #rabbit-chat-root.is-expanded .chat-shortcuts { opacity:0;transform:translateY(-6px);pointer-events:none; }
     #rabbit-chat-root .chat-shortcut { display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:50%;background:#F4F4F6;color:var(--chat-secondary);transition:color .2s,background .2s,transform .2s; }
     #rabbit-chat-root .chat-shortcut:hover { color:var(--chat-accent);background:var(--chat-soft);transform:translateY(-1px); }
+    #rabbit-chat-root .chat-shortcut[hidden],#rabbit-chat-root .chat-response-action[hidden] { display:none; }
+    #rabbit-chat-root .chat-shortcut[aria-pressed="true"] { color:var(--chat-accent);background:var(--chat-soft); }
+    #rabbit-chat-root .chat-shortcut:disabled { opacity:.45;cursor:default;transform:none; }
+    #rabbit-chat-root.is-graph-chat { z-index:24; }
     #rabbit-chat-root .chat-shortcut svg { width:16px;height:16px; }
-    #rabbit-chat-root .chat-shortcut svg > * { stroke-width:1.5px;vector-effect:non-scaling-stroke; }
+    #rabbit-chat-root .chat-shortcut svg > * { stroke-width:2px;vector-effect:non-scaling-stroke; }
     #rabbit-chat-root .chat-shortcut .letter-t { font-family:var(--rabbit-font);font-size:19px;font-weight:500;line-height:1; }
     #rabbit-chat-root .chat-history-toggle { position:absolute;right:8px;top:9px; }
     #rabbit-chat-root .chat-history-toggle[hidden] { display:none; }
@@ -111,6 +115,7 @@
     down:'<path d="m6 9 6 6 6-6"/>',
     search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/>',
     history:'<path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.4 2.6L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>',
+    graph:'<rect x="9" y="2" width="6" height="6" rx="1.5"/><rect x="2" y="16" width="6" height="6" rx="1.5"/><rect x="16" y="16" width="6" height="6" rx="1.5"/><path d="M12 8v4M5 16v-4h14v4"/>',
     trash:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/>',
     type:'<path d="M4 8V5h16v3M12 5v15m-4 0h8"/>',
     translate:'<path d="M3 5h11M8 3v2m-3 0c0 5 4 8 7 10M12 5c0 5-4 8-7 10m8 6 4.5-11L22 21m-7-4h5"/>',
@@ -135,7 +140,7 @@
           <button class="chat-send" type="submit" aria-label="发送消息" title="发送消息" disabled>${icon('send')}</button>
         </form>
       </section>
-      <div class="chat-shortcuts"><button class="chat-shortcut" data-intent="search" type="button" aria-label="搜索与解释" title="搜索与解释">${icon('search')}</button><button class="chat-shortcut" data-intent="extract" type="button" aria-label="提取文字" title="提取文字">${icon('type')}</button><button class="chat-shortcut" data-intent="translate" type="button" aria-label="翻译" title="翻译">${icon('translate')}</button></div>
+      <div class="chat-shortcuts"><button class="chat-shortcut" data-intent="search" type="button" aria-label="搜索与解释" title="搜索与解释">${icon('search')}</button><button class="chat-shortcut" data-intent="extract" type="button" aria-label="提取文字" title="提取文字">${icon('type')}</button><button class="chat-shortcut" data-intent="translate" type="button" aria-label="翻译" title="翻译">${icon('translate')}</button><button class="chat-shortcut chat-graph-toggle" type="button" aria-label="大爆炸模式" title="大爆炸模式" aria-pressed="false">${icon('graph')}</button></div>
       <button class="chat-shortcut chat-history-toggle" type="button" aria-label="历史记录" title="历史记录" aria-expanded="false">${icon('history')}</button>
       <div class="chat-inline-note" aria-live="polite"></div>
       <input class="chat-file-input" type="file" accept="image/*,.txt,.md,text/plain,text/markdown" aria-label="选择附件">
@@ -148,13 +153,23 @@
   const input = $('.chat-input'), form = $('.chat-composer'), sendButton = $('.chat-send');
   const contexts = $('.chat-contexts'), note = $('.chat-inline-note'), fileInput = $('.chat-file-input');
   const collapseButton = $('.chat-collapse'), shortcuts = $('.chat-shortcuts');
+  const graphButton = $('.chat-graph-toggle');
   const historyButton=$('.chat-history-toggle'),archive=$('.chat-archive'),archiveList=$('.chat-archive-list');
   const announcement = $('.chat-announcement');
-  const state = { open:false, opening:false, presentation:'compact', busy:false, selecting:false, context:null, contextConsumed:false, conversationId:null, attachments:[], messages:[], bounds:null, layout:null, anchor:null, petPosition:null, run:null, demo:null, activation:0, activationId:null, capture:null, pickingFile:false, historyOpen:false, historyRequest:0, dragging:false };
-  let boundsKey = '', layoutFrame = 0, focusFrame = 0, latestClientX = null, latestClientY = null;
+  const state = { open:false, opening:false, presentation:'compact', busy:false, selecting:false, context:null, contextConsumed:false, conversationId:null, attachments:[], messages:[], bounds:null, layout:null, anchor:null, petPosition:null, run:null, demo:null, activation:0, activationId:null, capture:null, pickingFile:false, historyOpen:false, historyRequest:0, dragging:false, graph:false, graphKey:null, graphMode:false, switchingGraphMode:false };
+  let boundsKey = '', layoutFrame = 0, focusFrame = 0, latestClientX = null, latestClientY = null, composing = false;
+  const composingKey = event => composing || event.isComposing || event.keyCode === 229;
   const emit = (name, detail = {}) => document.dispatchEvent(new CustomEvent('chat:' + name, { detail }));
   const service = () => window.RabbitAssistant;
   const activity = (phase, busy) => emit('activity', {mode:phase,busy,source:state.demo?'demo':'chat'});
+  const graphContextKey = context => context ? context.workspaceId+'/'+context.graphId : null;
+  const currentGraphContext = () => window.RabbitGraph?.isOpen() ? window.RabbitGraph.getChatContext() : null;
+  function invalidateGraphChat() { close();state.graphKey=null; }
+  function graphChatContext() {
+    const context=currentGraphContext();
+    if(!state.graph||!state.graphKey||graphContextKey(context)!==state.graphKey){if(state.graph)invalidateGraphChat();return null;}
+    return context;
+  }
 
   const clamp = (value,min,max) => Math.max(min,Math.min(max,value));
   function activationPointer(pointer) {
@@ -308,11 +323,21 @@
     sendButton.disabled = !state.busy&&!input.value.trim()&&!state.attachments.length;
     sendButton.setAttribute('aria-label',state.busy?'停止回复':'发送消息'); sendButton.title=state.busy?'停止回复':'发送消息';
     sendButton.innerHTML = icon(state.busy?'stop':'send');
-    shortcuts.querySelectorAll('.chat-shortcut').forEach(button=>{button.disabled=state.busy;});
+    shortcuts.querySelectorAll('.chat-shortcut').forEach(button=>{button.disabled=button===graphButton?state.switchingGraphMode:state.busy;});
+    const sameGraph=state.graph&&state.graphKey&&graphContextKey(currentGraphContext())===state.graphKey;
     for(const message of state.messages)if(message.actions){
-      message.regenerateButton.disabled=state.busy;
+      message.regenerateButton.disabled=state.busy||!!message.addingToGraph;
       message.copyButton.disabled=state.busy||!!message.copying;
+      message.graphButton.hidden=!sameGraph||graphContextKey(message.turn.graphContext)!==state.graphKey;
+      message.graphButton.disabled=state.busy||!!message.addingToGraph||!!message.addedToGraph;
     }
+  }
+  function applyGraphSettings(settings) {
+    if(typeof settings.graphPluginEnabled==='boolean')graphButton.hidden=!settings.graphPluginEnabled;
+    if(typeof settings.graphModeEnabled==='boolean')state.graphMode=settings.graphModeEnabled;
+    graphButton.setAttribute('aria-pressed',String(state.graphMode));
+    graphButton.title=state.graphMode?'大爆炸已开启 · 启动键进入或退出图谱':'开启大爆炸并进入图谱';
+    graphButton.setAttribute('aria-label',state.graphMode?'关闭大爆炸模式':'开启大爆炸模式');
   }
   function drawContexts() {
     contexts.replaceChildren();
@@ -353,11 +378,29 @@
     scrollToBottom();return message;
   }
   function clearMessages() { state.messages.forEach(removeMessage);state.messages=[];history.replaceChildren(); }
+  function cardMarkdown(markdown) {
+    const lines=markdown.replace(/\r\n?/g,'\n').split('\n'),headings=[];
+    let fence=null;
+    for(const [index,line] of lines.entries()){
+      const marker=line.trim().match(/^(`{3,}|~{3,})(.*)$/);
+      if(fence){
+        if(marker&&marker[1][0]===fence.char&&marker[1].length>=fence.length&&!marker[2].trim())fence=null;
+        continue;
+      }
+      if(marker){fence={char:marker[1][0],length:marker[1].length};continue;}
+      const heading=line.match(/^( {0,3})(#{1,6})([ \t]+.*)$/);
+      if(heading)headings.push({index,indent:heading[1],level:heading[2].length,text:heading[3]});
+    }
+    // 卡片占用三级标题；保留正文小标题的相对层级，代码示例保持原文。
+    const shift=Math.max(0,4-Math.min(4,...headings.map(heading=>heading.level)));
+    for(const heading of headings)lines[heading.index]=heading.indent+'#'.repeat(Math.min(6,heading.level+shift))+heading.text;
+    return lines.join('\n');
+  }
   function answerActions(message) {
     const actions=document.createElement('div');actions.className='chat-response-actions';
     const button=(name,label)=>{const value=document.createElement('button');value.type='button';value.className='chat-response-action';value.title=label;value.setAttribute('aria-label',label);value.innerHTML=icon(name);return value;};
-    const regenerateButton=button('regenerate','重新生成'),copyButton=button('copy','复制回复');
-    message.actions=actions;message.regenerateButton=regenerateButton;message.copyButton=copyButton;
+    const regenerateButton=button('regenerate','重新生成'),copyButton=button('copy','复制回复'),graphButton=button('graph','回答加入图谱');
+    message.actions=actions;message.regenerateButton=regenerateButton;message.copyButton=copyButton;message.graphButton=graphButton;
     regenerateButton.addEventListener('click',()=>regenerate(message));
     copyButton.addEventListener('click',async()=>{
       message.copying=true;sync();
@@ -371,7 +414,21 @@
       }catch(error){copyButton.title='复制失败，请重试';copyButton.setAttribute('aria-label','复制失败，请重试');}
       finally{message.copying=false;sync();}
     });
-    actions.append(regenerateButton,copyButton);message.element.appendChild(actions);sync();
+    graphButton.addEventListener('click',async()=>{
+      if(!state.open||!state.messages.includes(message)||message.addingToGraph||message.addedToGraph)return;
+      const current=graphChatContext(),context=message.turn.graphContext;
+      if(!current||graphContextKey(context)!==state.graphKey)return;
+      message.addingToGraph=true;sync();
+      try{
+        const content=message.content.trim(),heading=content.match(/^#{1,6}\s+(.+?)(?:\r?\n|$)/);
+        const title=heading?heading[1].replace(/\s+#+\s*$/,'').trim():'对话摘录';
+        const markdown=cardMarkdown(heading?content.slice(heading[0].length).trim():content);
+        await (window.rabbitDesktop??window.RabbitGraphDemo).graphMutate(context.workspaceId,{type:'add-card',graphId:context.graphId,parentId:context.nodeId,title,markdown});
+        message.addedToGraph=true;graphButton.innerHTML=icon('check');graphButton.title='已加入图谱';graphButton.setAttribute('aria-label','已加入图谱');
+      }catch(error){graphButton.title=error.message||'未能加入图谱，请重试。';graphButton.setAttribute('aria-label','加入图谱失败，点击重试');}
+      finally{message.addingToGraph=false;sync();}
+    });
+    actions.append(regenerateButton,copyButton,graphButton);message.element.appendChild(actions);sync();
   }
   function paintRun(run) {
     if(state.run!==run)return;
@@ -419,16 +476,21 @@
   }
   async function activate(context,options={}) {
     abortGeneration();
+    const graph=options.graph===true,graphContext=graph?currentGraphContext():null;
+    if(graph&&!graphContext){invalidateGraphChat();return;}
     const version=++state.activation;
     const origin=activationPointer(options.anchor);
-    state.activationId=options.activationId;state.opening=true;state.selecting=false;state.anchor=petAnchor(origin);
+    const graphKey=graphContextKey(graphContext);
+    const resume=options.resume&&state.graph&&graph&&graphKey===state.graphKey;
+    state.graph=graph;state.graphKey=graphKey;root.classList.toggle('is-graph-chat',graph);
+    state.activationId=options.activationId;state.opening=true;state.selecting=false;composing=false;state.anchor=petAnchor(origin);
     state.dragging=false;root.classList.remove('is-pet-dragging');setHistoryOpen(false);
     cancelAnimationFrame(focusFrame);focusFrame=0;
     root.classList.remove('is-open','capture-suspended');shell.inert=true;panel.inert=true;panel.setAttribute('aria-hidden','true');input.blur();
     emit('focus',{bounds:null,active:false});
-    clearMessages();input.value='';state.attachments=[];state.context=null;state.contextConsumed=false;state.capture=null;state.conversationId=crypto.randomUUID();note.textContent='';drawContexts();
-    setPresentation('compact');
-    if(context!==undefined){
+    if(!resume){clearMessages();input.value='';state.attachments=[];state.context=null;state.contextConsumed=false;state.capture=null;state.conversationId=crypto.randomUUID();note.textContent='';}
+    drawContexts();setPresentation(resume?state.presentation:'compact');
+    if(context!==undefined||graph){
       state.contextConsumed=false;state.context=contextFrom(context);drawContexts();state.capture=null;
     }
     else state.capture=captureContext(version);
@@ -438,7 +500,7 @@
     if(version!==state.activation||!state.opening)return;
     shell.inert=false;panel.inert=false;panel.setAttribute('aria-hidden','false');
     state.opening=false;state.open=true;root.classList.add('is-open');panel.setAttribute('aria-hidden','false');
-    emit('open',{bounds:{...state.bounds},presentation:'compact',petPosition:{...state.petPosition},origin,focusBounds:context?.focusBounds||state.context?.focusBounds});measure();focusComposer();
+    emit('open',{activationId:state.activationId,bounds:{...state.bounds},presentation:state.presentation,petPosition:{...state.petPosition},origin,focusBounds:context?.focusBounds||state.context?.focusBounds,graph});measure();focusComposer();
     try { await service().focusInput(state.activationId); } catch { /* 原生自动聚焦失败不撤销输入界面。 */ }
     if(version!==state.activation||!state.open)return;
     focusComposer();
@@ -447,12 +509,12 @@
   }
   function close(automatic=false) {
     if(!state.open&&!state.opening)return;
-    const opening=state.opening,activationId=state.activationId;
+    const opening=state.opening,activationId=state.activationId;composing=false;
     abortGeneration();if(!automatic)finishDemo();state.activation++;state.capture=null;state.open=false;state.opening=false;state.selecting=false;cancelAnimationFrame(focusFrame);focusFrame=0;
     state.dragging=false;root.classList.remove('is-pet-dragging');setHistoryOpen(false);
     window.RabbitBallDemo.cancelApproach();
     root.classList.remove('is-open','capture-suspended');shell.inert=true;panel.inert=true;panel.setAttribute('aria-hidden','true');
-    emit('focus',{bounds:null,active:false});emit('close',{bounds:{...state.bounds},automatic,opening,activationId});input.blur();
+    emit('focus',{bounds:null,active:false});emit('close',{bounds:{...state.bounds},automatic,opening,activationId,graph:state.graph});input.blur();
   }
   function fold() { if(state.historyOpen)setHistoryOpen(false);else setPresentation('compact'); }
   function wait(ms,signal) {
@@ -473,7 +535,8 @@
   }
   async function generate(message,{attachments=[],demo=false,regenerate=false}={}) {
     const turn=message.turn;
-    message.copyAnimation?.cancel();message.actions?.remove();message.actions=null;message.content='';message.status='pending';
+    if(state.graph&&(!graphChatContext()||graphContextKey(turn.graphContext)!==state.graphKey))return false;
+    message.copyAnimation?.cancel();message.actions?.remove();message.actions=null;message.content='';message.status='pending';message.addedToGraph=false;
     message.element.classList.remove('is-error','is-streaming');message.element.classList.add('is-waiting');message.body.replaceChildren();
     const progress=document.createElement('div');progress.className='chat-progress';message.element.prepend(progress);
     const run={controller:new AbortController(),message,text:'',lastPaint:0,renderFrame:0,demo,progress,startedAt:performance.now(),toolCounts:{},progressTimer:0};
@@ -486,7 +549,7 @@
       if(activation!==state.activation){abortGeneration();return false;}
       const context=regenerate?null:state.context;
       if(!regenerate){state.context=null;state.contextConsumed=true;state.capture=null;drawContexts();}
-      const request={conversationId:state.conversationId,turnId:turn.id,text:turn.text,intent:turn.intent,context,attachments,regenerate,signal:run.controller.signal,
+      const request={conversationId:state.conversationId,turnId:turn.id,text:turn.text,intent:turn.intent,context,attachments,regenerate,graphContext:turn.graphContext,signal:run.controller.signal,
         onDelta:chunk=>{if(state.run!==run||run.controller.signal.aborted)return;run.text+=chunk;schedulePaint(run);},
         onProgress:({toolCounts})=>{if(state.run===run){run.toolCounts=toolCounts;updateProgress(run);}},
         onPhase:phase=>{if(state.run===run&&['scan','think','idle'].includes(phase))activity(phase,true);}};
@@ -506,18 +569,20 @@
     }
   }
   async function send(intent='chat',demo=false) {
+    const graphContext=state.graph?graphChatContext():null;
+    if(state.graph&&!graphContext)return false;
     const typed=input.value.trim(),action=['search','extract','translate'].includes(intent);
     const text=typed||(!action&&state.attachments.length?window.RabbitPrompts.attachment():'');
     if(!text&&!action)return false;
     if(!demo)cancelDemo();abortGeneration();setPresentation('expanded');
-    const turn={id:crypto.randomUUID(),text,intent};
+    const turn={id:crypto.randomUUID(),text,intent,graphContext:graphContext?{...graphContext}:undefined};
     const attachments=state.attachments.map(value=>({...value}));input.value='';state.attachments=[];drawContexts();note.textContent='';
     addMessage('user',text,turn,!typed&&intent!=='chat');
     const message=addMessage('assistant','',turn);
     return generate(message,{attachments,demo});
   }
   function regenerate(message) {
-    if(state.busy||message.status!=='complete')return;
+    if(state.busy||message.addingToGraph||message.status!=='complete')return;
     const index=state.messages.indexOf(message);if(index<0)return;
     cancelDemo();abortGeneration();setPresentation('expanded');
     state.messages.splice(index+1).forEach(removeMessage);
@@ -554,26 +619,40 @@
   input.addEventListener('input',()=>{sync();focusBounds();});
   input.addEventListener('focus',focusBounds);
   input.addEventListener('keydown',event=>{
-    if(event.key==='Backspace'&&!input.value&&!event.isComposing&&event.keyCode!==229&&!event.ctrlKey&&!event.altKey&&!event.metaKey){
+    if(composingKey(event))return;
+    if(event.key==='Backspace'&&!input.value&&!event.ctrlKey&&!event.altKey&&!event.metaKey){
       const index=state.attachments.findLastIndex(attachment=>attachment.mimeType.startsWith('image/'));
       if(index>=0)state.attachments.splice(index,1);
       else if(state.context?.images.length)state.context={...state.context,images:state.context.images.slice(0,-1)};
       else return;
       event.preventDefault();drawContexts();sync();return;
     }
-    if(event.key==='Enter'&&!event.isComposing){event.preventDefault();if(state.busy&&!input.value.trim()){abortGeneration();finishDemo();}else send();}
+    if(event.key==='Enter'){event.preventDefault();if(state.busy&&!input.value.trim()){abortGeneration();finishDemo();}else send();}
   });
   collapseButton.addEventListener('click',fold);
   $('.chat-add').addEventListener('click',()=>{state.pickingFile=true;fileInput.click();});
   fileInput.addEventListener('change',()=>{state.pickingFile=false;addAttachment(fileInput.files[0]);fileInput.value='';});
   fileInput.addEventListener('cancel',()=>{state.pickingFile=false;if(state.open)input.focus({preventScroll:true});});
-  shortcuts.querySelectorAll('.chat-shortcut').forEach(button=>button.addEventListener('click',()=>send(button.dataset.intent)));
+   shortcuts.querySelectorAll('.chat-shortcut').forEach(button=>{if(button.dataset.intent)button.addEventListener('click',()=>send(button.dataset.intent));});
+   graphButton.addEventListener('click',async()=>{
+     if(state.switchingGraphMode)return;
+     state.switchingGraphMode=true;sync();
+     try{applyGraphSettings(await window.RabbitSettings.setGraphMode(!state.graphMode));note.textContent='';}
+     catch(error){note.textContent=error.message||'未能切换大爆炸模式，请重试。';}
+     finally{state.switchingGraphMode=false;sync();}
+   });
   historyButton.addEventListener('click',()=>{setHistoryOpen(!state.historyOpen);if(state.historyOpen)void loadHistory();});
-  for(const name of ['settings:change','settings:saved'])document.addEventListener(name,event=>applyHistorySettings(event.detail.settings));
+  for(const name of ['settings:change','settings:saved'])document.addEventListener(name,event=>{applyHistorySettings(event.detail.settings);applyGraphSettings(event.detail.settings);});
   applyHistorySettings(window.RabbitSettings?.getSnapshot().settings??{historyLimit:10});
+  applyGraphSettings(window.RabbitSettings?.getSnapshot().settings??{graphPluginEnabled:true,graphModeEnabled:false});
+  document.addEventListener('graph:open',sync);
+  document.addEventListener('graph:contextchange',event=>{if(state.graph&&graphContextKey(event.detail)!==state.graphKey)invalidateGraphChat();sync();});
+  document.addEventListener('graph:close',()=>{if(state.graph)close();sync();});
   for(const name of ['pointerdown','pointerup','pointermove','click','dblclick'])root.addEventListener(name,event=>{if(name==='pointerdown')cancelDemo();event.stopPropagation();});
-  root.addEventListener('keydown',event=>{cancelDemo();if(event.key==='Escape'){event.preventDefault();close();}event.stopPropagation();});
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&(state.open||state.opening)&&!state.selecting){event.preventDefault();close();}});
+  root.addEventListener('compositionstart',()=>{composing=true;});
+  root.addEventListener('compositionend',()=>{composing=false;});
+  root.addEventListener('keydown',event=>{cancelDemo();if(event.key==='Escape'&&!composingKey(event)){event.preventDefault();close();}event.stopPropagation();});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!composingKey(event)&&(state.open||state.opening)&&!state.selecting){event.preventDefault();close();}});
   // 捕获整个页面的鼠标位置，包含页头；半屏方向仅在激活时锁定。
   const rememberPointer=event=>{latestClientX=event.clientX;latestClientY=event.clientY;};
   document.addEventListener('pointermove',rememberPointer,{capture:true,passive:true});
@@ -602,9 +681,10 @@
   document.addEventListener('desktop:suspended',event=>{if(event.detail)close();});
   const observer=new ResizeObserver(measure);observer.observe(scene);const dock=scene.querySelector('.mode-dock');if(dock)observer.observe(dock);
   window.addEventListener('focus',focusComposer);
+  window.addEventListener('blur',()=>{composing=false;});
   window.addEventListener('pagehide',()=>{close();cancelAnimationFrame(layoutFrame);cancelAnimationFrame(focusFrame);});
   shell.addEventListener('transitionend',event=>{if(['height','width','left','top'].includes(event.propertyName))focusBounds();});
   measure();sync();setPresentation('compact');
-  window.RabbitChat=Object.freeze({activate,open:activate,close:()=>close(),toggle:()=>state.open||state.opening?close():activate(),playDemo,cancelDemo,beginPetDrag,movePetDrag,endPetDrag,
-    getSnapshot:()=>({open:state.open,opening:state.opening,activation:state.activation,presentation:state.presentation,historyOpen:state.historyOpen,busy:state.busy,selecting:state.selecting,demo:!!state.demo,stage:state.opening?'opening':state.busy?'generating':'idle',messageCount:state.messages.length,context:state.context?{id:state.context.id,title:state.context.title,demo:!!state.context.demo,imageIds:state.context.images.map(image=>image.id)}:null,attachmentCount:state.attachments.length,bounds:{...state.bounds}})});
+  window.RabbitChat=Object.freeze({activate,activateGraph:options=>activate(null,{...options,graph:true,resume:true}),open:activate,close:()=>close(),toggle:()=>state.open||state.opening?close():activate(),playDemo,cancelDemo,beginPetDrag,movePetDrag,endPetDrag,
+    getSnapshot:()=>({open:state.open,opening:state.opening,activation:state.activation,presentation:state.presentation,historyOpen:state.historyOpen,busy:state.busy,selecting:state.selecting,graph:state.graph,demo:!!state.demo,stage:state.opening?'opening':state.busy?'generating':'idle',messageCount:state.messages.length,context:state.context?{id:state.context.id,title:state.context.title,demo:!!state.context.demo,imageIds:state.context.images.map(image=>image.id)}:null,attachmentCount:state.attachments.length,bounds:{...state.bounds}})});
 })();

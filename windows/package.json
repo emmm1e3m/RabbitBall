@@ -14,7 +14,8 @@
     "pack:win": "npm run build && electron-builder --win --x64 --dir --publish never",
     "dist:win": "npm run build && electron-builder --win --x64 --publish never",
     "preview": "node prototype/serve.cjs",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:graph-input": "npm run build && electron scripts/check-graph-input.cjs"
   },
   "dependencies": {
     "dompurify": "3.4.17",

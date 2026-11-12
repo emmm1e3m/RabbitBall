@@ -41,6 +41,7 @@ export class CaptureOverlays {
     shortcut: readonly string[];
     color: string;
     useBuiltinFont?: boolean;
+    purpose?: 'prompt' | 'graph' | 'images';
   }): Promise<void> {
     this.close();
     const sessionGeneration = this.sessionGeneration;
@@ -59,7 +60,7 @@ export class CaptureOverlays {
         entry.viewport.bounds = window.getContentBounds();
         this.send(entry, {
           type: 'start', sessionId: this.sessionId, context: this.context!, backgroundBitmap: { data: background.toBitmap(), ...background.getSize() },
-          width: entry.viewport.bounds.width, height: entry.viewport.bounds.height, shortcut: [...options.shortcut], color: options.color, useBuiltinFont: options.useBuiltinFont ?? false,
+          width: entry.viewport.bounds.width, height: entry.viewport.bounds.height, shortcut: [...options.shortcut], color: options.color, useBuiltinFont: options.useBuiltinFont ?? false, purpose: options.purpose ?? 'prompt',
         });
         entry.active = true;
         if (this.lastFrame) this.sendFrame(entry, this.lastFrame.start, this.lastFrame.end);

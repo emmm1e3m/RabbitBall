@@ -21,7 +21,7 @@ test('原生助手启动并确认启动键配置', { skip: !windows, timeout: 15
   let nativeFailure = false;
   const native = createWindowsNative({
     onTriggerBegin() {}, onTriggerHold() {}, onTriggerEnd() {}, onTriggerCancel() {},
-    onSelectionPointer() {}, onPointerDown() {}, onFullscreen() {},
+    onSelectionPointer() {}, onPointerDown() {}, onPointerUp() {}, onFullscreen() {},
     onError() { nativeFailure = true; },
   });
   try {
@@ -31,6 +31,9 @@ test('原生助手启动并确认启动键配置', { skip: !windows, timeout: 15
       pauseOnFullscreen: false, inputEnabled: false, allowOwnForeground: false, recording: false,
       shortcut: [{ code: 'AltLeft', key: 0x38, modifier: true }],
     });
+    await assert.rejects(native.beginSelection(), /无法开始屏幕框选/, '禁用输入时不能暗中进入手动框选');
+    assert.equal(await native.prepareOverlayWindow('0'), false);
+    assert.equal(await native.prepareOverlayWindow('not-a-handle'), false);
     assert.equal(nativeFailure, false);
   } finally {
     native.stop();

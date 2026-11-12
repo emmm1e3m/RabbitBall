@@ -1,6 +1,6 @@
 # 已确认的工程约定
 
-- 版本号仅在用户明确批准时调整，具体规则见根目录 `AGENTS.md`。2026-11-10，用户已批准 Windows 与 Android 两端 0.1.3，当前准备发布，尚未发布；最近一次核实的 GitHub 正式版为 v0.1.2。Android versionCode 保留 7，以覆盖已安装的本地测试包，不自动递增；之前本地 0.1.4–0.1.6 编号已作废。
+- 版本号仅在用户明确批准时调整，具体规则见根目录 `AGENTS.md`。2026-11-10，用户已批准 Windows 与 Android 两端 0.1.3。Android versionCode 保留 7，以覆盖已安装的本地测试包，不自动递增；之前本地 0.1.4–0.1.6 编号已作废。
 
 - Windows 原工程已整体迁至 `windows/`，`.git` 保留根目录。迁移包含全部原有未提交修改、依赖和发行包。
 - Android Studio 工程在 `android/`，由 IDE 新建并同步。原生 Kotlin Views，Android 11+，JDK 21、Gradle 9.3.1、AGP 9.1.0、SDK 36.1。
@@ -57,7 +57,7 @@
 - 文档使用首泡auto margin保短列表贴底，去掉纵向overflow裁切；touch手势期间持有回看位置，pointercancel不重启自动跟随。每个surface按自身与视口交集做动态圆角clip，缩放反算保持24dp，使用单个有限clipFrame随现有动画刷新，静止不轮询；可见中段四角实测正确。
 - HistoryView取代所有应用自建AlertDialog历史分支，列表按内容收紧，图片页扩大；进入/退出、行按压、分页、删除和面板尺寸过渡均完整。HistoryPreview将最长960px JPEG与文字存同一AtomicFile记录，delete/trim同步移除，旧文字记录无图仍可读；恢复时只把预览用于查看/背景，模型原图上下文清空。
 - Camera按屏幕Configuration保持横4:3/竖3:4，锁定同一取景裁切与实际传感器姿态，旋转后兔球重锚到快门。Main新主题仅取消主界面窗口透明性，避免继承Launcher固定竖屏；CaptureActivity仍透明采集。已实测2400×1080相机Texture656×492、回竖屏996×1328，控制不重叠。系统栏沿用截图背景明暗，不再因相机开启强制白色图标。
-- debug/test/release构建、Lint（0 errors）、五组runner通过。实际检查长文末尾和中段四角、历史缩略图/大预览/删除/空态、横竖取景和拍照，MediaStore未新增图片。原历史与设备旋转/服务状态已恢复。签名非调试APK为android/release/RabbitBall-Android-0.1.3.apk，versionCode4，已覆盖安装模拟器；本轮未发布GitHub。
+- debug/test/release构建、Lint（0 errors）、五组runner通过。实际检查长文末尾和中段四角、历史缩略图/大预览/删除/空态、横竖取景和拍照，MediaStore未新增图片。原历史与设备旋转/服务状态已恢复。签名非调试APK为android/release/RabbitBall-Android-0.1.3.apk，versionCode4，已覆盖安装模拟器。
 
 ## 2026-11-09 Android 助理悬浮会话与附件
 
@@ -76,3 +76,78 @@
 - historyLimit 支持 0：保存时裁剪全部持久历史、撤销旧 run 保存权，新 run 不创建文件，主进程跳过历史缩略图编码；当前内存会话仍支持多轮与重生成。UI 预览及保存均隐藏历史按钮、关闭历史浮层并作废迟到读取，恢复正数后启用后续记录保存。
 - 用户偏好：本地修改完成后自动重新打包并启动更新版，保留设置和历史，未经批准不改版本。start:win 按本项目 release 绝对路径识别旧进程，通过 --rabbitball-quit 正常退出并等待保存后启动正式 RabbitBall.exe；打包前可用 --quit-only。
 - Windows 0.1.3 类型检查、171/171 项测试与原生 ValidateOnly 371 项状态断言通过。两端 0.1.3 均已获用户批准并发布至 GitHub v0.1.3，标签对应源码提交 672c2a94ced0956f50f355ae474febf7ecc5012d；Windows ZIP 与 Android APK 均已上传。Android 仍为 versionCode 7，构建、Lint、签名及对齐验证通过。Windows 最终 asar 无插件与诊断代码，正式 RabbitBall.exe 0.1.3 及原生辅助已启动。
+
+## 2026-11-11 Windows 大爆炸插件
+
+- 设置新增插件页，`graphPluginEnabled=true`、`graphModeEnabled=false`；管理/文档文件夹入口集中在插件页，功能栏开启模式立即进入。图谱描边与兔球功能按钮图标统一为2px，SVG使用non-scaling-stroke，沿用主题与字体。普通截图、图谱截图及批注截图共用原生捕获生命周期，图谱保存干净原图，模糊背景独立截取。
+- `graph-contracts.ts` 定义共享数据；`graph-store.ts` 独占串行文档事务；`graph-jobs.ts` 独占并行生成与取消；`graph-ui.js` 为正式画布。`graph-demo.js` 只在无桌面桥时启用，不接触真实设置和文件。
+- `app.getPath('documents')/RabbitBall/知识图谱/<工作区名称>/<工作区名称>.md` 是工作区正文，`assets/` 保存原图及批注附件，`state.json` 保存稳定工作区ID、坐标、批注和生成状态。GraphStore统一维护ID到实际路径，旧UUID/document.md首次加载迁移；应用改名、Markdown首行标题改名和undo/redo共用重定位及watcher重绑。Windows非法字符用全角对应字符，文件stem最长80字符，同名或占位加“ (2)”顺延且不覆盖；目录名和文件名始终一致。`graph-location.ts`首次将旧`userData/knowledge`完整复制至文档目录，旧库仅作为备份保留，已有新库优先。截图直接位于 `## 图谱` 下，卡片使用 `###`，隐藏ID/父节点标记支持任意树深度。工作区事件修订与正文修订独立；插件页“打开文档文件夹”用稳定ID查询当前路径并shell.openPath，不激活图谱或截图。内部文档编辑器及前端桥已移除，外部Markdown编辑仍由watcher同步；错误手稿不能被新截图覆盖。
+- 创建空图与填根分离：`create-graph` 预留 rootId，`attachCapture(workspaceId,graphId,context)` 填指定图。短按采集完成前不提前创建图，取消不会留下空图；长按在非空图建立新图。已移除所有 seed/自动出题模型路径。
+- 生成任务默认并发 3，批注分别入队、停止、重试；完整祖先正文和原图供参考，唯一讲解目标为选中文字或裁图。删除、重挂、祖先内容或原批注变化使旧任务失效；本卡人工编辑后的生成结果保留为候选，排队阶段也保留原始contentRevision。退出画布不取消任务，停用插件取消，退出应用等待写入完成。每轮generation记录id、正文基线、实际开始/结束时间与工具次数，统计不进入正文指纹或用户撤销历史。旧正文淡出、新草稿流入，取消/失败恢复保存稿；仅生成过程中显示实际耗时和搜索次数，完成后沿状态行高度动画收起，不虚构思考阶段耗时，demo不填虚假统计。
+- `onGraphChanged` 相同图片 ID 的重复数据用空字符串省略；覆盖节点图片、批注 images、source.images 和 source.selectionImage，前端统一 hydrate，直接 open/mutate 返回完整图片。流式更新复用卡片 DOM。`selectionImage` 是原选区来源快照，区别于批注附图，跨图搬迁或删来源仍能重新生成。
+- 画布鼠标滚轮以指针为中心缩放，左键空白平移；精细pixel wheel判为触控板平移，ctrl+wheel捏合缩放，同一连续手势保留模式。正文普通wheel保留内部滚动，ctrl+wheel在画布卡内仍缩放画布，在展开/固定区拦截浏览器缩放。缩略图连续wheel单次手势只切一张，避免惯性连跳。
+- 图谱控件禁选；普通画布卡片单击展开，鼠标按住移动超过6px直接拖动子树，取消独立手柄；展开/固定预览正文保留原生选字，触摸保留内滚和双指画布手势；固定预览正文点击保留原生选择，不用延迟click识别双击。空白pan在pointerdown排他preventDefault并仅清图内Range，4px阈值后平移，按pointerId处理移动/结束；lostcapture、blur、关闭和context切换统一清理。pointerPress/clickFrom为标题、卡片和遮罩共享按下归属及8px移动判断，防拖选后误展开/收回；文字选区只影响所属卡点击，延迟批注回调验证当前focusCard身份和连接状态。
+- 回正使用420ms、cubic-bezier(.22,1,.36,1)的rAF插值，每帧同步state.view、world变换和按钮逆缩放；切图的方向偏移并入真实视角，不再叠加viewport位移动画。切图/点击当前缩略图平滑居中，首次打开直接居中；新切图替换旧目标，用户按下/画布wheel立即停在当前帧。流式render不打断动画，resize重算目标，reduced-motion直接完成。独立subagent审查通过，未引入通用手势管理层。
+- Windows输入层按职责分开：原生钩子只交付按下时物理坐标/快捷键，main只转换一次坐标、管理窗口命中和聚焦，DOM控件负责click。兔球只接受主动pointerId的完整轻点/拖动，取消/失焦/关闭统一收尾，暂停视觉动画仍更新命中。截图、图像批注和重挂均绑定唯一主动指针；截图第二指放弃未提交框，pen不受手掌触点提交。重挂关闭/换上下文用cancel({restore:false})清ghost与捕获，settle验证drag/workspace/open，不复活旧图。
+- 本体setInteractive恢复v0.1.2的boolean契约，renderer按elementFromPoint与拖动状态上报；不再调用setShape，不因空输入区域hide，也不引入镜像显示层。大爆炸独立上报固定卡rects，仅在画布激活、悬停或按住固定卡时贡献输入状态。截图/暂停/跨屏沿用原来的显隐生命周期。
+- 画布触屏采用一条非passive TouchEvent路径，mouse/pen平移仍用PointerEvent并排除touch。scene、viewport、普通图片和正文滚动区使用touch-action:auto，只有兔球拖动、重挂手柄、放大图像框选局部none；原manipulation/pan-x pan-y会令Chromium正文触摸从首帧不可取消，已实测移除。单指正文不干预默认滚动/选择，双指（含正文和截图）按质心与距离更新同一view；抬一指重设基准、不跳变，取消抑制迟到move和合成click。已开始的原生单指滚动不能半途夺取，需抬起重新开始双指。实际CDP触点验证缩放、平移、取消和正文165px滚动；headless长按在无脚本对照页也不产生原生选区，不能当作实体触屏选词验证。
+- 固定预览按住正文时锁定当前top，暂停入场移动，释放后续播；pinPress在图谱打开/关闭两种预览状态均生效，只有关闭状态通知主进程按压状态，原生按压期间允许跨出卡片拖选，释放后按当前悬停状态恢复穿透。结束监听在window捕获阶段，隐藏/移除pin和pagehide主动清理，chat/settings的冒泡隔离不再截断收尾。真实浏览器过渡中按住8帧top变化0px，选文保留。
+- chat/settings/edit-menu保留浏览器默认输入：组合输入期Escape/Enter229不关闭/发送，chat-history使用auto支持长公式横向滚动；number/email等无selectionStart的控件使用原生命令可用状态判断复制/剪切。编辑菜单在graph开关/换上下文取消迟到粘贴。实际Chromium长公式宽332px、内容1156px，触摸横移scrollLeft=165，未触发画布或窗口动作。
+- 批注前先放大，阅读窗口约占85%屏高，最终正文15px/行高27px不变；从原卡矩形直接展开/收回，原卡隐藏直到收回结束。focusTransition以同一startTime控制牌面、内距、胶囊和原画布视觉比例，标题沿用原短预览及宽度上限，避免长标题起点被重复缩窄；仅动画中的一张卡逐帧按实际Range/图片边界重绘批注，结束或中断清理所有动画与帧回调。原牌与展开牌保留阅读scroll位置，入场暂inert、退场立即inert避免工具误触。展开卡工具常显，普通卡隐藏生成和批注编号；功能按钮使用画布逆缩放保持屏幕大小。标题600字重，非根普通/展开标题居中跨顶边，固定标题居中跨底边；模型卡与图谱快速会话统一短标题提示，不截断存储的TeX。
+- 截图根卡由pixelSize和实际内距计算高度；普通卡高宽4:3。`layoutUnit`归一化坐标，唯一`layoutTree`以深度为列（1.12u间距）、DFS叶分支为行，父节点与首分支同行，其余分支另起行，各行按实际最高卡片加max(28px,.10u)间距，给顶边胶囊留出空间。非根标题统一单行短预览，完整标题保留在tooltip；根节点在画布、展开和固定状态均隐藏标题胶囊，但保留文档元数据。source根头部占用25px，移成子节点后为41px。根位置保留；已有图、新增/删除/重挂均进入同一布局，平移/缩放不重排。进入或切换图谱由rootView统一以zoom1将根卡居中，不恢复旧视角或fit-all；constrainView按全部节点实际边界、当前缩放和视口限制平移，边缘卡可居中并留20%视口余量。缩放和resize共用同一限制。后台add-card/生成/move使用同一深度列初始位置；曲线统一右出左入，走两列间隙。
+- `graph-selection.js`将公式视为原子语义单元，`rich-text.js`在`.rabbit-math`保留转义后的`data-latex`（DOMPurify会剥掉MathML annotation）；隐藏MathML和可见HTML不重复计入文字偏移。批注保存完整TeX，恢复按语义偏移/唯一文本匹配，已有旧DOM偏移验证原文后转入同一几何路径。同一行合并高亮，公式矩形使用可见KaTeX区域。document捕获输入框外pointerdown：有文字或附件即保存，空稿取消，Escape明确取消；截图暂停期间保留草稿。保存同步固定批注快照和workspace/graph/node归属，异步结果不清新选区或关闭新编辑器；noteWrites按工作区/批注ID独立保留失败快照，提示统一重试，新保存替代同ID旧重试。
+- 拖动在root捕获指针，ghost平滑跟随、旧入边淡出，悬停缩略图450ms只预览切图，释放后一次提交move-subtree；目标允许根或已有分支节点，仅禁止自身和后代成环。取消恢复原视图且不写访问/树。批注删除保留子卡与source快照，并取消关联未完成任务。
+- 每工作区保留20步会话内稀疏字段/实体撤销历史：Ctrl+Z撤销，Ctrl+Shift+Z或Ctrl+Y重做；创建、删除、批注、固定、重挂、跨图移动和整批生成等统一记录。视图与流式回写不入历史、不清重做；撤销按当前状态构造逆操作，保留已完成生成和无关异步变化，冲突字段拒绝覆盖。恢复未完成任务为取消状态，不自动重启生成。输入框及IME走原生文本历史，不触发图谱撤销。
+- 所有卡片取消拖动手柄，world卡按住移动超过6px启动拖动，展开及固定预览保留选字。展开卡无专用关闭按钮，点击外部或Escape收回，删除使用垃圾桶图标。
+- 图谱快速会话复用 RabbitChat；每轮固定所选节点及祖先参考，读取期间即可取消。graph:contextchange在实际换工作区/图谱时关闭旧会话，发送/重生成/加入图谱再次校验graphKey；回答始终加入该轮原始父节点。空图允许回答成为首根。回答加入图谱时正文标题降至四级起，代码围栏原样；图谱文件独立于聊天历史上限。graph-jobs重新生成在读取store前登记任务，读取期间停止可阻止迟到入队。
+- 已确认旧点击失效根因：showPanel('graph') 将 promptActivation 置 pending，renderer 未 focusInput，造成 OS 一直鼠标穿透。assistant 在图谱 open 的 finally 按激活轮次完成 ready 握手。CDP mouse 能绕过系统命中，不能代替 Win32 鼠标验收。
+- 批注截图的 beginSelection 回执先登记 captureId，再以 microtask 顺序交付 pointer/end；一次拖动即结束，取消返回 null。返回复用同一个 graph activation，不重新 open、不清空批注。桌面抓取失败立即取消并恢复。模式持续 false 的菜单图不会因无关设置保存关闭，只有真实停用切换才退出。
+- 固定卡片在当前画布可见时不生成顶部副本；退出后root保留pin-only层。固定按钮独立牌面子元素，位于居中标题右侧6px，34px直径/17px圆角，与标题胶囊同高；画布逆缩放和focus过渡均保持屏幕尺寸。已固定按钮始终可见，pin模式仅此按钮，无其它工具；无标题根卡保留顶/底边缘入口。setGraphPinRegions始终上报牌面、可见标题和按钮（裁剪到可见区），位置/动画变化时更新。可见固定区域提前允许Windows点击激活，悬停不调用focus/show；graphPinPressed仅由有序原生down/up开启和结束，renderer的迟到down只能校验，不能重新锁住输入；renderer up可提前释放。已删除按下后的异步focus Promise、抢焦点及外点清焦点补偿，失焦/模式切换清理按压。Ctrl+C由实际获得焦点的渲染窗口处理。关闭插件、截图、暂停、跨屏pending均受门禁控制。固定正文点击/双击保留文本选择，标题或图片点击先visit所属图再graphActivate；启动恢复最近工作区，临时设置/聊天面板遮盖pin。
+- 所有action按钮统一捕获指针，移动超过8px取消点击，保留键盘click。取消固定热区的pointer及desktop:cursor悬停、focusin均不触发展开，保持当前牌面位置；其他牌面正常悬浮预览。真实Win32收起直接点击和完整预览后点击均记录pointerdown/up/click到同一按钮，pin:false且图谱不激活。原外悬工具栏已移除，不再随牌面滑走或移出原生命中区。
+- 左侧整图缩略图及文字合为白色浮卡，深色标题保持对比；缩略图、新建和工作区入口统一14px圆角，整栏透明。预览采用真实根截图、白色小卡、细线和内容纹理，过密小卡省略纹理，避免饱和色块拥挤。标题省略并保留tooltip，1440/1024/320px布局通过视觉检查。
+- 验证：build及412项测试通过，graph-ui 67项。自动保存回归覆盖空稿/附图、document外点捕获、跨workspace迟到结果不碰新note或Selection、同一入口恢复多份失败快照；浏览器实测单击/触摸tap展开、拖选不展开、外点保存及Escape取消。新增手势与回正动画6项回归；实际浏览器确认空白平移无选文、正文批注不移画布、拖选出界不收回、固定预览可选字。回正连续54帧、状态与实际矩阵误差<0.00051px，拖动/滚轮中断后无回跳；真实浏览器逐帧验证旧稿退场、草稿流入、成功末帧不再淡出、进度高度连续收回、取消恢复与立即重试，控件位置稳定且pageerror为0。本轮Win32真实点击标题右侧圆形按钮可取消固定且graph保持closed；真实拖选后Ctrl+C的剪贴板内容与选文完全一致，该轮旧策略下外部点击后及再次悬停时均focused=false/focusable=false；现策略已改为可见固定区域提前focusable，仍不在悬停主动focus。浏览器zoom0.4/1/1.8的固定按钮均34×34、17px圆角、与标题间距约6px；展开后无关闭按钮，外部点击收回并恢复原卡。根节点居中误差小于0.004px，平移边界与320px窄屏正常。此前已验证库迁移/重命名/撤销重做、标题与批注中间帧、树拖动/历史、公式选区、截图附图、本机SSE及原生透传。触控板仅精细wheel/ctrl捏合事件验证。显示器1440×852 CSS、200%缩放，截图在本任务visualizations/production。QA的userData/documents均隔离，临时资料未写正式目录，剪贴板已还原，测试应用已关闭。
+- 已完成0.1.3重新打包，`windows/release/RabbitBall-0.1.3-win-x64.zip`已生成；asar内graph-ui/selection/rich-text/edit-menu/settings/demo与本地一致，main/graph-store/graph-location与本地编译结果一致。旧版正常退出后正式`win-unpacked/RabbitBall.exe`已启动，两项原生辅助进程正常。正式目录为`<用户文档>/RabbitBall/知识图谱`；工作区现为`未命名工作区/未命名工作区.md`，稳定ID保留，2张图及2份图片正常，旧userData备份仍保留。未提升版本。
+- 输入层更新已再次沿用0.1.3打包：完整index及graph/capture/chat/settings/edit/assistant等内联源一致，main/preload/windows-native JS与PS1均匹配当前编译结果。启动脚本的Get-CimInstance遇到0x80004005；旧版此前已正常退出，改用Get-Process核对路径后直接Start-Process，正式主进程与2项原生辅助已确认运行。该WMI故障未引入应用逻辑兜底或无关系统改动。
+
+- 2026-11-11 输入复发修复：卡片边缘按钮曾由hover同时控制opacity与pointer-events，导致从空白直达按钮或首次触摸落到画布；现命中固定、hover只调外观，any-pointer:coarse时常显。拖动副本整棵子树禁命中，避免按钮挡住重挂目标。固定卡的Windows激活提前准备，主进程按压态缩为单个graphPinPressed，删除异步焦点请求与外点补偿。UI、GraphStore和生成入口统一拒绝无文字且无附图的批注，选择原文本身不算批注；确认、Enter、外点和截图完成共享非空规则。
+
+- 卡片工具按钮统一采用固定按钮的34px圆形样式；展开牌的40px生成按钮距卡片右侧和底部内边缘各10px（半个按钮半径），退出按钮同为40px。根节点无重新生成入口；未生成批注存在时启用生成按钮。批注textarea首次Enter仅保存并将焦点交给现有生成按钮，第二次Enter通过原生按钮激活生成子节点；Shift+Enter换行，IME确认和repeat不提交；勾选仅保存。异步保存仅在同workspace/graph/focusCard且无新批注时转移焦点。生成等待展开卡320ms收回后提交，新增卡与连线分别480/420ms入场，连线复用避免流式重播，必要时平移缩放展示父子分支。
+
+- 自定义子卡：world/focus卡片常显加号直接add-custom-node(graphId,parentId,markdown,images)，允许空白，以kind:source持久化身份。追加图复用append-node-images，文字复用edit/contentRevision；source禁止regenerate但支持annotation生成子节点。异步创建保留原workspace/parent，仅原focusCard身份未变时展开新卡（world入口快照为空）；空卡、混排、undo/redo、重载、跨图移动均有行为回归。
+- 根节点采用截图优先：空图“添加根节点”直接截图并add-root，成功后展开；已展开根的相机按钮继续截图，append-node-images(graphId,nodeId,images)保留原正文/批注/图片并支持撤销；文字按钮在卡片内编辑，复用edit与contentRevision，不弹出前置创建表单。graphCaptureImages/captureImages共用根/批注截图链路（purpose=images）。截图成功写入发起时的图谱，迟到结果不展开其它工作区。
+- 退出图谱输入审查：已删除固定卡按压扩大整屏shape的路径；原生鼠标释放清graphPinPressed，下一次区域外按下也清理遗留状态。隔离Win32双窗口+真实钩子验证释放后底层点击和滚轮可用。主assistant中无生产start来源的旧截图会话监听/关闭门禁已删除；正式capture-host独立持有截图UI。现场未发现旧会话分支参与生产截图，不能将它称为已复现的主因。
+- 全局输入复审：FocusOwnedWindow的AttachThreadInput会把辅助线程、兔球和当前前台（常为被截图窗口）的输入队列拼接，后续同步焦点调用可能阻塞且JS超时无法解除。已删除AttachThreadInput、BringWindowToTop及跨线程SetFocus，现仅一次SetForegroundWindow与最多150ms可取消观察。截图覆盖窗始终鼠标穿透；未发现滚轮被全局hook吞掉的路径。
+- 截图worker区分window/desktop请求：窗口恢复v0.1.2 PrintWindow(flags2)，返回完整GetWindowRect边界、限幅1920×1200的PNG；屏幕框选/图谱背景继续CopyFromScreen BGRA。main不再用桌面裁剪代替窗口内容。最初删除PrintWindow是排查假设，未证实它是停绘根因；用户明确无需再测Bili。
+
+- 当前验证：473项Windows自动测试、107项原生窗口断言通过；真实Chromium覆盖首次Enter仅保存、再次Enter生成、repeat不提交、Shift+Enter换行、根截图优先及自定义卡片纯文本/附图/批注生成。CDP Enter需附字符事件text:\r，否则无法模拟按钮原生激活；不要给产品叠加Enter到click监听。
+- 前次0.1.3已交付自定义卡片；开始菜单快捷方式指向win-unpacked/RabbitBall.exe。本轮截图修改的最新验证与交付以文末为准。
+
+- 激活光效恢复：activation-effect.js保留原渐变、2100/920ms与实际--rb-accent；desktop chat:open只发origin/activationId/color给main，预览继续原DOM播放。独立ActivationEffectWindow无preload、不可聚焦、永久ignoreMouse/showInactive，覆盖currentContext.focusScreenBounds，主交互窗moveTop保持在光效上方。主UI不扩大shape。IPC校验主sender/轮次/prompt/非截图/非暂停及hex色；新激活/截图/暂停/退出清理，旧动画/旧load失败/renderer-gone用实例与generation隔离。真实Windows确认完整720×550 DIP光效、focusable=false且目标焦点保持；穿透投点因其它topmost窗口覆盖被HWND守卫阻止，因此未声称点击/滚轮实测成功。controller4项回归、完整473项与真实Chromium加号常显及world创建流程通过。
+- 光效与常显加号合并后再次dist:win交付0.1.3，包内host/动画/index/main/控制器与本次构建一致；正式实例及两项原生辅助进程已确认运行。
+
+## 2026-11-12 大爆炸固定卡片修复
+
+- 用户确认0.1.2本体正常，任务边界为大爆炸插件。已撤掉本轮DesktopDisplay候选、其预加载/host/测试及编译遗留；不使用局部capturePage镜像。恢复本体直接呈现和boolean交互契约，插件不得以setShape裁剪本体，输入状态不得驱动本体hide。
+- 已确认Chromium 156遮挡误判条件：RabbitBall HWND为全工作区，只有一个region矩形时Chromium仍使用完整窗口矩形；LAYERED且alpha255也不自动排除。prepareOverlayWindow仅为本进程有效HWND增加WS_EX_TOOLWINDOW，保留其它样式、前台、尺寸和region；隔离自有Electron窗口的遮挡predicate由true变false。setFocusable/setSkipTaskbar不会移除此标记。
+- ReadFullscreen显式排除GetDesktopWindow/GetShellWindow；空目标上下文无captureError也正常打开聊天。截图助手独立于输入钩子；窗口与屏幕采集分工见下文。
+- 桌面取消固定时输入rects立即移除、元素inert，原DOM保留180ms淡出下移后才删除布局占位。快速重新固定取消旧退场；切换图谱/工作区/插件清理旧实例，旧promise不能删除重新固定的卡片。
+- 原生down/up是插件持续按压的唯一开启来源；renderer迟到down不再重新开启按压。未按压时离开卡片恢复穿透；物理松开、失焦、截图和退出释放插件按压状态，不修改本体hover状态。
+- 参考VPet的局部WPF窗口和Shimeji的逐像素原生窗口后，以用户给出的可用0.1.2本体作为更直接基线；没有迁移本体显示技术。按要求不再测试Bili。
+- 最终472项Node回归、436项原生断言及真实Chromium图谱交互通过。隔离main-plugin-live.cjs实测本体opacity1、无shape、空目标prompt真聚焦；固定卡Win32悬停与拖选成功，移出后自建底层窗口click=1/wheel=1且动画ticks793→1091继续，ignoreMouse=true；native up后迟到renderer down未重新锁住。取消固定60ms输入0但inert卡仍1，400ms后卡0。正式asar已核对工具窗口标记、退场动画及不存在镜像/旧window-input编译遗留；版本0.1.3未变。
+- dist:win完成后正常启动正式RabbitBall.exe，确认两项原生辅助进程存活、开始菜单仍指向win-unpacked。正式主窗Visible=true、RegionKind=0、ExStyle=0x082800A8含TOOLWINDOW，ChromiumOpaquePredicate=false。ZIP为windows/release/RabbitBall-0.1.3-win-x64.zip。
+
+## 2026-11-12 大爆炸实现精简
+
+- 三个subagent分别审查画布、存储/生成、桌面桥/预览。保留现有分层和有实际数据用途的迁移、公式选区兼容；本轮不调整本体显示及原生输入。
+- graph-ui的根截图、追加图片、批注附图共用captureInto挂起与恢复；固定卡激活持有独立目标，逐次await后核对目标身份与epoch，关闭或其他打开操作取消未提交目标，避免连续点击串用共享pendingPin。
+- GraphStore子树查找改邻接遍历，树校验复用已确认祖先路径，两段深树遍历降为O(n)；512层逆序树回归覆盖合法乱序、环、断链及完整分支删除。GraphJobs路径用push/reverse，重新生成准备并回调用方，消除重复异常清理。
+- graph-demo以localStorage写入成功作为提交边界，再更新内存、历史及失效任务。失败的新建、重命名、切换、撤销/重做不留下半次修改；当前工作区读取不再写存储。流式保存失败保留已保存正文并结束任务，仅显示失败状态。workspace返回独立副本，调用方不再重复克隆工作副本。
+- build与479项Windows自动回归通过；新增7项回归覆盖固定卡异步竞态、深树及预览存储配额失败。数据格式和版本0.1.3保持不变。
+- dist:win完成，旧正式实例通过--rabbitball-quit正常退出后更新，已启动新win-unpacked/RabbitBall.exe并确认主进程持续运行；ZIP仍为RabbitBall-0.1.3-win-x64.zip。
+
+## 2026-11-12 恢复窗口截图
+
+- 普通prompt仅发window请求；graph需要根图时发window加可选backgroundBounds（同response分别返回窗口PNG/桌面BGRA）；已有图背景与长按框选只发desktop，不再携带foreground标志。背景失败不丢窗口图，窗口失败也不拿桌面图冒充；组合请求真正挂住时仍受原有8秒整请求超时约束。
+- CaptureWindow与v0.1.2方法一致，光标按完整窗口边界与实际输出尺寸映射，不按屏幕交集裁剪。保留CaptureWorker取消杀进程/新请求重建、session身份检查及已完成的TOOLWINDOW/插件按压修复；没有修改本体动画或增加截图fallback。
+- 恢复后483项Node回归及107项原生断言通过。自有40×40窗口被不同颜色窗口完全遮挡时，CaptureWindow仍返回目标色与完整窗口边界，CaptureDesktop返回遮挡色且未请求窗口绘制，前台保持不变。PW_RENDERFULLCONTENT可能由DWM缓存完成，因此以像素来源而非必须收到WM_PRINT作为窗口截图依据；当前仅一台显示器，多屏用例跳过。
+- 本轮按0.1.3完成dist:win，asar已确认PrintWindow PNG和独立desktop分支；正常重启正式程序，主进程及两项原生助手运行。主窗Visible=true/RegionKind=0/TOOLWINDOW存在/ChromiumOpaquePredicate=false，先前插件遮挡修复保持。

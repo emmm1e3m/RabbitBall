@@ -14,6 +14,8 @@ export interface NativeCaptureResult {
   bounds: CaptureRect;
   cursor: { x: number; y: number };
   imageBase64?: string;
+  imageWidth?: number;
+  imageHeight?: number;
   captureError?: string;
   desktopBitmap?: Buffer;
   desktopWidth?: number;
@@ -21,7 +23,7 @@ export interface NativeCaptureResult {
   desktopError?: string;
 }
 
-type CaptureRequest = { type: 'window' } | { type: 'desktop'; bounds: CaptureRect };
+type CaptureRequest = { type: 'window'; backgroundBounds?: CaptureRect } | { type: 'desktop'; bounds: CaptureRect };
 
 // 截图阻塞操作独立于低级键鼠钩子；一个按需恢复的常驻进程复用编译结果。
 export class CaptureWorker {
@@ -112,7 +114,7 @@ export class CaptureWorker {
     return new Promise<NativeCaptureResult>((resolve, reject) => {
       const id = randomUUID();
       const cleanup = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); };
-      // PrintWindow 可能被外部应用阻塞；取消时结束该进程，不让旧请求拖住下一次截图。
+      // 取消时结束正在采集像素的助手，不让旧请求拖住下一次截图。
       const abort = () => this.fail?.(new Error('截图已取消。'));
       const timer = setTimeout(() => this.fail?.(new Error('读取窗口超时，请稍后重试。')), 8000);
       this.pending = {

@@ -1,4 +1,6 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([switch]$FramebufferOnly)
+
+$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 # 加载实际原生类；不执行脚本的截图入口，也不以源码正则代替行为验证。
@@ -11,6 +13,8 @@ namespace RabbitBallWindowTests {
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Drawing;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using RabbitBall;
@@ -38,12 +42,16 @@ public static class WindowTargetTest {
     [DllImport("user32.dll")] static extern IntPtr DefWindowProc(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll")] static extern bool UpdateWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string name, string title);
     [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, MonitorProc callback, IntPtr data);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
     [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr window, uint attribute, ref int value, uint size);
+    [DllImport("dwmapi.dll")] static extern int DwmFlush();
+    [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint color);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
     static readonly WindowProc procedure = DefWindowProc;
     static readonly List<IntPtr> windows = new List<IntPtr>();
     static readonly List<string> classes = new List<string>();
@@ -52,8 +60,8 @@ public static class WindowTargetTest {
         assertions++;
         if (!condition) throw new InvalidOperationException(label);
     }
-    static void Register(string name) {
-        if (RegisterClass(new WindowClass { Procedure = procedure, Instance = GetModuleHandle(null), Name = name }) == 0)
+    static void Register(string name, WindowProc handler = null, IntPtr background = default(IntPtr)) {
+        if (RegisterClass(new WindowClass { Procedure = handler ?? procedure, Background = background, Instance = GetModuleHandle(null), Name = name }) == 0)
             throw new Win32Exception(Marshal.GetLastWin32Error(), "注册测试窗口类失败：" + name);
         classes.Add(name);
     }
@@ -69,6 +77,88 @@ public static class WindowTargetTest {
     static void DestroyAll() {
         for (int index = windows.Count - 1; index >= 0; index--) DestroyWindow(windows[index]);
         windows.Clear();
+    }
+    public static void TestFramebuffer() {
+        const string name = "RabbitBallFramebufferFixture";
+        int printRequests = 0;
+        WindowProc handler = delegate(IntPtr window, uint message, IntPtr wparam, IntPtr lparam) {
+            if (message == 0x0317 || message == 0x0318) {
+                printRequests++;
+                using (Graphics graphics = Graphics.FromHdc(wparam)) graphics.Clear(Color.FromArgb(40, 120, 200));
+                return IntPtr.Zero;
+            }
+            return DefWindowProc(window, message, wparam, lparam);
+        };
+        IntPtr foreground = ForegroundWindowNative.GetForegroundWindow();
+        IntPtr previousDpi = ForegroundWindowNative.SetThreadDpiAwarenessContext(new IntPtr(-4));
+        IntPtr brush = CreateSolidBrush(0x00C87828);
+        IntPtr coverBrush = CreateSolidBrush(0x0028B450);
+        string coverName = name + "Cover";
+        bool registered = false;
+        bool coverRegistered = false;
+        try {
+            ForegroundWindowNative.Rect monitor = new ForegroundWindowNative.Rect();
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+                delegate(IntPtr handle, IntPtr dc, ref ForegroundWindowNative.Rect bounds, IntPtr data) {
+                    monitor = bounds; return false;
+                }, IntPtr.Zero);
+            Assert(monitor.Right > monitor.Left, "桌面像素回归需要实际显示器");
+            Register(name, handler, brush); registered = true;
+            int x = monitor.Left + 60, y = monitor.Top + 60;
+            // 使用不激活的小窗确认截图来自桌面合成像素，不向目标发送绘制请求。
+            IntPtr window = CreateWindowEx(0x08000080, name, name, 0x80000000,
+                x, y, 40, 40, IntPtr.Zero, IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
+            Assert(window != IntPtr.Zero, "创建桌面像素测试窗失败");
+            windows.Add(window);
+            int disableTransitions = 1;
+            DwmSetWindowAttribute(window, 3, ref disableTransitions, 4);
+            Assert(SetWindowPos(window, new IntPtr(-1), 0, 0, 0, 0, 0x53), "显示桌面像素测试窗失败");
+            UpdateWindow(window);
+            DwmFlush();
+            ForegroundWindowNative.CaptureResult capture = ForegroundWindowNative.CaptureDesktop(x + 16, y + 16, 8, 8);
+            Assert(capture.ImageWidth == 8 && capture.ImageHeight == 8 && capture.ImageBitmap.Length == 256,
+                "桌面截图必须保留请求范围的原始 BGRA 像素");
+            for (int offset = 0; offset < capture.ImageBitmap.Length; offset += 4) {
+                Assert(capture.ImageBitmap[offset] == 200 && capture.ImageBitmap[offset + 1] == 120 &&
+                    capture.ImageBitmap[offset + 2] == 40 && capture.ImageBitmap[offset + 3] == 255,
+                    "桌面截图必须匹配测试窗实际合成颜色且保持不透明，实际 BGRA=" +
+                    capture.ImageBitmap[offset] + "," + capture.ImageBitmap[offset + 1] + "," +
+                    capture.ImageBitmap[offset + 2] + "," + capture.ImageBitmap[offset + 3]);
+            }
+            Assert(printRequests == 0, "截图不能向目标发送 WM_PRINT 或 WM_PRINTCLIENT");
+            Register(coverName, handler, coverBrush); coverRegistered = true;
+            IntPtr cover = CreateWindowEx(0x08000080, coverName, coverName, 0x80000000,
+                x, y, 40, 40, IntPtr.Zero, IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
+            Assert(cover != IntPtr.Zero, "创建截图遮挡测试窗失败"); windows.Add(cover);
+            DwmSetWindowAttribute(cover, 3, ref disableTransitions, 4);
+            Assert(SetWindowPos(cover, new IntPtr(-1), 0, 0, 0, 0, 0x53), "显示遮挡测试窗失败");
+            UpdateWindow(cover); DwmFlush();
+            ForegroundWindowNative.CaptureResult coveredDesktop = ForegroundWindowNative.CaptureDesktop(x + 16, y + 16, 8, 8);
+            Assert(coveredDesktop.ImageBitmap[0] == 40 && coveredDesktop.ImageBitmap[1] == 180 && coveredDesktop.ImageBitmap[2] == 80,
+                "桌面截图应读取遮挡层的合成颜色");
+            Assert(printRequests == 0, "桌面截图即使存在遮挡也不得发送 WM_PRINT");
+            ForegroundWindowNative.CaptureResult windowImage = ForegroundWindowNative.CaptureWindow(window);
+            // PW_RENDERFULLCONTENT 也可能由 DWM 缓存完成；用实际像素确认窗口来源。
+            Assert(windowImage.Bounds.Left == x && windowImage.Bounds.Top == y && windowImage.ImageWidth == 40 && windowImage.ImageHeight == 40,
+                "窗口截图应使用目标 GetWindowRect 范围与实际图像尺寸");
+            byte[] png = Convert.FromBase64String(windowImage.ImageBase64);
+            Assert(png[0] == 137 && png[1] == 80 && png[2] == 78 && png[3] == 71, "窗口截图必须保留原 PNG 编码");
+            using (MemoryStream memory = new MemoryStream(png)) using (Bitmap image = new Bitmap(memory)) {
+                Color pixel = image.GetPixel(20, 20);
+                Assert(pixel.R == 40 && pixel.G == 120 && pixel.B == 200,
+                    "窗口截图必须来自被遮挡目标自身，不可回退桌面遮挡像素");
+            }
+            Assert(ForegroundWindowNative.GetForegroundWindow() == foreground, "桌面截图不能改变用户前台窗口");
+            Console.WriteLine("framebuffer assertions passed: desktop BGRA with zero WM_PRINT; covered window PNG differs from desktop; unchanged foreground");
+        } finally {
+            DestroyAll();
+            if (registered) { UnregisterClass(name, GetModuleHandle(null)); classes.Remove(name); }
+            if (coverRegistered) { UnregisterClass(coverName, GetModuleHandle(null)); classes.Remove(coverName); }
+            DeleteObject(brush);
+            DeleteObject(coverBrush);
+            if (previousDpi != IntPtr.Zero) ForegroundWindowNative.SetThreadDpiAwarenessContext(previousDpi);
+            GC.KeepAlive(handler);
+        }
     }
     static void TestMultipleMonitors() {
         List<ForegroundWindowNative.Rect> monitors = new List<ForegroundWindowNative.Rect>();
@@ -163,6 +253,7 @@ public static class WindowTargetTest {
             IntPtr window = FindWindow(shell, null);
             if (window != IntPtr.Zero) Assert(!ForegroundWindowNative.IsCaptureTarget(window, 0), "真实外壳应排除：" + shell);
         }
+        TestFramebuffer();
         TestMultipleMonitors();
         IntPtr desktop = CreateDesktop("RabbitBallTargetTest-" + Guid.NewGuid().ToString("N"), IntPtr.Zero,
             IntPtr.Zero, 0, 0x01FF, IntPtr.Zero);
@@ -188,4 +279,5 @@ public static class WindowTargetTest {
 }
 '@
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition ($taskClass.Groups[1].Value + "`n" + $taskFixtureSource)
-[RabbitBallWindowTests.WindowTargetTest]::Run()
+if ($FramebufferOnly) { [RabbitBallWindowTests.WindowTargetTest]::TestFramebuffer() }
+else { [RabbitBallWindowTests.WindowTargetTest]::Run() }
