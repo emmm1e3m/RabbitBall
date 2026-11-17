@@ -23,7 +23,7 @@ export interface NativeCaptureResult {
   desktopError?: string;
 }
 
-type CaptureRequest = { type: 'window'; backgroundBounds?: CaptureRect } | { type: 'desktop'; bounds: CaptureRect };
+type CaptureRequest = { type: 'window'; backgroundBounds?: CaptureRect } | { type: 'desktop'; bounds: CaptureRect; maxWidth?: number };
 
 // 截图阻塞操作独立于低级键鼠钩子；一个按需恢复的常驻进程复用编译结果。
 export class CaptureWorker {

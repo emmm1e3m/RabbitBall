@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { imageCropRect, selectionRect, unionBounds } from '../electron/capture-geometry.ts';
 import { ClipboardStore } from '../electron/clipboard.ts';
+import { effectiveShortcutBindings, shortcutAcceleratorBindings } from '../electron/shortcut.ts';
 import type { Activation, CursorPoint } from '../electron/contracts.ts';
 
 const WINDOW_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jTQAAAABJRU5ErkJggg==';
@@ -29,7 +30,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
   let clearedEffects = 0;
   const handlers = new Map<string, IpcHandler>();
   const settings = { autoCopyScreenshots: true, eyeColor: '#F90040', activationShortcut: ['AltLeft'], followMouse: true,
-    graphPluginEnabled: true, graphModeEnabled: false, pauseOnFullscreen: true };
+    graphPluginEnabled: true, graphActivationShortcut: null, pauseOnFullscreen: true };
   const state = { focusable: false, ignoreMouse: true, visible: false, opacity: 1 };
   let bounds = { x: 0, y: 0, width: 1440, height: 900 };
   const webContents = {
@@ -96,7 +97,7 @@ function desktop(focusResult: Promise<boolean> = Promise.resolve(false), clipboa
     __store: { getPublic: () => ({ ...settings }), async save(patch: Partial<typeof settings>) { Object.assign(settings, patch); return { ...settings }; } },
     __graphJobs: { cancelAll() { calls.push('jobs.cancelAll'); } },
     __overlays: { close() { calls.push('overlays.close'); }, show: async () => { calls.push('overlays.show'); }, frame() {}, image() {}, owns: () => false },
-    here: '.', path, randomUUID, imageCropRect, selectionRect, unionBounds, nativeShortcut: (v: unknown) => v, validateSettingsPatch: (v: unknown) => v,
+    here: '.', path, randomUUID, imageCropRect, selectionRect, unionBounds, nativeShortcut: (v: unknown) => v, effectiveShortcutBindings, shortcutAcceleratorBindings, validateSettingsPatch: (v: unknown) => v,
     markCaptureCursor: (value: unknown) => value,
     nativeImage: { createFromBuffer: (value: Buffer) => { decodedWindowImages.push(value.toString('base64')); return image(captureFrame.imageWidth ?? 1440, captureFrame.imageHeight ?? 900); },
       createFromDataURL: (value: string) => { decodedWindowImages.push(value); return image(captureFrame.imageWidth ?? 1440, captureFrame.imageHeight ?? 900); },
@@ -379,11 +380,11 @@ test('自动聚焦失败后提示框仍保留可聚焦、可点击的输入态',
   assert.equal(app.state.ignoreMouse, false);
 });
 
-test('退出图谱后固定卡悬停和本体交互互不覆盖，移出后穿透且不抢键盘', async () => {
+test('退出本体提问后固定卡悬停和本体交互互不覆盖，移出后穿透且不抢键盘', async () => {
   const app = desktop();
   let pointer = { x: 120, y: 80 };
   app.screen.getCursorScreenPoint = () => pointer;
-  app.subject.showPanel('graph'); await app.subject.focusInput(app.activation().activationId);
+  app.subject.showPanel('prompt'); await app.subject.focusInput(app.activation().activationId);
   app.send('rabbit:set-graph-pin-regions', { rects: [{ x: 100, y: 60, width: 160, height: 120 }] });
   app.calls.length = 0; app.subject.hidePanel();
   assert.equal(app.subject.view(), undefined); assert.equal(app.state.ignoreMouse, false); assert.equal(app.state.focusable, true);
@@ -523,13 +524,13 @@ test('移除固定区域或停用插件立即恢复穿透，重新启用需要�
   assert.equal(app.state.ignoreMouse, false); assert.equal(app.state.focusable, true);
 });
 
-test('固定条命中不能绕过图谱就绪阶段、截图占用或全屏暂停', async () => {
+test('固定条命中不能绕过提问就绪阶段、截图占用或全屏暂停', async () => {
   const app = desktop(), regions = { rects: [{ x: 680, y: 400, width: 80, height: 80 }] };
   app.send('rabbit:set-graph-pin-regions', regions);
-  app.subject.showPanel('graph');
+  app.subject.showPanel('prompt');
   app.send('rabbit:set-graph-pin-regions', regions); app.subject.updateGraphPinHover(app.subject.cursor());
   app.send('rabbit:set-interactive', true, app.activation().activationId);
-  assert.equal(app.state.ignoreMouse, true); assert.equal(app.state.focusable, false, '图谱仍须完成真实就绪握手');
+  assert.equal(app.state.ignoreMouse, true); assert.equal(app.state.focusable, false, '提问仍须完成真实就绪握手');
   await app.subject.focusInput(app.activation().activationId);
   app.subject.hidePanel();
   assert.equal(app.state.ignoreMouse, false); assert.equal(app.state.focusable, true);
@@ -552,7 +553,7 @@ test('固定条以窗口局部DIP命中负原点高DPI屏幕，并等待换屏�
   app.screen.getCursorScreenPoint = () => pointer;
   app.screen.dipToScreenRect = (_: unknown, rect: typeof area) => ({ x: rect.x * 1.5, y: rect.y * 1.5, width: rect.width * 1.5, height: rect.height * 1.5 });
   app.screen.dipToScreenPoint = (point: typeof pointer) => ({ x: point.x * 1.5, y: point.y * 1.5 });
-  app.subject.showPanel('graph');
+  app.subject.showPanel('prompt');
   const transition = (app.sent.findLast(item => item.channel === 'rabbit:cursor')!.value as CursorPoint).transitionId;
   app.subject.hidePanel();
   assert.equal(app.subject.cursor().x, 180); assert.equal(app.subject.cursor().y, 200);
@@ -715,15 +716,16 @@ test('收起自己的输入面板后立即重新允许全局触发，不依赖�
 });
 
 
-test('对话框再次收到激活键立即取消，释放或长按不重新截图，下一次正常激活', async () => {
+test('对话框再次收到激活键短按收起，释放不截图，下一次正常激活', async () => {
   const app = desktop();
   app.subject.showPanel('prompt');
   const owner = app.activation().activationId;
   app.subject.activatePrompt(false, 8);
   assert.equal(app.subject.view(), undefined);
-  assert.equal(app.subject.captureActive(), false);
+  assert.equal(app.subject.captureActive(), true, '保留会话以接收同一次按住的长按事件');
   assert.equal(app.sent.findLast(message => message.channel === 'rabbit:dismiss')?.value, owner);
   app.subject.endCapture();
+  assert.equal(app.subject.captureActive(), false);
   assert.equal(app.calls.some(call => call.startsWith('capture:')), false);
   app.subject.activatePrompt(false, 9);
   assert.equal(app.subject.captureActive(), true);
@@ -732,6 +734,22 @@ test('对话框再次收到激活键立即取消，释放或长按不重新截�
   assert.equal(app.subject.view(), 'prompt');
   app.subject.showPanel('settings');
   assert.equal(app.calls.filter(call => call.startsWith('native.ownForeground:')).at(-1), 'native.ownForeground:false');
+});
+
+test('从已打开的对话框继续长按仍进入截图，覆盖全部显示器且不抢焦点', async () => {
+  const app = desktop();
+  app.screen.getAllDisplays = () => [{ bounds: { x: -1920, y: 0, width: 1920, height: 1080 } }, { bounds: { x: 0, y: 0, width: 1440, height: 900 } }];
+  app.subject.showPanel('prompt');
+  app.subject.activatePrompt(false, 10);
+  const session = app.subject.session();
+  assert.equal(session.viewports.length, 2);
+  app.subject.holdCapture(session);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.calls.includes('overlays.show'), true);
+  assert.deepEqual(app.captureRequests, [{ type: 'desktop', bounds: { x: -1920, y: 0, width: 3360, height: 1080 } }]);
+  assert.equal(app.calls.includes('native.focus'), false);
+  app.subject.cancelCapture();
+  assert.equal(app.subject.captureActive(), false);
 });
 
 
@@ -864,17 +882,4 @@ test('本体沿用布尔悬停交互，移出后穿透且画面保持直接显�
   app.calls.length = 0;
   app.send('rabbit:set-interactive', false);
   assert.deepEqual(app.calls, [], '相同交互状态不重复改写系统样式');
-});
-
-test('只有图谱保持整画布交互，退出后恢复本体悬停穿透', async () => {
-  const app = desktop();
-  app.subject.showPanel('graph');
-  await app.subject.focusInput(app.activation().activationId);
-  app.send('rabbit:set-interactive', false, app.activation().activationId);
-  assert.equal(app.state.ignoreMouse, false);
-  assert.equal(app.state.opacity, 1);
-  app.subject.hidePanel();
-  assert.equal(app.state.ignoreMouse, true);
-  assert.equal(app.state.opacity, 1);
-  assert.equal(app.state.visible, true);
 });

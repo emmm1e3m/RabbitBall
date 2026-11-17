@@ -2,7 +2,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import type { CaptureContext, CaptureImage } from './contracts.js';
+import type { Attachment, CaptureContext, CaptureImage } from './contracts.js';
 import type { GraphAnnotation, GraphDocument, GraphImage, GraphMutation, GraphNode, GraphSelection, GraphSource, GraphWorkspace, GraphWorkspaceSummary, KnowledgeGraph } from './graph-contracts.js';
 
 const LEGACY_DOCUMENT = 'document.md';
@@ -11,12 +11,14 @@ const MAX_IMAGE = 24 * 1024 * 1024;
 const ID = /^[a-zA-Z0-9_-]{1,100}$/;
 const GRAPH_MARKER = /^<!-- rabbitball:graph (.+) -->$/;
 const NODE_MARKER = /^<!-- rabbitball:node (.+) -->$/;
+const BACKGROUND_MARKER = /^<!-- rabbitball:background (.+) -->$/;
 const DEFAULT_LAYOUT_UNIT = 238;
 
 type StoredImage = Omit<GraphImage, 'imageDataUrl'> & { file: string };
+type StoredAttachment = Omit<Attachment, 'text' | 'dataUrl'> & { file: string; content: 'text' | 'image' };
 type StoredAnnotation = Omit<GraphAnnotation, 'images'> & { images?: StoredImage[] };
 type StoredSource = Omit<GraphSource, 'images' | 'selectionImage'> & { images?: StoredImage[]; selectionImage?: StoredImage };
-type StoredNode = Omit<GraphNode, 'title' | 'markdown' | 'images' | 'annotations' | 'source'> & {
+type StoredNode = Omit<GraphNode, 'title' | 'markdown' | 'images' | 'attachments' | 'annotations' | 'source'> & {
   images: StoredImage[];
   annotations: StoredAnnotation[];
   source?: StoredSource;
@@ -83,7 +85,7 @@ function cardBodyValid(markdown: string): void {
     if (fence) {
       if (new RegExp(`^${fence.char}{${fence.length},}\\s*$`).test(trimmed)) fence = undefined;
     } else if (opening) fence = { char: opening[1][0], length: opening[1].length };
-    else if (/^#{1,3}\s/.test(line) || /^<!-- rabbitball:(?:graph|node) /.test(trimmed)) throw new Error('卡片标题请单独填写，正文中的小标题从 #### 开始。');
+    else if (/^#{1,3}\s/.test(line) || /^<!-- rabbitball:(?:graph|node|background) /.test(trimmed)) throw new Error('卡片标题请单独填写，正文中的小标题从 #### 开始。');
   }
   if (fence) throw new Error('卡片中的代码块尚未结束。');
 }
@@ -92,11 +94,22 @@ function viewValid(value: KnowledgeGraph['view']): boolean {
   return !!value && finite(value.x) && finite(value.y) && finite(value.zoom) && value.zoom >= .05 && value.zoom <= 8;
 }
 function fingerprint(node: GraphNode): string {
-  return digest(JSON.stringify([node.title, node.markdown, node.images.map(image => [image.file, image.title])]));
+  const content: unknown[] = [node.title, node.markdown, node.images.map(image => [image.file, image.title])];
+  if (node.attachments?.length) content.push(node.attachments.map(({ id, name, mimeType, format, language, text }) => [id, name, mimeType, format, language, text]));
+  return digest(JSON.stringify(content));
 }
 function freshNode(id: string, kind: GraphNode['kind'], parentId: string | null, title: string): GraphNode {
   return { id, kind, parentId, title, markdown: '', images: [], annotations: [], pinned: false,
     x: 0, y: 0, contentRevision: 1, status: 'idle' };
+}
+function syncMaterialOrder(node: GraphNode): void {
+  const order = node.materialOrder;
+  if (order !== undefined && (!Array.isArray(order) || order.length > 128 || order.some(key => typeof key !== 'string' || key.length > 300))) throw new Error('卡片附件顺序格式无效。');
+  const current = [...node.images.map(image => `image:${image.id}`), ...(node.attachments ?? []).map(attachment => `attachment:${attachment.id}`)];
+  const present = new Set(current);
+  const next = [...new Set([...(order ?? []).filter(key => present.has(key)), ...current])];
+  if (next.length) node.materialOrder = next;
+  else delete node.materialOrder;
 }
 function freshGraph(title = '新图谱'): KnowledgeGraph {
   return { id: randomUUID(), title: label(title), rootId: randomUUID(), nodes: [], view: { x: 0, y: 0, zoom: 1 },
@@ -116,6 +129,14 @@ function getNode(graph: KnowledgeGraph, id: string): GraphNode {
   const node = graph.nodes.find(item => item.id === id);
   if (!node) throw new Error('这张卡片已被删除。');
   return node;
+}
+function removeGraph(workspace: GraphWorkspace, graph: KnowledgeGraph): void {
+  const index = workspace.graphs.indexOf(graph);
+  workspace.graphs.splice(index, 1);
+  if (!workspace.graphs.some(item => item.id === workspace.lastGraphId)) {
+    const next = workspace.graphs[index] ?? workspace.graphs[index - 1];
+    if (next) workspace.lastGraphId = next.id; else delete workspace.lastGraphId;
+  }
 }
 function descendants(graph: KnowledgeGraph, id: string): Set<string> {
   const children = new Map<string, string[]>();
@@ -166,6 +187,7 @@ function annotationValid(annotation: GraphAnnotation, node: GraphNode): void {
 }
 function validateWorkspace(workspace: GraphWorkspace): void {
   workspace.name = label(workspace.name);
+  if (workspace.background !== undefined) validateBackground(workspace.background);
   if (!Array.isArray(workspace.graphs) || workspace.graphs.length > 1000) throw new Error('工作区中的图过多。');
   const graphIds = new Set<string>(), nodeIds = new Set<string>();
   for (const graph of workspace.graphs) {
@@ -183,6 +205,7 @@ function validateWorkspace(workspace: GraphWorkspace): void {
       nodeIds.add(node.id); node.title = label(node.title); node.markdown = body(node.markdown);
       cardBodyValid(node.markdown);
       if (!finite(node.x) || !finite(node.y) || !Array.isArray(node.images) || !Array.isArray(node.annotations)) throw new Error('卡片数据无效。');
+      if (node.attachments !== undefined) validateAttachments(node.attachments, '卡片', true);
       if (!['source', 'card'].includes(node.kind)) throw new Error('卡片类型无效。');
       if (node.id !== root.id && (!node.parentId || !nodes.has(node.parentId))) throw new Error('卡片缺少有效的父节点。');
       // 已确认连到根的祖先不再重复遍历，流式更新也只需线性校验整棵树。
@@ -196,19 +219,59 @@ function validateWorkspace(workspace: GraphWorkspace): void {
     }
   }
 }
+function validateBackground(background: NonNullable<GraphWorkspace['background']>): void {
+  if (!background || typeof background !== 'object' || typeof background.text !== 'string'
+    || Buffer.byteLength(background.text, 'utf8') > MAX_DOCUMENT || !Array.isArray(background.attachments) || background.attachments.length > 64) throw new Error('背景信息格式无效或内容过大。');
+  validateAttachments(background.attachments, '背景');
+}
+function validateAttachments(attachments: Attachment[], owner: string, textOnly = false): void {
+  if (!Array.isArray(attachments) || attachments.length > 64) throw new Error(`${owner}最多保留 64 个文件。`);
+  const ids = new Set<string>();
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== 'object' || !validId(attachment.id) || ids.has(attachment.id)
+      || typeof attachment.name !== 'string' || !attachment.name.trim() || attachment.name.length > 240
+      || typeof attachment.mimeType !== 'string' || !attachment.mimeType || attachment.mimeType.length > 200) throw new Error(`${owner}附件格式无效。`);
+    ids.add(attachment.id);
+    for (const tag of [attachment.format, attachment.language]) if (tag !== undefined && (typeof tag !== 'string' || tag.length > 240)) throw new Error(`${owner}附件类型标签无效。`);
+    if (textOnly && (typeof attachment.text !== 'string' || attachment.dataUrl !== undefined)) throw new Error('卡片文件需要先解析为文字，图片请通过图片入口添加。');
+    if (attachment.text !== undefined) {
+      if (typeof attachment.text !== 'string' || attachment.text.length > 1_000_000 || attachment.dataUrl !== undefined) throw new Error(`${owner}文档超过 100 万字符或格式无效。`);
+    } else if (typeof attachment.dataUrl !== 'string' || attachment.dataUrl.length > MAX_IMAGE * 1.4
+      || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]*={0,2}$/.test(attachment.dataUrl)) throw new Error(`${owner}图片格式无效或超过 24 MB。`);
+  }
+}
+function storedAttachment(attachment: Attachment): StoredAttachment {
+  const { text, dataUrl: _data, file, ...metadata } = attachment;
+  if (!file) throw new Error('附件尚未保存。');
+  return { ...metadata, file, content: text !== undefined ? 'text' : 'image' };
+}
+function attachmentLink(attachment: Attachment): string {
+  if (!attachment.file) throw new Error('附件尚未保存。');
+  const title = attachment.name.replace(/([\\\[\]])/g, '\\$1').replace(/[\r\n]/g, ' ');
+  return `${attachment.text === undefined ? '!' : ''}[${title}](${attachment.file})`;
+}
 function serialize(workspace: GraphWorkspace): string {
   const lines = [`# ${workspace.name}`, ''];
+  if (workspace.background) {
+    // 单独的围栏允许背景保留任意标题、公式和原文代码块，不参与图谱结构解析。
+    const background = workspace.background;
+    let longest = 2;
+    for (const match of background.text.matchAll(/^\s*(`+)/gm)) longest = Math.max(longest, match[1].length);
+    const fence = '`'.repeat(longest + 1);
+    lines.push(`<!-- rabbitball:background ${JSON.stringify({ attachments: background.attachments.map(storedAttachment) }).replace(/-->/g, '--\\u003e')} -->`, fence + 'markdown', background.text, fence, '<!-- rabbitball:background-end -->', ...background.attachments.map(attachmentLink), '');
+  }
   for (const graph of workspace.graphs) {
     lines.push(`<!-- rabbitball:graph ${JSON.stringify({ id: graph.id, rootId: graph.rootId })} -->`, `## ${graph.title}`, '');
     if (!graph.nodes.length) continue;
     const root = getNode(graph, graph.rootId);
     for (const node of [root, ...graph.nodes.filter(item => item.id !== root.id)]) {
-      lines.push(`<!-- rabbitball:node ${JSON.stringify({ id: node.id, parentId: node.parentId, kind: node.kind, ...(node.kind === 'source' ? { title: node.title } : {}) })} -->`);
+      lines.push(`<!-- rabbitball:node ${JSON.stringify({ id: node.id, parentId: node.parentId, kind: node.kind, ...(node.kind === 'source' ? { title: node.title } : {}), ...(node.attachments?.length ? { attachments: node.attachments.map(storedAttachment) } : {}), ...(node.materialOrder ? { materialOrder: node.materialOrder } : {}) }).replace(/-->/g, '--\\u003e')} -->`);
       if (node.kind === 'card') lines.push(`### ${node.title}`);
       for (const image of node.images) {
         if (!image.file) throw new Error('截图尚未保存。');
         lines.push(`![${image.title.replace(/([\\\[\]])/g, '\\$1').replace(/[\r\n]/g, ' ')}](${image.file})`);
       }
+      if (node.attachments) lines.push(...node.attachments.map(attachmentLink));
       if (node.markdown) lines.push(node.markdown);
       lines.push('');
     }
@@ -236,7 +299,7 @@ function historyDiff(before: GraphWorkspace, after: GraphWorkspace): HistoryEntr
     const common = new Set(left.filter(id => right.includes(id)));
     if (!equalValue(left.filter(id => common.has(id)), right.filter(id => common.has(id)))) steps.push({ type: 'order', graphId, before: left, after: right });
   };
-  fields('workspace', undefined, before, after, ['name']);
+  fields('workspace', undefined, before, after, ['name', 'background']);
   for (const id of new Set([...before.graphs, ...after.graphs].map(graph => graph.id))) {
     const a = before.graphs.find(graph => graph.id === id), b = after.graphs.find(graph => graph.id === id);
     if (!a || !b) steps.push({ type: 'entity', entity: 'graph', id,
@@ -255,8 +318,8 @@ function historyDiff(before: GraphWorkspace, after: GraphWorkspace): HistoryEntr
     }
     if (a.graphId !== b.graphId) steps.push({ type: 'move', id, before: { graphId: a.graphId, index: a.index }, after: { graphId: b.graphId, index: b.index } });
     // 位置和生成状态属于派生状态，不让自动布局或流式更新污染输入历史。
-    fields('node', id, a.node, b.node, ['parentId', 'kind', 'title', 'markdown', 'images', 'pinned', 'candidate']);
-    fields('source', id, a.node.source ?? {}, b.node.source ?? {}, ['nodeId', 'annotationId', 'selection', 'comment', 'revision', 'images', 'selectionImage']);
+    fields('node', id, a.node, b.node, ['parentId', 'kind', 'title', 'markdown', 'images', 'attachments', 'materialOrder', 'pinned', 'candidate']);
+    fields('source', id, a.node.source ?? {}, b.node.source ?? {}, ['nodeId', 'annotationId', 'selection', 'comment', 'question', 'revision', 'images', 'selectionImage']);
     for (const annotationId of new Set([...a.node.annotations, ...b.node.annotations].map(annotation => annotation.id))) {
       const x = a.node.annotations.find(annotation => annotation.id === annotationId), y = b.node.annotations.find(annotation => annotation.id === annotationId);
       if (!x || !y) steps.push({ type: 'entity', entity: 'annotation', id: annotationId,
@@ -320,7 +383,7 @@ function applyHistory(workspace: GraphWorkspace, steps: HistoryEntry, forward: b
       for (const [key, change] of Object.entries(step.changes)) {
         if (!equalValue(fields[key], change[from])) throw new Error('这部分内容已在之后更新，已保留新内容；无法应用这次撤销或重做。');
         if (change[to] === undefined) delete fields[key]; else fields[key] = copy(change[to]);
-        if (step.entity === 'node' && ['parentId', 'kind', 'title', 'markdown', 'images'].includes(key)) affected.add(step.id!);
+        if (step.entity === 'node' && ['parentId', 'kind', 'title', 'markdown', 'images', 'attachments'].includes(key)) affected.add(step.id!);
       }
     }
   }
@@ -488,6 +551,17 @@ export class GraphStore {
     });
   }
 
+  stageAttachment(id: string, input: Omit<Attachment, 'id'>): Promise<Omit<Attachment, 'id'>> {
+    return this.enqueue(async () => {
+      this.record(id);
+      const attachment = { ...copy(input), id: randomUUID() };
+      validateAttachments([attachment], '文档', true);
+      await this.saveAttachments(id, [attachment]);
+      const { id: _id, ...result } = attachment;
+      return result;
+    });
+  }
+
   mutate(id: string, operation: GraphMutation): Promise<GraphWorkspace> {
     return this.enqueue(async () => {
       const record = this.record(id); await this.syncExternal(record);
@@ -495,13 +569,18 @@ export class GraphStore {
       if (operation.type === 'undo' || operation.type === 'redo') return this.replayHistory(record, operation.type === 'redo');
       const before = record.workspace, next = copy(before);
       if (operation.type === 'rename-workspace') next.name = label(operation.name);
+      else if (operation.type === 'set-background') {
+        validateBackground(operation.background);
+        next.background = copy(operation.background);
+      }
       else if (operation.type === 'create-graph') {
         const graph = freshGraph(operation.title === undefined ? '新图谱' : label(operation.title));
         next.graphs.push(graph); next.lastGraphId = graph.id;
       }
       else {
         const graph = getGraph(next, operation.graphId);
-        if (operation.type === 'add-root') {
+        if (operation.type === 'delete-graph') removeGraph(next, graph);
+        else if (operation.type === 'add-root') {
           if (graph.nodes.length) throw new Error('当前图谱已有根节点，请先新建空白图谱。');
           const markdown = body(operation.markdown);
           if (!Array.isArray(operation.images) || operation.images.length > 64) throw new Error('图片附件格式无效。');
@@ -528,6 +607,18 @@ export class GraphStore {
             used.add(image.id); node.images.push(image);
           }
         }
+        else if (operation.type === 'append-node-attachments') {
+          const node = getNode(graph, operation.nodeId);
+          if (!Array.isArray(operation.attachments) || !operation.attachments.length) throw new Error('请先选择要添加的文件。');
+          const attachments = copy(operation.attachments), used = new Set(node.attachments?.map(attachment => attachment.id));
+          for (const attachment of attachments) {
+            if (!attachment || typeof attachment !== 'object') throw new Error('卡片附件格式无效。');
+            if (used.has(attachment.id)) attachment.id = randomUUID();
+            used.add(attachment.id);
+          }
+          node.attachments = [...(node.attachments ?? []), ...attachments];
+          validateAttachments(node.attachments, '卡片', true);
+        }
         else if (operation.type === 'rename-graph') graph.title = label(operation.title);
         else if (operation.type === 'visit') next.lastGraphId = graph.id;
         else if (operation.type === 'view') {
@@ -553,6 +644,27 @@ export class GraphStore {
         } else {
           const node = getNode(graph, operation.nodeId);
           switch (operation.type) {
+            case 'remove-latest-node-asset': {
+              syncMaterialOrder(node);
+              const latest = node.materialOrder?.at(-1);
+              if (!latest) return copy(before);
+              if (latest.startsWith('image:')) {
+                const index = node.images.findIndex(image => image.id === latest.slice('image:'.length));
+                node.images.splice(index, 1);
+              } else {
+                const index = node.attachments!.findIndex(attachment => attachment.id === latest.slice('attachment:'.length));
+                node.attachments!.splice(index, 1);
+                if (!node.attachments!.length) delete node.attachments;
+              }
+              break;
+            }
+            case 'remove-node-attachment':
+              node.attachments = node.attachments?.filter(attachment => attachment.id !== operation.attachmentId);
+              if (!node.attachments?.length) delete node.attachments;
+              break;
+            case 'remove-node-image':
+              node.images = node.images.filter(image => image.id !== operation.imageId);
+              break;
             case 'edit':
               if (operation.contentRevision !== node.contentRevision) throw new Error('卡片已更新，请保留当前编辑并重新打开。');
               node.title = label(operation.title); node.markdown = body(operation.markdown); break;
@@ -617,10 +729,9 @@ export class GraphStore {
             }
             case 'delete': {
               const ids = descendants(graph, node.id);
-              if (node.id === graph.rootId) next.graphs = next.graphs.filter(item => item.id !== graph.id);
+              if (node.id === graph.rootId) removeGraph(next, graph);
               else graph.nodes = graph.nodes.filter(item => !ids.has(item.id));
               for (const remaining of graph.nodes) for (const annotation of remaining.annotations) if (annotation.childId && ids.has(annotation.childId)) delete annotation.childId;
-              if (!next.graphs.some(item => item.id === next.lastGraphId)) next.lastGraphId = next.graphs.at(-1)?.id;
               break;
             }
             case 'accept-candidate':
@@ -742,6 +853,7 @@ export class GraphStore {
     if (next.id !== previous.id) throw new Error('工作区编号不能修改。');
     retainSources(next, previous);
     validateWorkspace(next);
+    if (next.background) await this.saveAttachments(next.id, next.background.attachments, previous.background?.attachments);
     const oldNodes = new Map(previous.graphs.flatMap(graph => graph.nodes.map(node => [node.id, node] as const)));
     for (const graph of next.graphs) for (const node of graph.nodes) {
       if (!oldNodes.has(node.id) && record.deleted.has(node.id) && !restored?.has(node.id)) throw new Error('已删除卡片的生成任务已失效。');
@@ -749,6 +861,10 @@ export class GraphStore {
       // 用户直接编辑卡片时，也需把新插入的本地图片纳入同一资源校验。
       if (/^!\[/m.test(node.markdown)) await this.extractImages(next.id, node, before?.images ?? []);
       await this.saveImages(next.id, node.images, before?.images);
+      if (node.attachments) await this.saveAttachments(next.id, node.attachments, before?.attachments);
+      // 一处维护所有入口的顺序；新增素材补到尾部，移除只清理对应项。
+      if (node.materialOrder === undefined && before?.materialOrder) node.materialOrder = copy(before.materialOrder);
+      syncMaterialOrder(node);
       for (const annotation of node.annotations) await this.saveImages(next.id, annotation.images ?? [], before?.annotations.find(item => item.id === annotation.id)?.images);
       if (node.source) {
         await this.saveImages(next.id, node.source.images ?? [], before?.source?.images);
@@ -831,7 +947,7 @@ export class GraphStore {
     const workspace: GraphWorkspace = { id, name: label(lines[first].replace(/^#\s+/, '')), revision: previous?.revision ?? Math.max(1, state?.revision ?? 1),
       updatedAt: previous?.updatedAt ?? state?.updatedAt ?? Date.now(), lastGraphId: previous?.lastGraphId ?? state?.lastGraphId, graphs: [] };
     let graph: KnowledgeGraph | undefined, node: GraphNode | undefined, pendingGraph: { id: string; rootId: string } | undefined;
-    let pendingNode: { id: string; parentId: string | null; kind: 'source' | 'card'; title?: string } | undefined;
+    let pendingNode: { id: string; parentId: string | null; kind: 'source' | 'card'; title?: string; attachments?: StoredAttachment[]; materialOrder?: string[] } | undefined;
     let content: string[] = [], fence: { char: string; length: number } | undefined, needsMarkers = false;
     const finishNode = () => { if (node) node.markdown = content.join('\n').trim(); content = []; };
     const startGraph = (title: string) => {
@@ -850,6 +966,18 @@ export class GraphStore {
     };
     for (let index = first + 1; index < lines.length; index++) {
       const line = lines[index], trimmed = line.trim();
+      const backgroundMarker = !fence && BACKGROUND_MARKER.exec(trimmed);
+      if (backgroundMarker) {
+        if (workspace.background || graph || pendingGraph || pendingNode) throw new Error('背景信息需要放在工作区名称之后、图谱之前。');
+        const metadata = JSON.parse(backgroundMarker[1]) as { attachments?: StoredAttachment[] };
+        const opening = /^(`{3,})markdown$/.exec(lines[++index] ?? '');
+        if (!opening || !metadata || !Array.isArray(metadata.attachments) || metadata.attachments.length > 64) throw new Error('背景信息标记格式无效。');
+        const backgroundLines: string[] = [];
+        while (++index < lines.length && lines[index] !== opening[1]) backgroundLines.push(lines[index]);
+        if (index >= lines.length || lines[++index] !== '<!-- rabbitball:background-end -->') throw new Error('背景信息尚未完整，请保留结束标记。');
+        workspace.background = { text: backgroundLines.join('\n'), attachments: await this.readAttachments(id, metadata.attachments) };
+        continue;
+      }
       if (fence) {
         content.push(line);
         if (new RegExp(`^${fence.char === '`' ? '`' : '~'}{${fence.length},}\\s*$`).test(trimmed)) fence = undefined;
@@ -876,6 +1004,8 @@ export class GraphStore {
         if (pendingNode.kind === 'source') {
           finishNode();
           node = freshNode(pendingNode.id, 'source', pendingNode.parentId, label(pendingNode.title ?? graph.title));
+          if (pendingNode.attachments !== undefined) node.attachments = await this.readAttachments(id, pendingNode.attachments);
+          if (pendingNode.materialOrder !== undefined) node.materialOrder = pendingNode.materialOrder;
           graph.nodes.push(node); pendingNode = undefined;
         }
         continue;
@@ -886,9 +1016,13 @@ export class GraphStore {
         if (!pendingNode) needsMarkers = true;
         const firstNode = !graph!.nodes.length;
         node = freshNode(pendingNode?.id ?? (firstNode ? graph!.rootId : randomUUID()), 'card', pendingNode ? pendingNode.parentId : firstNode ? null : graph!.rootId, label(line.replace(/^###\s+/, '')));
+        if (pendingNode?.attachments !== undefined) node.attachments = await this.readAttachments(id, pendingNode.attachments);
+        if (pendingNode?.materialOrder !== undefined) node.materialOrder = pendingNode.materialOrder;
         graph!.nodes.push(node); pendingNode = undefined; continue;
       }
       if (pendingNode && trimmed) throw new Error('卡片结构标记后需要 ### 标题。');
+      // 可读资源链接由结构标记中的附件元数据生成，不并入可编辑的卡片或背景正文。
+      if ((!graph ? workspace.background?.attachments : node?.attachments)?.some(attachment => attachmentLink(attachment) === trimmed)) continue;
       if (!node && !trimmed) continue;
       ensureBodyNode();
       content.push(line);
@@ -904,6 +1038,7 @@ export class GraphStore {
         const old = oldNodes.get(current.id), saved = savedNodes.get(current.id);
         const stored = old ?? saved;
         if (stored) {
+          if (current.materialOrder === undefined && stored.materialOrder) current.materialOrder = copy(stored.materialOrder);
           Object.assign(current, { annotations: copy(stored.annotations ?? []), source: copy(stored.source), pinned: stored.pinned === true,
             x: finite(stored.x) ? stored.x : 0, y: finite(stored.y) ? stored.y : 0, contentRevision: Math.max(1, stored.contentRevision || 1),
             status: stored.status ?? 'idle', draft: stored.draft, candidate: copy(stored.candidate), error: stored.error, generation: copy(stored.generation) });
@@ -918,6 +1053,7 @@ export class GraphStore {
           }
         }
         await this.extractImages(id, current, old?.images ?? saved?.images ?? []);
+        syncMaterialOrder(current);
         const oldFingerprint = old ? fingerprint(old) : saved?.fingerprint;
         if (oldFingerprint && oldFingerprint !== fingerprint(current)) current.contentRevision++;
         if (current.id !== currentGraph.rootId && (!current.parentId || !ids.has(current.parentId))) {
@@ -995,10 +1131,50 @@ export class GraphStore {
     }
   }
 
+  private async saveAttachments(workspaceId: string, attachments: Attachment[], previous: Attachment[] = []): Promise<void> {
+    for (const attachment of attachments) {
+      const old = previous.find(item => item.id === attachment.id);
+      if (old?.file && old.text === attachment.text && old.dataUrl === attachment.dataUrl) { attachment.file = old.file; continue; }
+      const image = attachment.text === undefined ? /^data:image\/(png|jpeg|webp|gif);base64,(.*)$/.exec(attachment.dataUrl!) : undefined;
+      const bytes = image ? Buffer.from(image[2], 'base64') : Buffer.from(attachment.text!, 'utf8');
+      if (image) this.checkImage(bytes, image[1]);
+      const extension = image ? image[1] === 'jpeg' ? 'jpg' : image[1] : 'txt';
+      attachment.file = `assets/${digest(bytes)}.${extension}`;
+      const directory = this.location(workspaceId).directory, assets = path.join(directory, 'assets');
+      await mkdir(assets, { recursive: true });
+      if (!this.inside(await realpath(directory), await realpath(assets))) throw new Error('资源目录不能指向工作区外部。');
+      await writeFile(path.join(directory, attachment.file), bytes, { flag: 'wx' }).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
+      await this.readAttachments(workspaceId, [storedAttachment(attachment)]);
+    }
+  }
+
+  private async readAttachments(workspaceId: string, attachments: StoredAttachment[]): Promise<Attachment[]> {
+    if (!Array.isArray(attachments) || attachments.length > 64) throw new Error('附件资源格式无效。');
+    const result: Attachment[] = [];
+    for (const attachment of attachments) {
+      if (!attachment || typeof attachment.file !== 'string' || !/^assets\/[a-f0-9]{64}\.(txt|png|jpg|webp|gif)$/.test(attachment.file)
+        || !['text', 'image'].includes(attachment.content) || (attachment.content === 'text') !== attachment.file.endsWith('.txt')) throw new Error('附件资源路径无效。');
+      const { content, ...metadata } = attachment;
+      const directory = this.location(workspaceId).directory, assets = await realpath(path.join(directory, 'assets'));
+      const target = await realpath(path.join(directory, attachment.file));
+      if (!this.inside(await realpath(directory), assets) || !this.inside(assets, target)) throw new Error('附件不能引用工作区外的文件。');
+      if (content === 'text') result.push({ ...metadata, text: await this.readText(target, MAX_DOCUMENT) });
+      else {
+        const info = await stat(target);
+        if (!info.isFile() || info.size > MAX_IMAGE) throw new Error('背景图片过大或不是普通文件。');
+        const bytes = await readFile(target), extension = path.extname(target).slice(1), mime = extension === 'jpg' ? 'jpeg' : extension;
+        this.checkImage(bytes, mime);
+        result.push({ ...metadata, dataUrl: `data:image/${mime};base64,${bytes.toString('base64')}` });
+      }
+    }
+    return result;
+  }
+
   private checkImage(bytes: Buffer, type: string): void {
     if (!bytes.length || bytes.length > MAX_IMAGE) throw new Error('截图为空或超过 24 MB。');
     const valid = type === 'png' ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
       : type === 'jpeg' ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
+      : type === 'gif' ? /^GIF8[79]a$/.test(bytes.toString('ascii', 0, 6))
       : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
     if (!valid) throw new Error('图片内容与扩展名不一致。');
   }
@@ -1032,7 +1208,7 @@ export class GraphStore {
   private stateFor(workspace: GraphWorkspace, markdown: string): StoredState {
     return { version: 1, id: workspace.id, revision: workspace.revision, updatedAt: workspace.updatedAt, lastGraphId: workspace.lastGraphId, documentHash: digest(markdown),
       graphs: workspace.graphs.map(graph => ({ id: graph.id, view: graph.view, layoutInitialized: graph.layoutInitialized, layoutUnit: graph.layoutUnit, updatedAt: graph.updatedAt, nodes: graph.nodes.map(node => {
-        const { title: _title, markdown: _markdown, images, annotations, source, ...rest } = node;
+        const { title: _title, markdown: _markdown, attachments: _attachments, images, annotations, source, ...rest } = node;
         return { ...rest, fingerprint: fingerprint(node), images: images.map(storedImage),
           annotations: annotations.map(annotation => ({ ...annotation, images: annotation.images?.map(storedImage) })),
           ...(source ? { source: { ...source, images: source.images?.map(storedImage), selectionImage: source.selectionImage ? storedImage(source.selectionImage) : undefined } } : {}) };

@@ -57,9 +57,10 @@ function browser(reducedMotion = false) {
     contains(child: Element): boolean { return child === this || this.children.some(node => node.contains(child)); }
     get isConnected() { return document.body.contains(this); }
     get offsetLeft() { return this.classes.has('chat-input') ? 50 : 0; }
-    get offsetTop() { return 10; }
+    get offsetParent() { return this.classes.has('chat-input') || this.classes.has('chat-input-row') ? this.parentElement : null; }
+    get offsetTop() { return this.classes.has('chat-input-row') ? this.parentElement!.offsetHeight - 55 : 10; }
     get offsetWidth() { return this.classes.has('chat-send') ? 32 : 180; }
-    get offsetHeight() { return this.tagName === 'FORM' ? 55 : this.tagName === 'INPUT' ? 34 : 56; }
+    get offsetHeight() { return this.tagName === 'FORM' ? parseFloat(this.parentElement?.style['--composer-height']) || 55 : this.tagName === 'INPUT' ? 34 : 56; }
     getBoundingClientRect() { return { left: 0, top: 0, width: this.id === 'pet' ? 92.25 : this.clientWidth, height: this.clientHeight }; }
     querySelectorAll(selector: string): Element[] {
       const matches = (node: Element) => selector.split(',').some(part => part.startsWith('.') ? node.classes.has(part.slice(1)) : part.startsWith('#') ? node.id === part.slice(1) : node.tagName.toLowerCase() === part);
@@ -141,7 +142,7 @@ function browser(reducedMotion = false) {
   };
 }
 
-function chat() {
+function chat(surface?: 'pet'|'graph') {
   const page = browser(), flights: ReturnType<typeof deferred>[] = [], focuses: number[] = [];
   page.window.RabbitBallDemo = {
     getSnapshot: () => ({ cursor: { x: 300, y: 300, inside: true }, position: { x: 100, y: 120 } }),
@@ -149,6 +150,10 @@ function chat() {
     cancelApproach: () => flights.forEach(flight => flight.resolve()),
   };
   page.window.RabbitAssistant = { captureContext: async () => null, focusInput: async (id: number) => { focuses.push(id); return false; } };
+  page.load('documents.js');
+  page.window.RabbitDocuments = { ...page.window.RabbitDocuments, readFile: async (file: any) => ({ id: randomUUID(), name: file.name, mimeType: file.type,
+    ...(file.type.startsWith('image/') ? { dataUrl: file.dataUrl } : { text: await file.text() }) }) };
+  if(surface){page.window.rabbitDesktop={surface};if(surface==='graph')delete page.window.RabbitBallDemo;}
   page.load('chat-ui.js');
   return { ...page, flights, focuses, api: page.window.RabbitChat };
 }
@@ -209,8 +214,7 @@ test('激活即开框与聚焦，光效固定在激活鼠标坐标，不等待�
     assert.equal(root.classList.contains('is-open'), true);
     assert.equal(root.querySelector('.chat-shell').inert, false);
     assert.equal(root.querySelector('.chat-panel').inert, false);
-    page.document.activeElement = page.document.body; input.focus();
-    assert.equal(page.document.activeElement, input);
+    assert.equal(page.document.activeElement, input, '开框自身应自动聚焦，无需手动点击或调用 focus');
     assert.deepEqual(page.focuses, [10]);
     const light = page.document.querySelector('.rabbit-activation-light');
     assert.ok(light);
@@ -219,6 +223,7 @@ test('激活即开框与聚焦，光效固定在激活鼠标坐标，不等待�
     assert.equal(parseFloat(light.style.top) + parseFloat(light.style.height) / 2, (origin?.y ?? 300) - 70);
     assert.equal(page.events.filter(event => event.type === 'chat:close').length, 0);
     await activation;
+    assert.equal(page.document.activeElement, input, '原生聚焦回执完成后仍保持输入框的 DOM 焦点');
   }
 });
 
@@ -270,19 +275,26 @@ test('独立光效播放器沿用几何和动画，完成或清理后移除图�
   }
 });
 
-test('实际聊天模块的聚焦异常不撤销输入，旧聚焦完成也不重开已关闭界面', async () => {
+test('实际聊天模块的聚焦异常不撤销输入，已关闭的旧聚焦回执不抢新视图焦点', async () => {
   const page = chat(), ack = deferred<boolean>();
   page.window.RabbitAssistant.focusInput = () => ack.promise;
   const activation = page.api.activate({ id: 'one', images: [] }, { activationId: 10 });
   assert.equal(page.api.getSnapshot().open, true);
-  page.emit('keydown', { key: 'Escape' }); ack.resolve(true); await activation;
+  assert.equal(page.document.activeElement, page.document.querySelector('.chat-input'));
+  page.emit('keydown', { key: 'Escape' });
+  const otherInput = page.document.createElement('input'); page.document.body.appendChild(otherInput); otherInput.focus();
+  const focusEvents = page.events.filter(event => event.type === 'chat:focus' && event.detail.active).length;
+  ack.resolve(true); await activation;
   assert.equal(page.api.getSnapshot().open, false);
+  assert.equal(page.document.activeElement, otherInput, '旧请求完成不能夺回已转交给其他界面的焦点');
+  assert.equal(page.events.filter(event => event.type === 'chat:focus' && event.detail.active).length, focusEvents);
   assert.equal(page.events.find(event => event.type === 'chat:close').detail.activationId, 10);
 
   page.window.RabbitAssistant.focusInput = async () => { throw new Error('IPC unavailable'); };
   const next = page.api.activate({ id: 'two', images: [] }, { activationId: 11 });
   await next;
   assert.equal(page.api.getSnapshot().open, true);
+  assert.equal(page.document.activeElement, page.document.querySelector('.chat-input'));
 });
 
 test('实际聊天模块取消飞行后，旧聚焦回执不干扰新一轮输入', async () => {
@@ -291,8 +303,12 @@ test('实际聊天模块取消飞行后，旧聚焦回执不干扰新一轮输�
   const old = page.api.activate({ id: 'one', images: [] }, { activationId: 10 });
   page.api.close();
   const next = page.api.activate({ id: 'two', images: [] }, { activationId: 11 });
-  ack.resolve(true); await old; await next;
+  await next;
+  assert.equal(page.document.activeElement, page.document.querySelector('.chat-input'));
+  const focusEvents = page.events.filter(event => event.type === 'chat:focus' && event.detail.active).length;
+  ack.resolve(true); await old;
   assert.deepEqual(page.focuses, [10, 11]); assert.equal(page.api.getSnapshot().open, true);
+  assert.equal(page.events.filter(event => event.type === 'chat:focus' && event.detail.active).length, focusEvents, '旧 epoch 不能再发起 DOM 聚焦或覆盖新一轮焦点范围');
 });
 
 test('实际聊天模块在飞行中外点或全屏暂停时关闭，不会迟到重开', async () => {
@@ -328,10 +344,10 @@ test('实际截图模块499ms只取默认图，500ms才进入连续截图，Esc�
   }
 });
 
-function graphCaptureDemo(graphModeEnabled = true) {
+function graphCaptureDemo(options: { graphPluginEnabled?: boolean; activationShortcut?: string[]; graphActivationShortcut?: string[] | null } = {}) {
   const page = browser(), activations: any[] = [], chats: any[] = [], captured: any[] = [];
-  const settings = { graphPluginEnabled: true, graphModeEnabled, activationShortcut: ['AltLeft'] };
-  let open = false, workspaceId: string | null = null, ended = 0, cancelled = 0, regions: any[] = [];
+  const settings = { graphPluginEnabled: true, activationShortcut: ['AltLeft'], graphActivationShortcut: null as string[] | null, ...options };
+  let open = false, chatOpen = false, chatClosed = 0, workspaceId: string | null = null, ended = 0, cancelled = 0, regions: any[] = [];
   const image = { id: 'default', title: '演示窗口', imageDataUrl: 'data:image/png;base64,AA==' };
   page.window.RabbitSettings = { ready: Promise.resolve(), getSnapshot: () => ({ settings }) };
   page.window.RabbitAssistant = {
@@ -343,15 +359,15 @@ function graphCaptureDemo(graphModeEnabled = true) {
     demoCaptureEnd: async () => { ended++; const context = { id: randomUUID(), title: '演示窗口', images: regions.length ? [...regions] : [image], demo: true }; captured.push(context); return context; },
     demoCaptureCancel: () => { cancelled++; },
   };
-  page.window.RabbitChat = { activate: async (context: any) => chats.push(context), getSnapshot: () => ({ open: false }) };
+  page.window.RabbitChat = { activate: async (context: any) => { chatOpen = true; chats.push(context); }, close: () => { chatOpen = false; chatClosed++; }, getSnapshot: () => ({ open: chatOpen, graph: false }) };
   page.window.RabbitGraph = {
     getSnapshot: () => ({ workspaceId }), isOpen: () => open, close: () => { open = false; },
     open: async (activation: any) => { open = true; workspaceId = activation.workspaceId; activations.push(activation); },
   };
   page.load('graph-demo.js'); page.load('capture-ui.js');
-  return { ...page, settings, activations, chats, captured, counts: () => ({ ended, cancelled }),
-    press(duration = 0) { page.emit('keydown', { code: 'AltLeft', key: 'Alt' }); page.tick(duration); },
-    release() { page.emit('keyup', { code: 'AltLeft', key: 'Alt' }); },
+  return { ...page, settings, activations, chats, captured, counts: () => ({ ended, cancelled, chatClosed }),
+    press(duration = 0, code = 'AltLeft') { page.emit('keydown', { code, key: code.startsWith('Alt') ? 'Alt' : code }); page.tick(duration); },
+    release(code = 'AltLeft') { page.emit('keyup', { code, key: code.startsWith('Alt') ? 'Alt' : code }); },
     region(x: number, y: number, width: number, height: number) {
       const root = page.document.querySelector('#rabbit-capture-root');
       root.handlers.get('pointerdown')[0]({ button: 0, pointerId: 1, clientX: x, clientY: y, preventDefault() {} });
@@ -369,7 +385,7 @@ test('浏览器大爆炸短按首次建图，再按退出，重新进入复用�
   assert.equal(initial.graphs[0].nodes.length, 1, '首次截图不会自动生成解释卡片');
   assert.equal(initial.graphs[0].nodes[0].images[0].imageDataUrl, page.captured[0].images[0].imageDataUrl);
   assert.equal(page.activations[0].backgroundImageDataUrl, 'frozen-demo-desktop');
-  page.press(600); page.release(); await flush();
+  page.press(100); page.release(); await flush();
   assert.equal(page.window.RabbitGraph.isOpen(), false);
   assert.equal(page.window.RabbitCapture.getSnapshot().active, false);
   assert.equal(page.activations.length, 1);
@@ -383,8 +399,10 @@ test('浏览器大爆炸长按把多个实际选区写入同一新图，关闭�
   const page = graphCaptureDemo();
   page.press(500);
   assert.match(page.document.querySelector('.capture-status-title').textContent, /松开进入图谱/);
+  assert.equal(page.events.find(event => event.type === 'selection:open').detail.purpose, 'graph');
   page.region(10, 20, 100, 80); page.region(250, 200, 150, 90);
   page.release(); await flush();
+  assert.equal(page.events.find(event => event.type === 'selection:close').detail.purpose, 'graph');
   const workspace = await page.window.RabbitGraphDemo.graphOpen();
   assert.equal(workspace.graphs.length, 1);
   const images = workspace.graphs[0].nodes[0].images;
@@ -392,35 +410,97 @@ test('浏览器大爆炸长按把多个实际选区写入同一新图，关闭�
   assert.deepEqual(Array.from(images, (image: any) => image.imageDataUrl), page.captured[0].images.map((image: any) => image.imageDataUrl));
   assert.deepEqual(Array.from(images, (image: any) => image.rect), [{ x: 10, y: 20, width: 100, height: 80 }, { x: 250, y: 200, width: 150, height: 90 }]);
   assert.equal(page.chats.length, 0);
-  page.press(); page.release(); await flush();
   page.press(500); page.region(40, 50, 120, 100); page.release(); await flush();
   const next = await page.window.RabbitGraphDemo.graphOpen();
   assert.equal(next.graphs.length, 2); assert.equal(next.graphs[0].id, workspace.graphs[0].id);
   assert.equal(next.graphs[1].nodes.length, 1); assert.equal(next.graphs[1].nodes[0].images.length, 1);
   page.press(); page.release(); await flush();
   page.settings.graphPluginEnabled = false;
+  page.emit('settings:change', { detail: { settings: page.settings } });
   page.press(); page.release(); await flush();
   assert.equal(page.chats.length, 1); assert.equal(page.activations.length, 2);
 });
 
-test('浏览器开启大爆炸立即填当前空图，重复保存或恢复非空图不追加截图', async () => {
-  const page = graphCaptureDemo(false), bridge = page.window.RabbitGraphDemo;
+test('浏览器保存插件设置不自动截图，首次图谱键填当前空图而再次进入复用内容', async () => {
+  const page = graphCaptureDemo({ graphPluginEnabled: false }), bridge = page.window.RabbitGraphDemo;
   const workspace = await bridge.graphOpen();
   const created = await bridge.graphMutate(workspace.id, { type: 'create-graph', title: '预建图谱' });
   const empty = created.graphs[0];
-  assert.equal(empty.nodes.length, 0); assert.equal(page.counts().ended, 0);
-  page.settings.graphModeEnabled = true;
+  page.settings.graphPluginEnabled = true;
   page.emit('settings:saved', { detail: { settings: page.settings } }); await flush();
+  assert.equal(page.activations.length, 0); assert.equal(page.counts().ended, 0);
+  page.press(); page.release(); await flush();
   const filled = await bridge.graphOpen();
   assert.equal(page.activations.length, 1); assert.equal(filled.graphs.length, 1);
   assert.equal(filled.graphs[0].id, empty.id); assert.equal(filled.graphs[0].nodes[0].id, empty.rootId);
   assert.equal(filled.graphs[0].nodes.length, 1); assert.equal(page.counts().ended, 1);
   page.emit('settings:saved', { detail: { settings: page.settings } }); await flush();
   assert.equal(page.activations.length, 1);
-  page.settings.graphModeEnabled = false; page.window.RabbitGraph.close();
-  page.emit('settings:saved', { detail: { settings: page.settings } });
-  page.settings.graphModeEnabled = true; page.emit('settings:saved', { detail: { settings: page.settings } }); await flush();
+  page.press(); page.release(); page.press(); page.release(); await flush();
   assert.equal(page.activations.length, 2); assert.equal(page.counts().ended, 1);
+});
+
+test('浏览器独立图谱键与本体键各自开关和截图，互不关闭另一入口', async () => {
+  const page = graphCaptureDemo({ graphActivationShortcut: ['AltRight'] });
+  page.press(); page.release(); await flush();
+  assert.equal(page.chats.length, 1); assert.equal(page.window.RabbitChat.getSnapshot().open, true);
+  page.press(100, 'AltRight'); page.release('AltRight'); await flush();
+  assert.equal(page.activations.length, 1); assert.equal(page.window.RabbitGraph.isOpen(), true);
+  assert.equal(page.window.RabbitChat.getSnapshot().open, true); assert.equal(page.counts().chatClosed, 0);
+  page.press(); page.release(); await flush();
+  assert.equal(page.window.RabbitChat.getSnapshot().open, false); assert.equal(page.window.RabbitGraph.isOpen(), true);
+  page.press(500); page.region(10, 10, 60, 50);
+  assert.match(page.document.querySelector('.capture-status-title').textContent, /松开提问/);
+  page.release(); await flush();
+  assert.equal(page.chats.length, 2); assert.equal(page.activations.length, 1); assert.equal(page.window.RabbitGraph.isOpen(), true);
+  page.press(0, 'AltRight'); page.release('AltRight'); await flush();
+  assert.equal(page.window.RabbitGraph.isOpen(), false); assert.equal(page.window.RabbitChat.getSnapshot().open, true);
+});
+
+test('浏览器同键图谱优先，空图谱键继承本体设置，停用插件后回到普通提问', async () => {
+  for(const graphActivationShortcut of [null, ['AltLeft']]) {
+    const page = graphCaptureDemo({ graphActivationShortcut });
+    page.press(); page.release(); await flush();
+    assert.equal(page.activations.length, 1); assert.equal(page.chats.length, 0);
+    page.press(); page.release(); await flush();
+    page.settings.graphPluginEnabled = false; page.emit('settings:change', { detail: { settings: page.settings } });
+    page.press(); page.release(); await flush();
+    assert.equal(page.chats.length, 1); assert.equal(page.activations.length, 1);
+  }
+  const page = graphCaptureDemo(); page.settings.activationShortcut = ['KeyK'];
+  page.emit('settings:saved', { detail: { settings: page.settings } });
+  assert.equal(page.emit('keydown', {code:'AltLeft'}).defaultPrevented, false);
+  page.emit('keyup', {code:'AltLeft'});
+  page.press(0, 'KeyK'); page.release('KeyK'); await flush();
+  assert.equal(page.activations.length, 1); assert.equal(page.chats.length, 0);
+});
+
+test('浏览器前缀组合在截图前采用完整组合，截图开始后保持原目标及快捷键', async () => {
+  const page = graphCaptureDemo({ graphActivationShortcut: ['AltLeft', 'KeyG'] });
+  page.press(200); page.press(500, 'KeyG');
+  assert.match(page.document.querySelector('.capture-status-title').textContent, /左 Alt \+ G.*松开进入图谱/);
+  page.release('KeyG'); page.release(); await flush();
+  assert.equal(page.activations.length, 1); assert.equal(page.chats.length, 0);
+  page.press(500); page.press(0, 'KeyG');
+  assert.match(page.document.querySelector('.capture-status-title').textContent, /松开提问/);
+  page.release('KeyG'); assert.equal(page.window.RabbitCapture.getSnapshot().active, true);
+  page.release(); await flush(); assert.equal(page.chats.length, 1); assert.equal(page.activations.length, 1);
+  const changed = graphCaptureDemo({ graphActivationShortcut: ['AltRight'] });
+  changed.press(500, 'AltRight'); changed.settings.graphPluginEnabled = false; changed.settings.activationShortcut = ['KeyK'];
+  changed.emit('settings:saved', { detail: { settings: changed.settings } });
+  assert.match(changed.document.querySelector('.capture-status-title').textContent, /右 Alt.*松开进入图谱/);
+  changed.release('AltRight'); await flush();
+  assert.equal(changed.activations.length, 1); assert.equal(changed.chats.length, 0);
+  const inverse = graphCaptureDemo({ activationShortcut: ['AltLeft', 'KeyB'], graphActivationShortcut: ['AltLeft'] });
+  inverse.press(200); inverse.press(500, 'KeyB');
+  assert.match(inverse.document.querySelector('.capture-status-title').textContent, /松开提问/);
+  inverse.release('KeyB'); inverse.release(); await flush();
+  assert.equal(inverse.chats.length, 1); assert.equal(inverse.activations.length, 0);
+  const chatting = graphCaptureDemo({ graphActivationShortcut: ['AltLeft', 'KeyG'] });
+  await chatting.window.RabbitChat.activate({ id: 'ordinary', images: [] });
+  chatting.press(200); chatting.press(500, 'KeyG'); chatting.release('KeyG'); chatting.release(); await flush();
+  assert.equal(chatting.activations.length, 1); assert.equal(chatting.window.RabbitChat.getSnapshot().open, true);
+  assert.equal(chatting.chats.length, 1); assert.equal(chatting.counts().chatClosed, 0);
 });
 
 test('浏览器图谱批注截图松开鼠标返回实际区域，取消不打开图谱或普通聊天', async () => {
@@ -559,20 +639,22 @@ test('模型选择保留跨页草稿，取消不提交，保存传给桌面设�
 });
 
 test('右 Alt 录制忽略 Windows 合成的左 Ctrl，并保留右 Alt 组合', async () => {
-  for (const extraKey of [null, 'KeyK']) {
+  for (const [field, prefix, tab] of [['activationShortcut', 'rabbit', 'general'], ['graphActivationShortcut', 'rabbit-graph', 'plugins']]) for (const extraKey of [null, 'KeyK']) {
     const page = browser();
     page.load('settings-ui.js'); await page.window.RabbitSettings.ready;
     await page.window.RabbitSettings.open();
-    page.document.querySelector('#rabbit-tab-general').handlers.get('click')[0]();
-    await page.document.querySelector('#rabbit-activation-shortcut').handlers.get('click')[0]();
+    page.document.querySelector(`#rabbit-tab-${tab}`).handlers.get('click')[0]();
+    await page.document.querySelector(`#${prefix}-activation-shortcut`).handlers.get('click')[0]();
     page.emit('keydown', { code: 'ControlLeft', key: 'Control', ctrlKey: true });
     page.emit('keydown', { code: 'AltRight', key: 'AltGraph', ctrlKey: true, altKey: true, getModifierState: () => true });
     if (extraKey) page.emit('keydown', { code: extraKey, key: 'k', ctrlKey: true, altKey: true, getModifierState: () => true });
     page.emit('keyup', { code: extraKey || 'AltRight', getModifierState: () => !!extraKey });
     page.emit('keyup', { code: 'AltRight' }); page.emit('keyup', { code: 'ControlLeft' });
-    assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().draft.activationShortcut), extraKey ? ['AltRight', extraKey] : ['AltRight']);
+    assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().draft[field]), extraKey ? ['AltRight', extraKey] : ['AltRight']);
     await page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({ preventDefault() {} });
-    assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().settings.activationShortcut), extraKey ? ['AltRight', extraKey] : ['AltRight']);
+    assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().settings[field]), extraKey ? ['AltRight', extraKey] : ['AltRight']);
+    if (field === 'graphActivationShortcut') assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().settings.activationShortcut), ['AltLeft']);
+    else assert.equal(page.window.RabbitSettings.getSnapshot().settings.graphActivationShortcut, null);
   }
 });
 
@@ -583,7 +665,8 @@ test('启动键录制保留完整组合，保存前仍用原键，保存后立�
     demoCaptureEnd: async () => ({ id: 'one', images: [] }), demoCaptureCancel() {},
   };
   page.window.RabbitChat = { activate: async (context: unknown) => activated.push(context), getSnapshot: () => ({ open: false }) };
-  page.load('settings-ui.js'); await page.window.RabbitSettings.ready; page.load('capture-ui.js');
+  page.load('settings-ui.js'); await page.window.RabbitSettings.ready;
+  page.window.RabbitSettings.applySettings({graphPluginEnabled:false}); page.load('capture-ui.js');
   await page.window.RabbitSettings.open();
   page.document.querySelector('#rabbit-tab-general').handlers.get('click')[0]();
   const recorder = page.document.querySelector('#rabbit-activation-shortcut');
@@ -620,12 +703,12 @@ test('启动键录制保留完整组合，保存前仍用原键，保存后立�
 });
 
 test('录制在 Esc、失焦、关闭、切页或直接输入 AltGr 字符时取消，并恢复原生触发', async () => {
-  for (const exit of ['escape', 'blur', 'close', 'tab', 'altgraph']) {
+  for (const [field, prefix, tab] of [['activationShortcut', 'rabbit', 'general'], ['graphActivationShortcut', 'rabbit-graph', 'plugins']]) for (const exit of ['escape', 'blur', 'close', 'tab', 'altgraph']) {
     const page = browser(), recording: boolean[] = [];
     page.window.rabbitDesktop = { loadSettings: async () => ({}), setShortcutRecording: async (value: boolean) => { recording.push(value); } };
     page.load('settings-ui.js'); await page.window.RabbitSettings.open();
-    page.document.querySelector('#rabbit-tab-general').handlers.get('click')[0]();
-    await page.document.querySelector('#rabbit-activation-shortcut').handlers.get('click')[0]();
+    page.document.querySelector(`#rabbit-tab-${tab}`).handlers.get('click')[0]();
+    await page.document.querySelector(`#${prefix}-activation-shortcut`).handlers.get('click')[0]();
     page.emit('keydown', { code: 'ControlRight', key: 'Control', ctrlKey: true });
     if (exit === 'escape') page.emit('keydown', { code: 'Escape', key: 'Escape' });
     else if (exit === 'blur') page.emitWindow('blur');
@@ -634,6 +717,7 @@ test('录制在 Esc、失焦、关闭、切页或直接输入 AltGr 字符时取
     else page.emit('keydown', { code: 'KeyQ', key: '@', getModifierState: (name: string) => name === 'AltGraph' });
     assert.equal(page.window.RabbitSettings.getSnapshot().recording, false, exit);
     assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().draft.activationShortcut), ['AltLeft'], exit);
+    assert.equal(page.window.RabbitSettings.getSnapshot().draft.graphActivationShortcut, null, `${field}: ${exit}`);
     assert.deepEqual(recording, [true, false], exit);
   }
 });
@@ -703,7 +787,8 @@ test('单字母启动键在设置中正常输入，在聊天中取消激活且�
     demoCaptureStart: () => { captures++; return { sessionId: 'one', context: { images: [] }, backgroundImageDataUrl: 'demo' }; },
     demoCaptureEnd: async () => ({ id: 'one', images: [] }), demoCaptureCancel() {},
   });
-  page.load('settings-ui.js'); await page.window.RabbitSettings.ready; page.load('capture-ui.js');
+  page.load('settings-ui.js'); await page.window.RabbitSettings.ready;
+  page.window.RabbitSettings.applySettings({graphPluginEnabled:false}); page.load('capture-ui.js');
   await page.window.RabbitSettings.open();
   page.document.querySelector('#rabbit-tab-general').handlers.get('click')[0]();
   await page.document.querySelector('#rabbit-activation-shortcut').handlers.get('click')[0]();
@@ -757,10 +842,10 @@ test('空输入Backspace逐张删除最后截图，长按repeat继续每次只�
   };
   assert.equal(press(false).defaultPrevented, true);
   assert.deepEqual(Array.from(page.api.getSnapshot().context.imageIds), ['first']);
-  assert.equal(page.document.querySelectorAll('.chat-context-chip').length, 1);
+  assert.equal(page.document.querySelectorAll('.rabbit-attachment-tile').length, 1);
   assert.equal(press(true).defaultPrevented, true);
   assert.deepEqual(Array.from(page.api.getSnapshot().context.imageIds), []);
-  assert.equal(page.document.querySelectorAll('.chat-context-chip').length, 0);
+  assert.equal(page.document.querySelectorAll('.rabbit-attachment-tile').length, 0);
   assert.equal(press(true).defaultPrevented, false, '没有图片后保留普通按键处理');
 });
 
@@ -818,7 +903,7 @@ test('设置输入法取消候选不关闭或丢草稿，组合结束后Escape�
   assert.equal(page.bubble(input,'keydown',{key:'Escape'}).defaultPrevented,true);assert.equal(api.getSnapshot().open,false);
 });
 
-test('空输入先删除上传图片，再删除截图，并保留文字附件', async () => {
+test('空输入每次删除最近添加的一项，文件与图片都优先于先前截图', async () => {
   const page = chat();
   await page.api.activate({ id: 'window', images: [{ id: 'one', title: '截图', imageDataUrl: 'image' }] });
   const input = page.document.querySelector('.chat-input'), files = page.document.querySelector('.chat-file-input');
@@ -829,13 +914,15 @@ test('空输入先删除上传图片，再删除截图，并保留文字附件',
   assert.equal(page.api.getSnapshot().attachmentCount, 0);
   assert.deepEqual(Array.from(page.api.getSnapshot().context.imageIds), ['one'], '上传图片优先于先前截图');
 
-  files.files = [{ name: '保留.txt', type: 'text/plain', text: async () => '附件内容' }];
+  files.files = [{ name: '说明.txt', type: 'text/plain', text: async () => '附件内容' }];
   files.handlers.get('change')[0](); await flush();
   input.handlers.get('keydown')[0]({ key: 'Backspace', repeat: true, preventDefault() {} });
+  assert.equal(page.api.getSnapshot().attachmentCount, 0, '最近添加的文字文件也能删除');
+  assert.deepEqual(Array.from(page.api.getSnapshot().context.imageIds), ['one'], '这次不能连带删除较早的截图');
+  assert.equal(page.document.querySelectorAll('.rabbit-attachment-tile').length, 1);
+  input.handlers.get('keydown')[0]({ key: 'Backspace', preventDefault() {} });
   assert.deepEqual(Array.from(page.api.getSnapshot().context.imageIds), []);
-  assert.equal(page.api.getSnapshot().attachmentCount, 1, '删除截图不能带走文字附件');
-  assert.equal(page.document.querySelectorAll('.chat-context-chip').length, 1);
-  assert.equal(page.document.querySelector('.chat-context-chip').title, '保留.txt');
+  assert.equal(page.document.querySelectorAll('.rabbit-attachment-tile').length, 0);
 });
 
 
@@ -869,6 +956,87 @@ test('上一轮未读完的附件不能进入重新激活的新对话', async ()
   page.api.close();await page.api.activate({id:'new',images:[]});
   finish('迟到附件');await flush();
   assert.equal(page.api.getSnapshot().attachmentCount,0);
+});
+
+test('文档读取期间阻止发送，后选文件优先，旧解析完成不能替换新附件', async () => {
+  const page=chat(), first=deferred<any>(), second=deferred<any>(), requests:any[]=[];
+  await page.api.activate({id:'window',images:[]});
+  page.window.RabbitDocuments.readFile=(file:any)=>file.name==='first.pdf'?first.promise:second.promise;
+  page.window.RabbitAssistant.send=async(request:any)=>{requests.push(request);return {text:'回答'};};
+  const files=page.document.querySelector('.chat-file-input'), input=page.document.querySelector('.chat-input');
+  const submit=()=>page.document.querySelector('.chat-composer').handlers.get('submit')[0]({preventDefault(){}});
+  input.value='解释文件';files.files=[{name:'first.pdf'}];files.handlers.get('change')[0]();
+  submit();await flush();assert.equal(requests.length,0);assert.equal(input.value,'解释文件');
+  files.files=[{name:'second.py'}];files.handlers.get('change')[0]();
+  second.resolve({id:'second',name:'second.py',mimeType:'text/plain',format:'py',language:'python',text:'print(42)'});await flush();
+  first.resolve({id:'first',name:'first.pdf',mimeType:'text/markdown',text:'旧文件'});await flush();
+  submit();await flush();assert.equal(requests.length,1);assert.equal(requests[0].attachments[0].name,'second.py');
+  assert.equal(requests[0].attachments[0].language,'python');
+});
+
+test('无法读取为文本的二进制导入显示解析失败并保留原附件与问题', async () => {
+  const page=chat();await page.api.activate({id:'window',images:[]});
+  const files=page.document.querySelector('.chat-file-input'),input=page.document.querySelector('.chat-input');
+  files.files=[{name:'原资料.txt',type:'text/plain',text:async()=>'资料'}];files.handlers.get('change')[0]();await flush();
+  input.value='保留问题';page.window.RabbitDocuments.readFile=async()=>{throw new Error('解析失败：文件包含二进制内容，无法作为文本读取。');};
+  files.files=[{name:'program.exe'}];files.handlers.get('change')[0]();await flush();
+  assert.match(page.document.querySelector('.chat-inline-note').textContent,/解析失败/);
+  assert.equal(page.api.getSnapshot().attachmentCount,1);assert.equal(input.value,'保留问题');
+  assert.equal(page.document.querySelector('.rabbit-attachment-name').textContent,'原资料.txt');
+});
+
+test('截图和文件共用上方预览区，移除保留问题，缩窗后的原生输入仍在底部行且发送清空预览', async () => {
+  const page=chat(),requests:any[]=[],scene=page.document.querySelector('#scene');
+  page.window.RabbitAssistant.send=async(request:any)=>{requests.push(request);return{text:'回答'};};
+  await page.api.activate(null,{anchor:{x:640,y:360}});
+  const emptyBounds=page.api.getSnapshot().bounds;
+  await page.api.activate({id:'screens',images:[
+    {id:'one',title:'第一张截图',imageDataUrl:'data:image/png;base64,b25l'},
+    {id:'two',title:'第二张截图',imageDataUrl:'data:image/png;base64,dHdv'},
+  ]},{anchor:{x:640,y:360}});
+  const input=page.document.querySelector('.chat-input'),form=page.document.querySelector('.chat-composer');
+  const contexts=page.document.querySelector('.chat-contexts'),row=page.document.querySelector('.chat-input-row');
+  assert.deepEqual(form.children,[contexts,row]);
+  assert.equal(row.contains(input),true);
+  assert.deepEqual(contexts.querySelectorAll('img').map((image:any)=>image.alt),['第一张截图','第二张截图']);
+  assert.ok(page.api.getSnapshot().bounds.height>emptyBounds.height+80,'有参考资料时开框容纳完整预览');
+  input.value='请解释这些资料';
+  contexts.scrollWidth=640;contexts.scrollLeft=0;
+  page.emit('clipboard:image',{detail:{imageDataUrl:'data:image/png;base64,Y2xpcGJvYXJk'}});
+  assert.equal(contexts.scrollLeft,640,'粘贴图片后滚动到新预览');
+  contexts.scrollLeft=0;
+  const files=page.document.querySelector('.chat-file-input');
+  files.files=[{name:'论文.pdf',type:'application/pdf',text:async()=>'不应展示在附件卡片里的整篇文档'}];
+  files.handlers.get('change')[0]();await flush();
+  assert.equal(contexts.scrollLeft,640,'文件解析完成后滚动到新预览');
+  assert.equal(contexts.children.length,3);
+  assert.equal(contexts.children[2].querySelector('.rabbit-attachment-format').textContent,'PDF');
+  assert.equal(contexts.children[2].querySelector('.rabbit-attachment-name').textContent,'论文.pdf');
+  assert.ok(!contexts.querySelectorAll('span').some((span:any)=>span.textContent.includes('整篇文档')));
+  const bounds=page.api.getSnapshot().bounds;
+  page.emit('desktop:pointerdown',{detail:{x:bounds.x+20,y:bounds.y+20}});
+  assert.equal(page.api.getSnapshot().open,true,'预览区域属于原生可点击输入框');
+  page.bubble(contexts.children[0].querySelector('.rabbit-attachment-remove'),'click');
+  assert.deepEqual(Array.from(page.api.getSnapshot().context.imageIds),['two']);
+  assert.equal(page.api.getSnapshot().attachmentCount,1);assert.equal(input.value,'请解释这些资料');
+  assert.equal(page.document.activeElement,input);
+  scene.clientWidth=390;scene.clientHeight=480;page.resize();input.handlers.get('focus')[0]();
+  const resized=page.api.getSnapshot().bounds,focus=page.events.filter(event=>event.type==='chat:focus'&&event.detail.active).at(-1).detail.bounds;
+  assert.ok(resized.x>=0&&resized.y>=0&&resized.x+resized.width<=390&&resized.y+resized.height<=480);
+  assert.ok(focus.y>resized.y+80,'原生焦点指向预览下方的文字输入行');
+  assert.ok(focus.y+focus.height<resized.y+resized.height);
+  await form.handlers.get('submit')[0]({preventDefault(){}});await flush();
+  assert.equal(requests[0].text,'请解释这些资料');
+  assert.deepEqual(Array.from(requests[0].context.images,(image:any)=>image.id),['two']);
+  assert.equal(requests[0].attachments[0].name,'论文.pdf');
+  assert.equal(contexts.children.length,0);assert.equal(page.api.getSnapshot().presentation,'expanded');
+  files.files=[{name:'example.py',type:'text/plain',text:async()=>'print(42)'}];
+  files.handlers.get('change')[0]();await flush();
+  assert.equal(contexts.querySelector('.rabbit-attachment-format').textContent,'PY');
+  const expanded=page.api.getSnapshot().bounds;
+  page.bubble(contexts.querySelector('.rabbit-attachment-remove'),'click');
+  assert.equal(contexts.children.length,0);assert.equal(page.api.getSnapshot().bounds.height,expanded.height,'清空预览不压缩已有对话区');
+  assert.equal(page.document.activeElement,input);
 });
 
 
@@ -1102,9 +1270,9 @@ test('点按兔球不关闭对话，拖动保持整体尺寸并限制在场景�
   page.emit('desktop:pointerdown',{detail:{x:0,y:0}});assert.equal(page.api.getSnapshot().open,false);
 });
 
-test('插件页跨页保留草稿，取消恢复，保存关闭插件同时退出大爆炸模式', async () => {
+test('插件页跨页保留草稿，取消恢复，保存关闭插件保留独立触发键', async () => {
   const page=browser(), patches:any[]=[];
-  let saved:any={graphPluginEnabled:true,graphModeEnabled:true};
+  let saved:any={graphPluginEnabled:true,graphActivationShortcut:['AltRight']};
   page.window.rabbitDesktop={loadSettings:async()=>saved,saveSettings:async(patch:any)=>{patches.push(patch);saved={...saved,...patch};return saved;}};
   page.load('settings-ui.js');const api=page.window.RabbitSettings;
   await api.ready;await api.open({tab:'plugins'});assert.equal(api.getSnapshot().tab,'plugins');
@@ -1115,33 +1283,150 @@ test('插件页跨页保留草稿，取消恢复，保存关闭插件同时退�
   tabs[0].handlers.get('click')[0]();tabs[4].handlers.get('click')[0]();
   assert.equal(api.getSnapshot().draft.graphPluginEnabled,false);
   assert.equal(api.getSnapshot().settings.graphPluginEnabled,true);
-  api.close();assert.equal(api.getSnapshot().settings.graphModeEnabled,true);assert.equal(patches.length,0);
+  api.close();assert.deepEqual(Array.from(api.getSnapshot().settings.graphActivationShortcut),['AltRight']);assert.equal(patches.length,0);
   await api.open();assert.equal(toggle.checked,true);
   toggle.checked=false;toggle.handlers.get('change')[0]();
   await page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({preventDefault(){}});
-  assert.equal(patches[0].graphPluginEnabled,false);assert.equal(patches[0].graphModeEnabled,false);
+  assert.equal(patches[0].graphPluginEnabled,false);assert.deepEqual(Array.from(patches[0].graphActivationShortcut),['AltRight']);assert.equal('graphModeEnabled' in patches[0],false);
   await api.open();assert.equal(toggle.checked,false);
   await api.open({tab:'general'});assert.equal(api.getSnapshot().tab,'general');
   await api.open({tab:'plugins'});assert.equal(api.getSnapshot().tab,'plugins');
 });
 
-test('功能栏大爆炸按钮单独保存模式、不发送问题，禁用插件隐藏入口', async () => {
-  const page=chat(),patches:any[]=[],requests:any[]=[];
-  let saved:any={graphPluginEnabled:true,graphModeEnabled:false};
-  page.window.rabbitDesktop={loadSettings:async()=>saved,saveSettings:async(patch:any)=>{patches.push(patch);saved={...saved,...patch};return saved;}};
-  page.window.RabbitAssistant.send=async(request:any)=>{requests.push(request);return {text:'回答'};};
-  page.load('settings-ui.js');await page.window.RabbitSettings.ready;
-  await page.api.activate(null,{activationId:5});
-  const button=page.document.querySelector('.chat-graph-toggle');
-  await button.handlers.get('click')[0]();
-  assert.deepEqual(JSON.parse(JSON.stringify(patches)),[{graphModeEnabled:true}]);
-  assert.equal(button.attributes['aria-pressed'],'true');assert.equal(requests.length,0);
-  await button.handlers.get('click')[0]();assert.equal(button.attributes['aria-pressed'],'false');
-  page.emit('settings:saved',{detail:{settings:{graphPluginEnabled:false,graphModeEnabled:false}}});
-  assert.equal(button.hidden,true);
+test('插件启动键继承当前兔球草稿，独立录制跨页保留，取消和恢复默认各自生效', async () => {
+  const page=browser(),patches:any[]=[];
+  let stored:any={activationShortcut:['AltLeft'],graphActivationShortcut:null},fail=false;
+  page.window.rabbitDesktop={loadSettings:async()=>stored,setShortcutRecording:async()=>{},saveSettings:async(patch:any)=>{
+    if(fail)throw new Error('保存失败');patches.push(patch);stored={...stored,...patch};return stored;
+  }};
+  page.load('settings-ui.js');const api=page.window.RabbitSettings;
+  await api.open({tab:'plugins'});
+  const shown=()=>page.document.querySelector('#rabbit-graph-shortcut-value').children.map((item:any)=>item.textContent);
+  const record=async(prefix:string,tab:string,codes:string[])=>{
+    page.document.querySelector(`#rabbit-tab-${tab}`).handlers.get('click')[0]();
+    await page.document.querySelector(`#${prefix}-activation-shortcut`).handlers.get('click')[0]();
+    for(const code of codes)page.emit('keydown',{code});
+    for(const code of [...codes].reverse())page.emit('keyup',{code});
+  };
+  assert.deepEqual(shown(),['沿用兔球',shortcut.formatShortcut(['AltLeft'])]);
+  await record('rabbit','general',['ControlRight','Space']);
+  page.document.querySelector('#rabbit-tab-plugins').handlers.get('click')[0]();
+  assert.deepEqual(shown(),['沿用兔球',shortcut.formatShortcut(['ControlRight']),shortcut.formatShortcut(['Space'])]);
+  await record('rabbit-graph','plugins',['AltRight']);
+  await record('rabbit','general',['KeyK']);
+  page.document.querySelector('#rabbit-tab-plugins').handlers.get('click')[0]();
+  assert.deepEqual(shown(),[shortcut.formatShortcut(['AltRight'])]);
+  assert.equal(api.getSnapshot().settings.graphActivationShortcut,null);
+  api.close();await api.open({tab:'plugins'});
+  assert.deepEqual(shown(),['沿用兔球',shortcut.formatShortcut(['AltLeft'])]);
+  assert.equal(patches.length,0);
+  await record('rabbit-graph','plugins',['AltRight']);
+  fail=true;await page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({preventDefault(){}});
+  assert.equal(api.getSnapshot().open,true);assert.deepEqual(Array.from(api.getSnapshot().draft.graphActivationShortcut),['AltRight']);
+  fail=false;await page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({preventDefault(){}});
+  assert.deepEqual(Array.from(patches[0].graphActivationShortcut),['AltRight']);
+  assert.deepEqual(Array.from(patches[0].activationShortcut),['AltLeft']);
+  const copy=api.getSnapshot();copy.settings.graphActivationShortcut.push('KeyQ');
+  assert.deepEqual(Array.from(api.getSnapshot().settings.graphActivationShortcut),['AltRight']);
+  await api.open({tab:'plugins'});
+  page.document.querySelector('#rabbit-graph-shortcut-reset').handlers.get('click')[0]();
+  assert.equal(api.getSnapshot().draft.graphActivationShortcut,null);
+  await record('rabbit','general',['KeyK']);
+  page.document.querySelector('#rabbit-tab-plugins').handlers.get('click')[0]();
+  assert.deepEqual(shown(),['沿用兔球',shortcut.formatShortcut(['KeyK'])]);
+  await page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({preventDefault(){}});
+  assert.equal(patches[1].graphActivationShortcut,null);assert.deepEqual(Array.from(patches[1].activationShortcut),['KeyK']);
 });
 
-test('图谱快速会话不取普通截图、固定每轮节点上下文，再生成不会借用新选中节点', async () => {
+test('两个启动键录制器都忽略输入法事件，迟到的开始回执不改变新的录制目标', async () => {
+  for(const [prefix,tab,field] of [['rabbit','general','activationShortcut'],['rabbit-graph','plugins','graphActivationShortcut']]){
+    const page=browser();page.load('settings-ui.js');await page.window.RabbitSettings.open({tab});
+    const root=page.document.querySelector('#rabbit-settings-root');
+    await page.document.querySelector(`#${prefix}-activation-shortcut`).handlers.get('click')[0]();
+    root.handlers.get('compositionstart')[0]();
+    for(const type of ['keydown','keyup'])page.emit(type,{code:'KeyK',key:'k'});
+    root.handlers.get('compositionend')[0]();
+    for(const flags of [{isComposing:true},{keyCode:229}])for(const type of ['keydown','keyup'])page.emit(type,{code:'KeyK',key:'k',...flags});
+    assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().draft.activationShortcut),['AltLeft']);
+    assert.equal(page.window.RabbitSettings.getSnapshot().draft.graphActivationShortcut,null);
+    page.emit('keydown',{code:'AltRight'});page.emit('keyup',{code:'AltRight'});
+    assert.deepEqual(Array.from(page.window.RabbitSettings.getSnapshot().draft[field]),['AltRight']);
+  }
+  const page=browser(),first=deferred(),second=deferred(),calls:boolean[]=[];
+  page.window.rabbitDesktop={loadSettings:async()=>({}),setShortcutRecording:(enabled:boolean)=>{
+    calls.push(enabled);return !enabled?Promise.resolve():calls.filter(Boolean).length===1?first.promise:second.promise;
+  }};
+  page.load('settings-ui.js');const api=page.window.RabbitSettings;await api.open({tab:'general'});
+  const old=page.document.querySelector('#rabbit-activation-shortcut').handlers.get('click')[0]();
+  page.document.querySelector('#rabbit-tab-plugins').handlers.get('click')[0]();
+  const next=page.document.querySelector('#rabbit-graph-activation-shortcut').handlers.get('click')[0]();
+  first.resolve();await old;
+  assert.equal(page.document.querySelector('#rabbit-activation-shortcut').attributes['aria-pressed'],'false');
+  assert.equal(page.document.querySelector('#rabbit-graph-shortcut-hint').textContent,'准备录制…');
+  page.emit('keydown',{code:'KeyK'});page.emit('keyup',{code:'KeyK'});
+  assert.equal(api.getSnapshot().draft.graphActivationShortcut,null);
+  second.resolve();await next;page.emit('keydown',{code:'AltRight'});page.emit('keyup',{code:'AltRight'});
+  assert.deepEqual(Array.from(api.getSnapshot().draft.graphActivationShortcut),['AltRight']);
+  assert.deepEqual(Array.from(api.getSnapshot().draft.activationShortcut),['AltLeft']);
+  assert.deepEqual(calls,[true,false,true,false]);
+});
+
+test('松键后立即保存会等待原生结束录制，结束失败保留草稿并可重试', async () => {
+  const page=browser(),ending=deferred<boolean>(),patches:any[]=[];
+  let attempts=0;
+  page.window.rabbitDesktop={loadSettings:async()=>({}),saveSettings:async(patch:any)=>{patches.push(patch);return patch;},setShortcutRecording:(enabled:boolean)=>{
+    if(enabled||++attempts>1)return Promise.resolve();
+    return ending.promise.then(ok=>{if(!ok)throw new Error('结束失败');});
+  }};
+  page.load('settings-ui.js');const api=page.window.RabbitSettings;await api.open({tab:'plugins'});
+  await page.document.querySelector('#rabbit-graph-activation-shortcut').handlers.get('click')[0]();
+  page.emit('keydown',{code:'AltRight'});page.emit('keyup',{code:'AltRight'});
+  const submit=()=>page.document.querySelector('#rabbit-settings-form').handlers.get('submit')[0]({preventDefault(){}});
+  const saving=submit();await flush();
+  assert.equal(attempts,1);assert.equal(patches.length,0);assert.equal(api.getSnapshot().open,true);
+  ending.resolve(false);await saving;
+  assert.equal(api.getSnapshot().open,true);assert.equal(patches.length,0);
+  assert.deepEqual(Array.from(api.getSnapshot().draft.graphActivationShortcut),['AltRight']);
+  await submit();assert.equal(attempts,2);assert.equal(patches.length,1);assert.equal(api.getSnapshot().open,false);
+  assert.deepEqual(Array.from(patches[0].graphActivationShortcut),['AltRight']);
+});
+
+test('功能栏入口直接打开独立图谱，不修改触发设置或发送问题', async () => {
+  const page=chat(),patches:any[]=[],requests:any[]=[],opens:any[]=[];
+  const saved:any={graphPluginEnabled:true,graphActivationShortcut:['AltRight']};
+  page.window.rabbitDesktop={loadSettings:async()=>saved,saveSettings:async(patch:any)=>{patches.push(patch);return saved;},graphActivate:async()=>{opens.push(true);}};
+  page.window.RabbitAssistant.send=async(request:any)=>{requests.push(request);return{text:'回答'};};
+  page.load('settings-ui.js');await page.window.RabbitSettings.ready;
+  await page.api.activate(null,{activationId:5});
+  const button=page.document.querySelector('.chat-graph-toggle');await button.handlers.get('click')[0]();
+  assert.equal(opens.length,1);assert.equal(requests.length,0);assert.equal(patches.length,0);
+  assert.equal(page.api.getSnapshot().open,true);assert.equal(button.attributes['aria-label'],'打开大爆炸');
+  page.emit('settings:saved',{detail:{settings:{graphPluginEnabled:false}}});assert.equal(button.hidden,true);
+});
+
+test('独立图谱聊天无需兔球实例，普通本体对话不借用图谱上下文', async () => {
+  const page=chat('graph');
+  page.window.RabbitGraph={isOpen:()=>true,getChatContext:()=>({workspaceId:'w',graphId:'g',nodeId:'n'})};
+  await page.api.activateGraph({activationId:19});
+  assert.equal(page.api.getSnapshot().open,true);assert.equal(page.api.getSnapshot().graph,true);
+  assert.equal(page.flights.length,0);assert.equal(page.window.RabbitBallDemo,undefined);
+  const bounds=page.api.getSnapshot().bounds;assert.ok(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=1200);
+  assert.equal(page.document.querySelector('.chat-graph-toggle').hidden,true);
+  page.api.close();assert.equal(page.api.getSnapshot().open,false);
+  const pet=chat('pet');pet.window.RabbitGraph={isOpen:()=>true,getChatContext:()=>({workspaceId:'w',graphId:'g',nodeId:'n'})};
+  await pet.api.activateGraph({activationId:20});assert.equal(pet.api.getSnapshot().open,false);
+});
+
+test('图谱截图事件不挂起或清空本体普通问题', async () => {
+  const page=chat();await page.api.activate(null,{activationId:22});
+  const input=page.document.querySelector('.chat-input');input.value='保留问题';
+  page.emit('selection:open',{detail:{purpose:'graph'}});
+  assert.equal(page.api.getSnapshot().selecting,false);assert.equal(page.document.querySelector('#rabbit-chat-root').classes.has('capture-suspended'),false);
+  page.emit('selection:close',{detail:{purpose:'graph',cancelled:false}});
+  assert.equal(input.value,'保留问题');assert.equal(page.api.getSnapshot().open,true);
+});
+
+test('图谱快速会话不取普通截图，再生成保留问题并读取当前选中路径', async () => {
   const page=chat(),requests:any[]=[];let captures=0,nodeId='node-one';
   page.window.RabbitGraph={isOpen:()=>true,getChatContext:()=>({workspaceId:'workspace',graphId:'graph',nodeId})};
   page.window.RabbitAssistant.captureContext=async()=>{captures++;return null;};
@@ -1154,7 +1439,8 @@ test('图谱快速会话不取普通截图、固定每轮节点上下文，再�
   nodeId='node-two';
   const regenerate=page.document.querySelectorAll('.chat-response-action').find((button:any)=>button.attributes['aria-label']==='重新生成');
   await regenerate.handlers.get('click')[0]();await flush();
-  assert.equal(requests[1].regenerate,true);assert.equal(requests[1].graphContext.nodeId,'node-one');
+  assert.equal(requests[1].regenerate,true);assert.equal(requests[1].graphContext.nodeId,'node-two');
+  assert.equal(requests[1].text,'解释当前卡片');
   input.value='还没发送的草稿';page.api.close();
   assert.equal(page.events.filter(event=>event.type==='chat:close').at(-1).detail.graph,true);
   await page.api.activateGraph({activationId:8});

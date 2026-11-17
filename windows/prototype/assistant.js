@@ -167,6 +167,7 @@
       if(activeActivation?.activationId===activationId){changingView=true;try{window.RabbitChat?.close();window.RabbitGraph?.close();}finally{changingView=false;}}
     });
     bridge.onActivate(async activation => {
+      if(bridge.surface==='graph'&&activation.view!=='graph'||bridge.surface==='pet'&&activation.view==='graph')return;
       activeActivation=activation;
       try {
         if (activation.view === 'settings') {

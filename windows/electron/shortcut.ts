@@ -1,4 +1,5 @@
 export const DEFAULT_ACTIVATION_SHORTCUT = Object.freeze(['AltLeft']);
+export type ActivationTarget = 'prompt' | 'graph';
 
 const modifierCodes = ['ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight', 'MetaLeft', 'MetaRight'];
 // Windows Set 1 扫描码与 DOM code 对应；0x100 表示扩展键，不依赖当前输入法布局。
@@ -36,6 +37,17 @@ export function normalizeShortcut(value: unknown): string[] {
   });
 }
 
+export function effectiveShortcutBindings(settings: {
+  activationShortcut: readonly string[];
+  graphActivationShortcut: readonly string[] | null;
+  graphPluginEnabled: boolean;
+}): { prompt: string[]; graph?: string[] } {
+  const prompt = normalizeShortcut(settings.activationShortcut);
+  return settings.graphPluginEnabled
+    ? { prompt, graph: normalizeShortcut(settings.graphActivationShortcut ?? settings.activationShortcut) }
+    : { prompt };
+}
+
 export function formatShortcut(codes: readonly string[], platform = 'win32'): string {
   const labels: Record<string, string> = {
     ControlLeft: '左 Ctrl', ControlRight: '右 Ctrl', AltLeft: '左 Alt', AltRight: '右 Alt', ShiftLeft: '左 Shift', ShiftRight: '右 Shift',
@@ -64,4 +76,22 @@ export function shortcutToAccelerator(codes: readonly string[], platform: string
   const names: Record<string, string> = { ArrowLeft: 'Left', ArrowRight: 'Right', ArrowUp: 'Up', ArrowDown: 'Down', Enter: 'Return', NumpadEnter: 'Return', Backspace: 'Backspace', Space: 'Space', Tab: 'Tab', CapsLock: 'Capslock', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', Backquote: '`' };
   const key = /^Key[A-Z]$|^Digit[0-9]$/.test(ordinary) ? ordinary.replace(/^Key|^Digit/, '') : /^(F([1-9]|1[0-9]|2[0-4])|Insert|Delete|Home|End|PageUp|PageDown)$/.test(ordinary) ? ordinary : names[ordinary];
   return key ? [...modifiers, key].join('+') : undefined;
+}
+
+export function shortcutAcceleratorBindings(bindings: {
+  prompt: readonly string[];
+  graph?: readonly string[];
+}, platform: string): Array<{ target: ActivationTarget; accelerator: string }> {
+  const result: Array<{ target: ActivationTarget; accelerator: string }> = [];
+  const seen = new Set<string>();
+  for (const target of ['graph', 'prompt'] as const) {
+    const codes = bindings[target];
+    if (!codes) continue;
+    const accelerator = shortcutToAccelerator(codes, platform);
+    if (accelerator && !seen.has(accelerator)) {
+      seen.add(accelerator);
+      result.push({ target, accelerator });
+    }
+  }
+  return result;
 }

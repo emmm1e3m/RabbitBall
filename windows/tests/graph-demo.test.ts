@@ -4,9 +4,9 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 import type { GraphCaptureRequest, GraphDesktop, GraphWorkspace } from '../electron/graph-contracts.ts';
-import type { CaptureImage } from '../electron/contracts.ts';
+import type { Attachment, CaptureImage, RabbitDesktop } from '../electron/contracts.ts';
 
-type DemoDesktop = GraphDesktop & {
+type DemoDesktop = GraphDesktop & Pick<RabbitDesktop, 'usageQuery' | 'onUsageChanged'> & {
   graphCaptureContext(request: GraphCaptureRequest, context: { id: string; title: string; images: CaptureImage[]; demo: boolean }, background?: string): Promise<void>;
 };
 
@@ -44,6 +44,124 @@ test('桌面桥存在时不创建演示桥或读取浏览器数据', () => {
   assert.equal(window.RabbitGraphDemo, undefined);
 });
 
+test('预览查询本体用量接口始终返回未报告状态，不虚构 token 或缓存命中', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0];
+  const scope = { kind: 'graph' as const, workspaceId: w.id, graphId: g.id };
+  let notifications = 0;
+  const unsubscribe = app.api.onUsageChanged(() => { notifications++; });
+  const expected = { requestCount: 0, reportedRequestCount: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheReportedRequestCount: 0 };
+  assert.deepEqual(structuredClone(await app.api.usageQuery()), expected);
+  await app.api.graphGenerate({ workspaceId: w.id, graphId: g.id, nodeId: g.rootId, question: '图中表达了什么？' });
+  app.drain();
+  assert.deepEqual(structuredClone(await app.api.usageQuery(scope)), expected);
+  assert.equal(notifications, 0);
+  unsubscribe();
+  const queried = await app.api.usageQuery(); queried.promptTokens = 100;
+  assert.equal((await app.api.usageQuery()).promptTokens, 0);
+  assert.equal((await fixture(app.storage).api.usageQuery(scope)).cacheHitTokens, undefined);
+  assert.equal('usage' in (await app.api.graphOpen(w.id)).graphs[0], false);
+});
+
+test('无批注的空正文资料可直接提问，真实问题支持撤销重做、重载及重新生成', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0], root = g.nodes[0];
+  const request = { workspaceId: w.id, graphId: g.id, nodeId: root.id };
+  assert.equal(root.markdown, '');
+  await app.api.graphGenerate({ ...request, question: '  为什么这个公式成立？\n请说明适用条件。  ' });
+  app.drain();
+  const generated = await app.api.graphOpen(w.id), child = generated.graphs[0].nodes.at(-1)!;
+  assert.equal(generated.graphs[0].nodes.length, 2);
+  assert.deepEqual(generated.graphs[0].nodes[0].annotations, []);
+  assert.equal(child.source?.question, '为什么这个公式成立？\n请说明适用条件。');
+  assert.equal(child.source?.annotationId, undefined);
+  assert.equal(child.source?.nodeId, root.id);
+  assert.deepEqual(child.source?.selection, { kind: 'text', text: '' });
+  assert.equal(child.source?.comment, '');
+  assert.ok(child.markdown.includes('为什么这个公式成立？'));
+  assert.ok(!child.markdown.includes('按批注的侧重'));
+  assert.equal((await app.api.graphMutate(w.id, { type: 'undo' })).graphs[0].nodes.length, 1);
+  const redone = await app.api.graphMutate(w.id, { type: 'redo' });
+  assert.equal(redone.graphs[0].nodes[1].source?.question, child.source?.question);
+  assert.deepEqual(redone.graphs[0].nodes[0].images, root.images);
+  const reloaded = fixture(app.storage);
+  assert.equal((await reloaded.api.graphOpen(w.id)).graphs[0].nodes[1].source?.question, child.source?.question);
+  await reloaded.api.graphRegenerate({ ...request, nodeId: child.id }); reloaded.drain();
+  const regenerated = (await reloaded.api.graphOpen(w.id)).graphs[0].nodes[1];
+  assert.equal(regenerated.status, 'idle');
+  assert.equal(regenerated.source?.question, child.source?.question);
+  assert.ok(regenerated.markdown.includes('为什么这个公式成立？'));
+});
+
+test('直接提问不改写父资料，有待生成批注时仍优先批注，空问题不创建卡片', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0], root = g.nodes[0];
+  const request = { workspaceId: w.id, graphId: g.id, nodeId: root.id };
+  const text = '这份完整资料仅用作问题的上下文。';
+  await app.api.graphMutate(w.id, { type: 'edit', graphId: g.id, nodeId: root.id, title: root.title, markdown: text, contentRevision: root.contentRevision });
+  const before = await app.api.graphOpen(w.id);
+  await app.api.graphGenerate({ ...request, question: ' \n\t' });
+  assert.deepEqual(await app.api.graphOpen(w.id), before);
+  await app.api.graphGenerate({ ...request, question: '真正的问题' }); app.drain();
+  const direct = (await app.api.graphOpen(w.id)).graphs[0].nodes[1];
+  assert.deepEqual(direct.source?.selection, { kind: 'text', text });
+  assert.ok(!direct.markdown.includes(text), '父正文不能冒充用户问题');
+  await app.api.graphMutate(w.id, { type: 'annotation', graphId: g.id, nodeId: root.id,
+    annotation: { id: 'pending-note', selection: { kind: 'text', text: '完整资料' }, comment: '解释所选部分' } });
+  await app.api.graphGenerate({ ...request, question: '不应代替批注的问题' }); app.drain();
+  const result = (await app.api.graphOpen(w.id)).graphs[0], annotated = result.nodes[2];
+  assert.equal(result.nodes.length, 3);
+  assert.equal(result.nodes[0].markdown, text);
+  assert.equal(annotated.source?.annotationId, 'pending-note');
+  assert.equal(annotated.source?.question, undefined);
+  assert.equal(annotated.source?.comment, '解释所选部分');
+});
+
+test('工作区背景完整共享于多张图，支持撤销重做与浏览器重载', async () => {
+  const app = fixture(), initial = await app.api.graphOpen();
+  const first = await app.api.graphMutate(initial.id, { type: 'create-graph', title: '第一张图' });
+  const second = await app.api.graphMutate(initial.id, { type: 'create-graph', title: '第二张图' });
+  const background = {
+    text: '# 背景标题\n\n$$\\int_0^1 x^2 dx = \\frac13$$\n\n```markdown\n## 原文标题\n```\n',
+    attachments: [
+      { id: 'document', name: '公式资料.md', mimeType: 'text/markdown', text: '完整文档内容\n'.repeat(20_000) + '$E=mc^2$\n' },
+      { id: 'image', name: '参考图片.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,cmVmZXJlbmNl' },
+    ],
+  };
+  const stored = await app.api.graphMutate(initial.id, { type: 'set-background', background });
+  assert.deepEqual(stored.background, background);
+  assert.equal(stored.graphs.length, 2);
+  assert.equal(stored.graphs.some(g => 'background' in g), false, '背景只保存一次，不复制进各图');
+  assert.equal((await app.api.graphMutate(initial.id, { type: 'undo' })).background, undefined);
+  assert.deepEqual((await app.api.graphMutate(initial.id, { type: 'redo' })).background, background);
+  await app.api.graphMutate(initial.id, { type: 'visit', graphId: first.lastGraphId! });
+  assert.deepEqual((await app.api.graphOpen()).background, background);
+  await app.api.graphMutate(initial.id, { type: 'visit', graphId: second.lastGraphId! });
+  assert.deepEqual((await fixture(app.storage).api.graphOpen(initial.id)).background, background);
+  const other = await app.api.graphCreate('另一个工作区');
+  assert.equal(other.background, undefined, '工作区之间不共享背景');
+  background.attachments[0].text = '调用方修改';
+  assert.notEqual((await app.api.graphOpen(initial.id)).background!.attachments[0].text, '调用方修改');
+});
+
+test('背景更新取消整个工作区的旧生成，撤销不会复活旧任务', async () => {
+  const app = fixture(), w = await app.captured(), first = w.graphs[0];
+  const secondWorkspace = await app.api.graphMutate(w.id, { type: 'create-graph', title: '第二张图' });
+  const secondId = secondWorkspace.lastGraphId!;
+  await app.api.graphCapture({ workspaceId: w.id, graphId: secondId });
+  const second = (await app.api.graphOpen(w.id)).graphs.find(g => g.id === secondId)!;
+  const cards = [
+    { graph: first, card: await app.addCard(w.id, first.id, first.rootId, '第一张卡') },
+    { graph: second, card: await app.addCard(w.id, second.id, second.rootId, '第二张卡') },
+  ];
+  for (const entry of cards) await app.api.graphRegenerate({ workspaceId: w.id, graphId: entry.graph.id, nodeId: entry.card.id });
+  await app.api.graphMutate(w.id, { type: 'set-background', background: { text: '新背景', attachments: [] } });
+  const restored = await app.api.graphMutate(w.id, { type: 'undo' });
+  assert.equal(restored.background, undefined);
+  app.drain();
+  for (const entry of cards) {
+    const current = (await app.api.graphOpen(w.id)).graphs.find(g => g.id === entry.graph.id)!.nodes.find(n => n.id === entry.card.id)!;
+    assert.equal(current.status, 'cancelled'); assert.equal(current.markdown, entry.card.markdown);
+  }
+});
+
 test('设置入口先取消草稿，再按动作进入当前图，只有普通进入才填空图', async () => {
   const app = fixture(), calls: string[] = []; let draftEnabled = false;
   app.window.RabbitSettings = { close() { calls.push('close-settings'); draftEnabled = true; }, getSnapshot: () => ({ settings: { graphPluginEnabled: draftEnabled } }) };
@@ -57,7 +175,7 @@ test('设置入口先取消草稿，再按动作进入当前图，只有普通�
     assert.equal((app.opened.at(-1) as any).graphAction, action);
     assert.equal((await app.api.graphOpen()).graphs[0].nodes.length, 0);
   }
-  assert.deepEqual(calls.slice(0, 3), ['close-settings', 'close-chat', 'open-graph']);
+  assert.deepEqual(calls.slice(0, 2), ['close-settings', 'open-graph']);assert.equal(calls.includes('close-chat'),false);
   await app.api.graphActivate();
   const filled = await app.api.graphOpen();
   assert.equal(filled.graphs.length, 1); assert.equal(filled.graphs[0].nodes.length, 1);
@@ -88,7 +206,7 @@ test('新建图谱保持空白，截图只填预留根节点且不会自动生�
   assert.equal(g.layoutInitialized, false);
   assert.equal(app.opened.length, 1);
   await assert.rejects(app.api.graphCapture({ workspaceId: w.id, graphId: g.id }), /已有内容/);
-  await assert.rejects(app.api.graphGenerate({ workspaceId: w.id, graphId: g.id, nodeId: g.rootId }), /先选择内容/);
+  await app.api.graphGenerate({ workspaceId: w.id, graphId: g.id, nodeId: g.rootId });
   await assert.rejects(app.api.graphRegenerate({ workspaceId: w.id, graphId: g.id, nodeId: g.rootId }), /本源卡片不能重新生成/);
   app.drain();
   assert.equal((await app.api.graphOpen(w.id)).graphs[0].nodes.length, 1);
@@ -149,7 +267,8 @@ test('两条批注分别生成；停止一张不会停止另一张', async () =>
   assert.equal(current.nodes.find(n => n.id === b)!.status, 'idle');
   assert.equal(current.nodes.find(n => n.id === b)!.title, '图片解读');
   assert.match(current.nodes.find(n => n.id === b)!.markdown, /未调用模型/);
-  await assert.rejects(app.api.graphGenerate({ workspaceId: w.id, graphId: g.id, nodeId: root.id }), /先选择内容/);
+  await app.api.graphGenerate({ workspaceId: w.id, graphId: g.id, nodeId: root.id });
+  assert.equal((await app.api.graphOpen(w.id)).graphs[0].nodes.length, current.nodes.length);
   const body = current.nodes.find(n => n.id === b)!.markdown;
   await app.api.graphRegenerate({ workspaceId: w.id, graphId: g.id, nodeId: b });
   await app.api.graphMutate(w.id, { type: 'remove-annotation', graphId: g.id, nodeId: root.id, annotationId: 'b' }); app.drain();
@@ -492,6 +611,59 @@ test('跨图移动与整图删除可连续撤销重做，子树和目标原有�
   assert.ok(remadeDeletion.revision > remadeMove.revision && remadeMove.revision > restoredMove.revision && restoredMove.revision > restoredGraph.revision);
 });
 
+test('整图删除保留相邻选择，空图也能删除，全部删除后可正常新建和重载', async () => {
+  const app = fixture(), w = await app.api.graphOpen(), ids: string[] = [];
+  for (const title of ['第一张', '第二张', '第三张', '第四张']) ids.push((await app.api.graphMutate(w.id, { type: 'create-graph', title })).lastGraphId!);
+  await app.api.graphMutate(w.id, { type: 'visit', graphId: ids[1] });
+  const next = await app.api.graphMutate(w.id, { type: 'delete-graph', graphId: ids[1] });
+  assert.deepEqual(next.graphs.map(g => g.id), [ids[0], ids[2], ids[3]]);
+  assert.equal(next.lastGraphId, ids[2], '删除当前图优先选择同位置下一张');
+  assert.equal((await app.api.graphMutate(w.id, { type: 'delete-graph', graphId: ids[0] })).lastGraphId, ids[2], '删除其它图保留当前图');
+  await app.api.graphMutate(w.id, { type: 'visit', graphId: ids[3] });
+  assert.equal((await app.api.graphMutate(w.id, { type: 'delete-graph', graphId: ids[3] })).lastGraphId, ids[2], '删除最后一张时选择前一张');
+  const empty = await app.api.graphMutate(w.id, { type: 'delete-graph', graphId: ids[2] });
+  assert.deepEqual(empty.graphs, []); assert.equal('lastGraphId' in empty, false);
+  assert.deepEqual(await fixture(app.storage).api.graphOpen(w.id), empty);
+  assert.equal((await app.api.graphMutate(w.id, { type: 'undo' })).graphs[0].id, ids[2]);
+  const redone = await app.api.graphMutate(w.id, { type: 'redo' });
+  assert.deepEqual(redone.graphs, []); assert.equal('lastGraphId' in redone, false);
+  const created = await app.api.graphMutate(w.id, { type: 'create-graph', title: '重新开始' });
+  assert.equal(created.graphs.length, 1); assert.equal(created.lastGraphId, created.graphs[0].id);
+  assert.ok(!ids.includes(created.lastGraphId!));
+  assert.deepEqual(await fixture(app.storage).api.graphOpen(w.id), created);
+});
+
+test('整图删除撤销恢复图片、文档和来源，取消所删图任务且不影响其他图', async () => {
+  const app = fixture(), w = await app.captured(), first = w.graphs[0];
+  const document: Attachment = { id: 'paper', name: '资料.txt', mimeType: 'text/plain', format: 'text', text: '完整资料 $x^2$' };
+  await app.api.graphMutate(w.id, { type: 'append-node-attachments', graphId: first.id, nodeId: first.rootId, attachments: [document] });
+  await app.api.graphGenerate({ workspaceId: w.id, graphId: first.id, nodeId: first.rootId, question: '解释资料里的公式' }); app.drain();
+  const generated = (await app.api.graphOpen(w.id)).graphs[0], card = generated.nodes[1];
+  const second = await app.api.graphMutate(w.id, { type: 'create-graph', title: '保留的图' }), secondId = second.lastGraphId!;
+  await app.api.graphCapture({ workspaceId: w.id, graphId: secondId });
+  const other = (await app.api.graphOpen(w.id)).graphs.find(g => g.id === secondId)!;
+  const otherCard = await app.addCard(w.id, other.id, other.rootId, '另一任务');
+  await app.api.graphRegenerate({ workspaceId: w.id, graphId: first.id, nodeId: card.id });
+  await app.api.graphRegenerate({ workspaceId: w.id, graphId: other.id, nodeId: otherCard.id });
+  const deleted = await app.api.graphMutate(w.id, { type: 'delete-graph', graphId: first.id });
+  assert.deepEqual(deleted.graphs.map(g => g.id), [other.id]);
+  app.drain();
+  assert.equal((await app.api.graphOpen(w.id)).graphs[0].nodes.find(n => n.id === otherCard.id)!.status, 'idle');
+  const restored = await app.api.graphMutate(w.id, { type: 'undo' }), restoredGraph = restored.graphs.find(g => g.id === first.id)!;
+  assert.deepEqual(restoredGraph.nodes.map(n => n.id), generated.nodes.map(n => n.id));
+  assert.deepEqual(restoredGraph.nodes[0].images, generated.nodes[0].images);
+  assert.deepEqual(restoredGraph.nodes[0].attachments, [document]);
+  assert.deepEqual(restoredGraph.nodes[1].source, card.source);
+  assert.equal(restoredGraph.nodes[1].markdown, card.markdown);
+  assert.equal(restoredGraph.nodes[1].status, 'cancelled', '撤销不能复活已删除图的生成任务');
+  app.drain();
+  assert.equal((await app.api.graphOpen(w.id)).graphs.find(g => g.id === first.id)!.nodes[1].status, 'cancelled');
+  assert.deepEqual((await fixture(app.storage).api.graphOpen(w.id)).graphs.find(g => g.id === first.id)!.nodes, restoredGraph.nodes);
+  const redone = await app.api.graphMutate(w.id, { type: 'redo' });
+  assert.deepEqual(redone.graphs.map(g => g.id), [other.id]);
+  assert.equal((await fixture(app.storage).api.graphOpen(w.id)).graphs.some(g => g.id === first.id), false);
+});
+
 test('同一字段已被生成结果改写时拒绝旧撤销，保留新正文且不推进版本', async () => {
   const app = fixture(), w = await app.captured(), g = w.graphs[0];
   const card = await app.addCard(w.id, g.id, g.rootId, '解释');
@@ -518,6 +690,7 @@ test('演示根节点支持纯文本、多图和组合，创建前不自动保�
     const root = filled.graphs.at(-1)!.nodes[0];
     assert.equal(root.id, graph.rootId); assert.equal(root.kind, 'source'); assert.equal(root.parentId, null);
     assert.equal(root.markdown, markdown); assert.equal(root.images.length, attachments.length);
+    assert.deepEqual(root.materialOrder, root.images.map(image => 'image:' + image.id));
     await assert.rejects(app.api.graphCaptureImages(request), /已有根节点/);
     await assert.rejects(app.api.graphMutate(initial.id, { type: 'add-root', graphId: graph.id, markdown: '覆盖', images: [] }), /已有根节点/);
     const undone = await app.api.graphMutate(initial.id, { type: 'undo' }); assert.equal(undone.graphs.at(-1)!.nodes.length, 0);
@@ -568,6 +741,175 @@ test('演示根追加图片拒绝空图、空截图、坏图和累计超限', as
   assert.equal((await app.api.graphOpen(initial.id)).graphs.at(-1)!.nodes.length, 0);
 });
 
+test('演示卡片文件独立于正文和图片，按编号移除并支持撤销重做、重载和跨图移动', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0];
+  const created = await app.api.graphMutate(w.id, { type: 'add-custom-node', graphId: g.id, parentId: g.rootId, markdown: '用户自己的正文', images: g.nodes[0].images });
+  const custom = created.graphs[0].nodes.at(-1)!;
+  const documents: Attachment[] = [
+    { id: 'document', name: '资料.txt', mimeType: 'text/plain', format: 'txt', text: '完整资料\n'.repeat(10_000) + '文末标记' },
+    { id: 'document', name: '资料.txt', mimeType: 'text/plain', format: 'py', language: 'python', text: 'def value():\n    return 42\n' },
+  ];
+  const appended = (await app.api.graphMutate(w.id, { type: 'append-node-attachments', graphId: g.id, nodeId: custom.id, attachments: documents })).graphs[0].nodes.at(-1)!;
+  assert.equal(appended.markdown, custom.markdown); assert.deepEqual(appended.images, custom.images);
+  assert.deepEqual(appended.attachments![0], documents[0]);
+  assert.notEqual(appended.attachments![1].id, documents[1].id);
+  assert.deepEqual(appended.attachments![1], { ...documents[1], id: appended.attachments![1].id });
+  assert.ok(appended.contentRevision > custom.contentRevision);
+  const savedAttachments = structuredClone(appended.attachments!);
+  documents[0].text = '调用方之后修改';
+  assert.deepEqual((await app.api.graphOpen(w.id)).graphs[0].nodes.at(-1)!.attachments, savedAttachments);
+
+  const removed = (await app.api.graphMutate(w.id, { type: 'remove-node-attachment', graphId: g.id, nodeId: custom.id, attachmentId: 'document' })).graphs[0].nodes.at(-1)!;
+  assert.deepEqual(removed.attachments, [savedAttachments[1]]);
+  assert.equal(removed.markdown, custom.markdown); assert.deepEqual(removed.images, custom.images);
+  assert.ok(removed.contentRevision > appended.contentRevision);
+  const undone = (await app.api.graphMutate(w.id, { type: 'undo' })).graphs[0].nodes.at(-1)!;
+  assert.deepEqual(undone.attachments, savedAttachments); assert.ok(undone.contentRevision > removed.contentRevision);
+  const redone = (await app.api.graphMutate(w.id, { type: 'redo' })).graphs[0].nodes.at(-1)!;
+  assert.deepEqual(redone.attachments, removed.attachments); assert.ok(redone.contentRevision > undone.contentRevision);
+  await app.api.graphMutate(w.id, { type: 'undo' });
+  assert.equal((await app.api.graphMutate(w.id, { type: 'undo' })).graphs[0].nodes.at(-1)!.attachments, undefined);
+  assert.deepEqual((await app.api.graphMutate(w.id, { type: 'redo' })).graphs[0].nodes.at(-1)!.attachments, savedAttachments);
+  const missing = (await app.api.graphMutate(w.id, { type: 'remove-node-attachment', graphId: g.id, nodeId: custom.id, attachmentId: 'missing' })).graphs[0].nodes.at(-1)!;
+  const target = await app.api.graphMutate(w.id, { type: 'create-graph' });
+  await app.api.graphMutate(w.id, { type: 'move-subtree', graphId: g.id, nodeId: custom.id, targetGraphId: target.lastGraphId! });
+  const moved = (await fixture(app.storage).api.graphOpen(w.id)).graphs.find(graph => graph.id === target.lastGraphId)!.nodes[0];
+  assert.equal(moved.id, custom.id); assert.equal(moved.parentId, null);
+  assert.equal(moved.markdown, custom.markdown); assert.deepEqual(moved.images, custom.images);
+  assert.deepEqual(moved.attachments, savedAttachments); assert.equal(moved.contentRevision, missing.contentRevision);
+  const reloaded = fixture(app.storage);
+  for (const attachment of savedAttachments) await reloaded.api.graphMutate(w.id, { type: 'remove-node-attachment', graphId: target.lastGraphId!, nodeId: custom.id, attachmentId: attachment.id });
+  assert.equal((await reloaded.api.graphOpen(w.id)).graphs.find(graph => graph.id === target.lastGraphId)!.nodes[0].attachments, undefined);
+});
+
+test('演示卡片文件拒绝图片、坏标签、超长文本和累计超限，失败不提交状态', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0];
+  const document: Attachment = { id: 'file', name: '参考.txt', mimeType: 'text/plain', text: '完整文档' };
+  const invalid = [
+    [],
+    [{ id: 'image', name: '图片.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,AQ==' }],
+    [{ ...document, dataUrl: 'data:image/png;base64,AQ==' }],
+    [{ ...document, text: 'x'.repeat(1_000_001) }],
+    [{ ...document, format: 123 }],
+    [{ ...document, language: 'x'.repeat(241) }],
+  ];
+  for (const attachments of invalid) {
+    await assert.rejects(app.api.graphMutate(w.id, { type: 'append-node-attachments', graphId: g.id, nodeId: g.rootId, attachments: attachments as Attachment[] }), /卡片|选择/);
+    assert.deepEqual(await app.api.graphOpen(w.id), w);
+  }
+  const documents = Array.from({ length: 64 }, (_, index) => ({ ...document, id: `file-${index}`, text: index === 0 ? 'x'.repeat(1_000_000) : document.text }));
+  const filled = await app.api.graphMutate(w.id, { type: 'append-node-attachments', graphId: g.id, nodeId: g.rootId, attachments: documents });
+  assert.equal(filled.graphs[0].nodes[0].attachments!.length, 64);
+  assert.equal(filled.graphs[0].nodes[0].attachments![0].text!.length, 1_000_000);
+  await assert.rejects(app.api.graphMutate(w.id, { type: 'append-node-attachments', graphId: g.id, nodeId: g.rootId, attachments: [document] }), /卡片最多保留 64/);
+  assert.deepEqual(await app.api.graphOpen(w.id), filled);
+});
+
+test('演示移除图片前补齐原选区快照，保留其他图片并支持撤销重做和重载', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0], image = g.nodes[0].images[0];
+  await app.api.graphMutate(w.id, { type: 'append-node-images', graphId: g.id, nodeId: g.rootId, images: [image] });
+  await app.api.graphMutate(w.id, { type: 'annotation', graphId: g.id, nodeId: g.rootId, annotation: {
+    id: 'image-note', selection: { kind: 'image', imageId: image.id, rect: { x: 0, y: 0, width: .5, height: .5 } }, comment: '解释图片',
+  } });
+  await app.api.graphGenerate({ workspaceId: w.id, graphId: g.id, nodeId: g.rootId }); app.drain();
+  // 旧记录可能只有来源图片编号；移除前应先保存仍可找到的原图。
+  const stored = JSON.parse(app.storage.get('rabbitball.graph.demo.v1')!);
+  delete stored.workspaces[0].graphs[0].nodes[1].source.selectionImage;
+  app.storage.set('rabbitball.graph.demo.v1', JSON.stringify(stored));
+  const reloaded = fixture(app.storage), before = (await reloaded.api.graphOpen(w.id)).graphs[0];
+  const result = (await reloaded.api.graphMutate(w.id, { type: 'remove-node-image', graphId: g.id, nodeId: g.rootId, imageId: image.id })).graphs[0];
+  assert.deepEqual(result.nodes[0].images, [before.nodes[0].images[1]]);
+  assert.deepEqual(result.nodes[0].annotations, before.nodes[0].annotations);
+  assert.deepEqual(result.nodes[1].source!.selectionImage, image);
+  assert.ok(result.nodes[0].contentRevision > before.nodes[0].contentRevision);
+  const missing = (await reloaded.api.graphMutate(w.id, { type: 'remove-node-image', graphId: g.id, nodeId: g.rootId, imageId: 'missing' })).graphs[0];
+  assert.equal(missing.nodes[0].contentRevision, result.nodes[0].contentRevision);
+  const undone = (await reloaded.api.graphMutate(w.id, { type: 'undo' })).graphs[0];
+  assert.deepEqual(undone.nodes[0].images, before.nodes[0].images);
+  const redone = (await reloaded.api.graphMutate(w.id, { type: 'redo' })).graphs[0];
+  assert.deepEqual(redone.nodes[0].images, result.nodes[0].images);
+  assert.deepEqual(redone.nodes[1].source!.selectionImage, image);
+  assert.deepEqual((await fixture(app.storage).api.graphOpen(w.id)).graphs[0].nodes, redone.nodes);
+});
+
+test('演示混合素材按真实添加顺序逐项删除，重载、撤销重做及同编号跨类型素材保持正确', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0];
+  const created = await app.api.graphMutate(w.id, { type: 'add-custom-node', graphId: g.id, parentId: g.rootId, markdown: '保留卡片正文', images: [] });
+  const custom = created.graphs[0].nodes.at(-1)!, target = { graphId: g.id, nodeId: custom.id };
+  const document: Attachment = { id: 'first:document', name: '第一份.txt', mimeType: 'text/plain', text: '第一份文档全文' };
+  await app.api.graphMutate(w.id, { type: 'append-node-attachments', ...target, attachments: [document] });
+  const pictured = await app.api.graphMutate(w.id, { type: 'append-node-images', ...target, images: g.nodes[0].images });
+  const image = pictured.graphs[0].nodes.find(n => n.id === custom.id)!.images[0];
+  await app.api.graphMutate(w.id, { type: 'annotation', ...target, annotation: {
+    id: 'latest-image-note', selection: { kind: 'image', imageId: image.id, rect: { x: 0, y: 0, width: .5, height: .5 } }, comment: '保留原图',
+  } });
+  await app.api.graphGenerate({ workspaceId: w.id, ...target }); app.drain();
+  const latest = { ...document, id: image.id, name: '最后一份.txt', text: '最后文档全文' };
+  const appended = await app.api.graphMutate(w.id, { type: 'append-node-attachments', ...target, attachments: [latest] });
+  const order = ['attachment:' + document.id, 'image:' + image.id, 'attachment:' + latest.id];
+  assert.deepEqual(appended.graphs[0].nodes.find(n => n.id === custom.id)!.materialOrder, order);
+  const saved = JSON.parse(app.storage.get('rabbitball.graph.demo.v1')!);
+  const child = saved.workspaces[0].graphs[0].nodes.find((n: { parentId: string }) => n.parentId === custom.id);
+  delete child.source.selectionImage;
+  app.storage.set('rabbitball.graph.demo.v1', JSON.stringify(saved));
+  const reloaded = fixture(app.storage), remove = { type: 'remove-latest-node-asset' as const, ...target };
+  const current = (value: GraphWorkspace) => value.graphs[0].nodes.find(n => n.id === custom.id)!;
+  assert.deepEqual(current(await reloaded.api.graphOpen(w.id)).materialOrder, order);
+  const removedDocument = current(await reloaded.api.graphMutate(w.id, remove));
+  assert.deepEqual(removedDocument.attachments, [document]); assert.deepEqual(removedDocument.images, [image]);
+  assert.deepEqual(removedDocument.materialOrder, order.slice(0, 2));
+  assert.deepEqual(current(await reloaded.api.graphMutate(w.id, { type: 'undo' })).materialOrder, order);
+  assert.deepEqual(current(await reloaded.api.graphMutate(w.id, { type: 'redo' })).materialOrder, order.slice(0, 2));
+  const removedImage = await reloaded.api.graphMutate(w.id, remove);
+  assert.deepEqual(current(removedImage).images, []); assert.deepEqual(current(removedImage).attachments, [document]);
+  assert.deepEqual(removedImage.graphs[0].nodes.find(n => n.id === child.id)!.source!.selectionImage, image);
+  const empty = await reloaded.api.graphMutate(w.id, remove);
+  assert.deepEqual(current(empty).materialOrder, []); assert.equal(current(empty).attachments, undefined);
+  assert.equal(current(empty).markdown, custom.markdown);
+  const storedEmpty = app.storage.get('rabbitball.graph.demo.v1');
+  assert.deepEqual(await reloaded.api.graphMutate(w.id, remove), empty, '空素材不推进修订或改动工作区');
+  assert.equal(app.storage.get('rabbitball.graph.demo.v1'), storedEmpty);
+  assert.deepEqual(current(await reloaded.api.graphMutate(w.id, { type: 'undo' })).attachments, [document], '空删除不产生历史');
+});
+
+test('演示并发重复删除每次读取最新素材，三项素材只产生三次变更', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0], target = { graphId: g.id, nodeId: g.rootId };
+  const documents = ['first', 'second'].map(id => ({ id, name: id + '.txt', mimeType: 'text/plain', text: id }));
+  const before = await app.api.graphMutate(w.id, { type: 'append-node-attachments', ...target, attachments: documents });
+  const order = before.graphs[0].nodes[0].materialOrder!;
+  assert.deepEqual(order, ['image:' + g.nodes[0].images[0].id, 'attachment:first', 'attachment:second']);
+  let changes = 0; app.api.onGraphChanged(() => changes++);
+  const results = await Promise.all(Array.from({ length: 4 }, () => app.api.graphMutate(w.id, { type: 'remove-latest-node-asset', ...target })));
+  assert.equal(changes, 3);
+  assert.deepEqual(results.map(result => result.revision), [1, 2, 3, 3].map(increment => before.revision + increment));
+  for (const [index, result] of results.entries()) assert.deepEqual(result.graphs[0].nodes[0].materialOrder, order.slice(0, Math.max(0, 2 - index)));
+  assert.deepEqual(results[0].graphs[0].nodes[0].attachments, [documents[0]]);
+  assert.equal(results[1].graphs[0].nodes[0].attachments, undefined);
+  assert.deepEqual(results[2].graphs[0].nodes[0].images, []);
+  assert.deepEqual(await fixture(app.storage).api.graphOpen(w.id), results[3]);
+});
+
+test('演示旧节点按图片再文件初始化素材顺序，指定移除同步更新顺序', async () => {
+  const app = fixture(), w = await app.captured(), g = w.graphs[0], target = { graphId: g.id, nodeId: g.rootId };
+  const first = { id: 'older-file', name: '第一份.txt', mimeType: 'text/plain', text: '第一份' };
+  await app.api.graphMutate(w.id, { type: 'append-node-attachments', ...target, attachments: [first] });
+  const withImage = await app.api.graphMutate(w.id, { type: 'append-node-images', ...target, images: g.nodes[0].images });
+  const images = withImage.graphs[0].nodes[0].images;
+  const second = { ...first, id: 'later-file', name: '第二份.txt' };
+  await app.api.graphMutate(w.id, { type: 'append-node-attachments', ...target, attachments: [second] });
+  const saved = JSON.parse(app.storage.get('rabbitball.graph.demo.v1')!);
+  delete saved.workspaces[0].graphs[0].nodes[0].materialOrder;
+  app.storage.set('rabbitball.graph.demo.v1', JSON.stringify(saved));
+  const reloaded = fixture(app.storage), legacy = await reloaded.api.graphOpen(w.id);
+  assert.deepEqual(legacy.graphs[0].nodes[0].materialOrder, [...images.map(image => 'image:' + image.id), 'attachment:' + first.id, 'attachment:' + second.id]);
+  const removedLast = await reloaded.api.graphMutate(w.id, { type: 'remove-latest-node-asset', ...target });
+  assert.deepEqual(removedLast.graphs[0].nodes[0].attachments, [first]);
+  await reloaded.api.graphMutate(w.id, { type: 'remove-node-image', ...target, imageId: images[0].id });
+  const removedFile = await reloaded.api.graphMutate(w.id, { type: 'remove-node-attachment', ...target, attachmentId: first.id });
+  assert.deepEqual(removedFile.graphs[0].nodes[0].materialOrder, ['image:' + images[1].id]);
+  assert.deepEqual((await fixture(app.storage).api.graphOpen(w.id)).graphs[0].nodes[0].materialOrder, removedFile.graphs[0].nodes[0].materialOrder);
+});
+
 test('演示空白自定义卡片可撤销恢复、重载、编辑并用批注生成子节点', async () => {
   const app = fixture(), w = await app.captured(), g = w.graphs[0];
   const parent = await app.addCard(w.id, g.id, g.rootId, '现有卡片');
@@ -605,6 +947,7 @@ test('演示自定义卡片支持初始图文并拒绝无效父节点和附件',
   assert.equal((await app.api.graphOpen(w.id)).graphs[0].nodes.length, 1);
   const created = await app.api.graphMutate(w.id, base), custom = created.graphs[0].nodes.at(-1)!;
   assert.equal(custom.kind, 'source'); assert.equal(custom.markdown, '我的说明'); assert.equal(custom.images.length, 1);
+  assert.deepEqual(custom.materialOrder, custom.images.map(image => 'image:' + image.id));
 });
 
 
@@ -654,8 +997,8 @@ test('演示写入失败保留撤销重做栈，重试只提交一次历史', as
   await assert.rejects(app.api.graphMutate(w.id, { type: 'undo' }), /没有可以撤销/);
 });
 
-test('演示删卡或撤销保存失败不会提前停止生成任务，重试生成失败保留原任务', async () => {
-  for (const action of ['delete', 'undo', 'regenerate'] as const) {
+test('演示删图、删卡或撤销保存失败不会提前停止生成任务，重试生成失败保留原任务', async () => {
+  for (const action of ['delete-graph', 'delete', 'undo', 'regenerate', 'set-background'] as const) {
     const storage = new QuotaStorage(), app = fixture(storage), w = await app.captured(), g = w.graphs[0];
     const card = await app.addCard(w.id, g.id, g.rootId, '正在生成');
     await app.api.graphRegenerate({ workspaceId: w.id, graphId: g.id, nodeId: card.id });
@@ -663,7 +1006,10 @@ test('演示删卡或撤销保存失败不会提前停止生成任务，重试�
     storage.full = true;
     const failed = action === 'regenerate'
       ? app.api.graphRegenerate({ workspaceId: w.id, graphId: g.id, nodeId: card.id })
-      : app.api.graphMutate(w.id, action === 'undo' ? { type: 'undo' } : { type: 'delete', graphId: g.id, nodeId: card.id });
+      : app.api.graphMutate(w.id, action === 'undo' ? { type: 'undo' }
+        : action === 'set-background' ? { type: 'set-background', background: { text: '未能保存的背景', attachments: [] } }
+          : action === 'delete-graph' ? { type: 'delete-graph', graphId: g.id }
+          : { type: 'delete', graphId: g.id, nodeId: card.id });
     await assert.rejects(failed, /存储空间不足/);
     assert.deepEqual(await app.api.graphOpen(), before, action + ' 失败不提交节点与任务状态');
     storage.full = false; app.drain();

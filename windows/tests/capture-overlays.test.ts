@@ -14,7 +14,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function harness(loads: Promise<void>[] = [], contentHeightOffsets: number[] = []) {
+function harness(loads: Promise<void>[] = [], contentHeightOffsets: number[] = [], paints: Promise<void>[] = []) {
   const windows: Window[] = [], crops: unknown[] = [];
   let cancelled = 0;
   class Window {
@@ -32,6 +32,12 @@ function harness(loads: Promise<void>[] = [], contentHeightOffsets: number[] = [
       on: (name: string, handler: () => void) => { this.webHandlers.set(name, handler); },
       setWindowOpenHandler() {},
       executeJavaScript: async () => true,
+      capturePage: async (rect: unknown, options: unknown) => {
+        this.calls.push('capturePage');
+        assert.equal(JSON.stringify(rect), JSON.stringify({ x: 0, y: 0, width: 1, height: 1 }));
+        assert.equal(JSON.stringify(options), JSON.stringify({ stayHidden: true }));
+        await paints.shift();
+      },
       send: (_channel: string, event: CaptureEvent) => { this.sent.push(structuredClone(event)); },
     };
     constructor(options: any) {
@@ -116,7 +122,8 @@ test('每屏背景和跨屏选框独立投影，混合 DPI 与负坐标不共用
     assert.equal(window.options.show, false);
     assert.equal(window.options.x, app.options.viewports[index].bounds.x);
     assert.deepEqual(window.bounds, app.options.viewports[index].bounds);
-    assert.ok(window.calls.indexOf('setBounds') > window.calls.indexOf('showInactive'), '显示后恢复整屏范围，不能只依赖构造尺寸');
+    assert.ok(window.calls.lastIndexOf('setBounds') > window.calls.indexOf('showInactive'), '显示后恢复整屏范围，不能只依赖构造尺寸');
+    assert.ok(window.calls.indexOf('capturePage') < window.calls.indexOf('showInactive'), '每屏完成隐藏首帧后才显示');
     const start = window.sent[0];
     assert.equal(start.type, 'start');
     if (start.type !== 'start') throw new Error('缺少 start');
@@ -243,13 +250,47 @@ test('125% 系统舍入后按实际内容尺寸投影，背景和选框不相差
   if (start.type !== 'start') throw new Error('缺少 start');
   assert.equal(start.height, 1154);
   assert.equal(app.options.viewports[0].bounds.height, 1153, '不能改写会话保存的原始显示器配置');
-  assert.deepEqual(window.calls, ['showInactive', 'setBounds', 'getContentBounds']);
+  assert.deepEqual(window.calls, ['setBounds', 'getContentBounds', 'capturePage', 'showInactive', 'setBounds', 'getContentBounds']);
   app.overlays.frame({ x: -2560, y: 0 }, { x: 0, y: 1442 });
   const frame = window.sent.at(-1);
   assert.equal(frame?.type, 'frame');
   if (frame?.type !== 'frame') throw new Error('缺少 frame');
   assert.deepEqual(frame.rect, { x: 0, y: 0, width: 2048, height: 1154 });
   app.overlays.close();
+});
+
+test('所有显示器首帧完成前全体保持隐藏，避免大图传输期间只有一屏显示状态', async () => {
+  const first = deferred(), second = deferred(), app = harness([], [], [first.promise, second.promise]);
+  const showing = app.overlays.show(app.options);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(app.windows.every(window => window.sent[0]?.type === 'start'));
+  assert.ok(app.windows.every(window => !window.visible));
+  first.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.ok(app.windows.every(window => !window.visible), '只有第一屏完成绘制时不能先显示第一屏');
+  second.resolve(); await showing;
+  assert.ok(app.windows.every(window => window.visible));
+  app.overlays.dispose();
+});
+
+test('隐藏首帧等待期间取消，迟到绘制不会显示任何屏幕', async () => {
+  const paint = deferred(), app = harness([], [], [paint.promise]);
+  const showing = app.overlays.show(app.options);
+  await new Promise(resolve => setImmediate(resolve));
+  app.overlays.close(); paint.resolve(); await showing;
+  assert.ok(app.windows.every(window => !window.visible));
+  assert.ok(app.windows.every(window => window.sent.at(-1)?.type === 'cancel'));
+  app.overlays.dispose();
+});
+
+test('任一屏绘制失败会关闭整组并报告失败，不留下部分显示的截图状态', async () => {
+  const paint = deferred(), app = harness([], [], [paint.promise.then(() => { throw new Error('第二屏绘制失败'); })]);
+  const showing = app.overlays.show(app.options);
+  await new Promise(resolve => setImmediate(resolve));
+  paint.resolve();
+  await assert.rejects(showing, /绘制失败/);
+  assert.ok(app.windows.every(window => !window.visible && !window.destroyed));
+  assert.ok(app.windows.every(window => window.sent.at(-1)?.type === 'cancel'));
+  app.overlays.dispose();
 });
 
 test('加载期间保留最后选框和最新图片数量，所有屏幕收到同一上下文', async () => {

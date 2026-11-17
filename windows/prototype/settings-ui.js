@@ -17,7 +17,7 @@
     { key: 'translate', group: '功能', label: '翻译', hint: '规定翻译语言、格式和范围；填写问题或直接点击快捷操作时均适用。' },
     { key: 'searchTool', group: '搜索工具', label: '联网搜索', hint: '统一规定何时联网搜索，以及如何组织搜索关键词。' }
   ];
-  const defaults = { bodyColor: '#F58DAA', eyeColor: '#F90040', useBuiltinFont: false, petSize: 1, reasoning: 'medium', maxToolRounds: 3, historyLimit: 10, launchAtLogin: false, pauseOnFullscreen: true, followMouse: true, autoCopyScreenshots: true, graphPluginEnabled: true, graphModeEnabled: false, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT], apiBaseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', hasApiKey: false };
+  const defaults = { bodyColor: '#F58DAA', eyeColor: '#F90040', useBuiltinFont: false, petSize: 1, reasoning: 'medium', maxToolRounds: 3, historyLimit: 10, launchAtLogin: false, pauseOnFullscreen: true, followMouse: true, autoCopyScreenshots: true, graphPluginEnabled: true, graphActivationShortcut: null, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT], apiBaseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', hasApiKey: false };
   const storeKey = 'rabbitball.appearance.v1';
   const emit = (name, detail = {}) => document.dispatchEvent(new CustomEvent('settings:' + name, { detail }));
   const validHex = value => typeof value === 'string' && /^#[\da-f]{6}$/i.test(value);
@@ -132,7 +132,8 @@
     #rabbit-settings-root h2 { margin:0;color:var(--rb-text);font-size:17px;font-weight:500; }
     #rabbit-settings-root .rs-close { display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:50%;background:#fff;color:var(--rb-text-muted);cursor:pointer; }
     #rabbit-settings-root .rs-close:hover { background:var(--rb-soft);color:var(--rb-accent); }
-    #rabbit-settings-root button svg { width:16px;height:16px;stroke:currentColor;stroke-width:2.25;fill:none;stroke-linecap:round;stroke-linejoin:round; }
+    #rabbit-settings-root button svg { width:16px;height:16px;stroke:currentColor;stroke-width:1.5px;fill:none;stroke-linecap:round;stroke-linejoin:round; }
+    #rabbit-settings-root button svg > * { vector-effect:non-scaling-stroke; }
     #rabbit-settings-root .rs-tabs { display:flex;gap:8px;padding:0 22px;flex:none; }
     #rabbit-settings-root .rs-tab { display:flex;align-items:center;justify-content:center;gap:6px;flex:1;padding:8px 0 11px;border:0;border-bottom:2px solid transparent;background:#fff;color:var(--rb-text-muted);font-size:14px;cursor:pointer;transition:color .2s,border-color .24s; }
     #rabbit-settings-root .rs-tab:hover { color:var(--rb-text-secondary); }
@@ -162,7 +163,6 @@
     #rabbit-settings-root .rs-plugin-actions { display:flex;align-items:center;gap:10px; }
     #rabbit-settings-root .rs-plugin-action { display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--rb-line);border-radius:10px;background:#fff;color:var(--rb-text-secondary);cursor:pointer;transition:color .18s,background .18s,transform .24s cubic-bezier(.22,1,.36,1); }
     #rabbit-settings-root .rs-plugin-action svg { width:16px;height:16px; }
-    #rabbit-settings-root .rs-plugin-action svg > * { stroke-width:2px;vector-effect:non-scaling-stroke; }
     #rabbit-settings-root .rs-plugin-action:hover:not(:disabled) { color:var(--rb-accent);background:var(--rb-soft);transform:translateY(-1px); }
     #rabbit-settings-root .rs-plugin-action:active:not(:disabled) { transform:translateY(0); }
     #rabbit-settings-root .rs-plugin-action:focus-visible { outline:2px solid var(--rb-accent);outline-offset:3px; }
@@ -214,6 +214,7 @@
   const root = document.createElement('div');
   root.id = 'rabbit-settings-root';
   const closeIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
+  const shortcutField = (prefix, label) => `<div class="rs-field"><span class="rs-label" id="${prefix}-shortcut-label">${label}</span><div class="rs-shortcut-row"><button class="rs-shortcut" id="${prefix}-activation-shortcut" type="button" aria-labelledby="${prefix}-shortcut-label ${prefix}-shortcut-value" aria-describedby="${prefix}-shortcut-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6"/></svg><span class="rs-shortcut-keys" id="${prefix}-shortcut-value"></span></button><button class="rs-shortcut-reset" id="${prefix}-shortcut-reset" type="button" aria-label="恢复默认${label}" title="恢复默认${label}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6"/></svg></button></div><p class="rs-hint" id="${prefix}-shortcut-hint" aria-live="polite"></p></div>`;
   const graphActions = [
     { action: 'open', label: '进入图谱', icon: '<circle cx="5" cy="12" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m7.2 10.8 8.6-4.6M7.2 13.2l8.6 4.6"/>' },
     { action: 'reveal', label: '打开文档文件夹', icon: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v1M3 7h16a2 2 0 0 1 2 2l-2 10H3Z"/>' },
@@ -236,6 +237,7 @@
         <div class="rs-pages">
         <section class="rs-tab-panel is-active" id="rabbit-page-model" role="tabpanel" aria-labelledby="rabbit-tab-model">
         <div class="rs-field"><label class="rs-label" for="rabbit-api-key">API Key</label><div class="rs-key-wrap"><input class="rs-key" id="rabbit-api-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="rabbit-key-hint"><button class="rs-clear-key" type="button" aria-label="清除密钥" title="清除密钥" hidden>${closeIcon}</button></div><p class="rs-hint" id="rabbit-key-hint"></p></div>
+        <button class="rs-prompt-reset rs-usage" type="button">查看用量</button>
         <div class="rs-field"><label class="rs-label" for="rabbit-model">模型</label><select id="rabbit-model"></select></div>
         <div class="rs-field"><label class="rs-label" for="rabbit-reasoning">思考强度</label><select id="rabbit-reasoning"><option value="low">low</option><option value="medium">high</option><option value="high">max</option></select></div>
         <div class="rs-field"><label class="rs-label" for="rabbit-tool-rounds">工具调用轮数上限</label><input class="rs-key" id="rabbit-tool-rounds" type="number" min="1" step="1" required aria-describedby="rabbit-tool-rounds-hint"><p class="rs-hint" id="rabbit-tool-rounds-hint">每次回答的工具调用轮数，一轮可包含多次搜索。</p></div>
@@ -247,7 +249,7 @@
         </section>
         <section class="rs-tab-panel" id="rabbit-page-general" role="tabpanel" aria-labelledby="rabbit-tab-general" aria-hidden="true" inert>
         <div class="rs-field"><label class="rs-label" for="rabbit-history-limit">历史记录保留条数</label><input class="rs-key" id="rabbit-history-limit" type="number" min="0" step="1" required aria-describedby="rabbit-history-limit-hint"><p class="rs-hint" id="rabbit-history-limit-hint">超出数量自动删除最早记录。0 表示清空并不再保存历史，同时隐藏历史按钮。</p></div>
-        <div class="rs-field"><span class="rs-label" id="rabbit-shortcut-label">启动键</span><div class="rs-shortcut-row"><button class="rs-shortcut" id="rabbit-activation-shortcut" type="button" aria-labelledby="rabbit-shortcut-label rabbit-shortcut-value" aria-describedby="rabbit-shortcut-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6"/></svg><span class="rs-shortcut-keys" id="rabbit-shortcut-value"></span></button><button class="rs-shortcut-reset" id="rabbit-shortcut-reset" type="button" aria-label="恢复默认启动键" title="恢复默认启动键"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6"/></svg></button></div><p class="rs-hint" id="rabbit-shortcut-hint" aria-live="polite">点击录制专用启动键；启用时会拦截所选按键。</p></div>
+        ${shortcutField('rabbit', '启动键')}
         <div class="rs-toggles">
           <label class="rs-toggle"><span class="rs-toggle-copy"><span>开机自启动</span><small id="rabbit-startup-note">桌面版可用</small></span><span class="rs-switch"><input id="rabbit-launch-at-login" type="checkbox" role="switch" aria-label="开机自启动" aria-describedby="rabbit-startup-note"><i aria-hidden="true"></i></span></label>
           <label class="rs-toggle"><span class="rs-toggle-copy"><span>全屏时暂停</span></span><span class="rs-switch"><input id="rabbit-pause-fullscreen" type="checkbox" role="switch" aria-label="全屏时暂停" checked><i aria-hidden="true"></i></span></label>
@@ -264,8 +266,9 @@
         </section>
         <section class="rs-tab-panel" id="rabbit-page-plugins" role="tabpanel" aria-labelledby="rabbit-tab-plugins" aria-hidden="true" inert>
           <label class="rs-toggle"><span class="rs-toggle-copy"><span>大爆炸</span><small>把屏幕内容展开为知识图谱。</small></span><span class="rs-switch"><input id="rabbit-graph-plugin" type="checkbox" role="switch" aria-label="启用大爆炸插件"><i aria-hidden="true"></i></span></label>
+          ${shortcutField('rabbit-graph', '大爆炸启动键')}
           <div class="rs-plugin-actions" role="group" aria-label="大爆炸操作">${graphActions.map(({ action, label, icon }) => `<button class="rs-plugin-action" type="button" data-graph-action="${action}" aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg></button>`).join('')}</div>
-          <p class="rs-hint">在功能栏开启大爆炸即进入图谱，之后可用启动键进入或退出。关闭插件会保留已有工作区。</p>
+          <p class="rs-hint">关闭插件会保留已有工作区。</p>
         </section>
         </div>
       </form>
@@ -280,18 +283,22 @@
   const builtinFont = $('#rabbit-use-builtin-font');
   const graphPlugin = $('#rabbit-graph-plugin');
   const graphButtons = [...root.querySelectorAll('.rs-plugin-action')];
-  const shortcutButton = $('#rabbit-activation-shortcut'), shortcutKeys = $('.rs-shortcut-keys'), shortcutHint = $('#rabbit-shortcut-hint');
+  const shortcutControls = [
+    { field: 'activationShortcut', prefix: 'rabbit', hint: '点击录制专用启动键；启用时会拦截所选按键。' },
+    { field: 'graphActivationShortcut', prefix: 'rabbit-graph', hint: '与兔球同键时优先启动大爆炸；设为不同按键可分别启动。' }
+  ].map(control => ({ ...control, button: $(`#${control.prefix}-activation-shortcut`), keys: $(`#${control.prefix}-shortcut-value`), hintElement: $(`#${control.prefix}-shortcut-hint`) }));
   const saveButton = $('.rs-save'), status = $('.rs-status');
   const promptKey = $('#rabbit-prompt-key'), promptEditor = $('#rabbit-prompt-editor'), promptHint = $('#rabbit-prompt-hint');
   promptKey.value = promptFields[0].key;
   const tabs = [...root.querySelectorAll('.rs-tab')], pages = [...root.querySelectorAll('.rs-tab-panel')];
   const tabNames = ['model', 'appearance', 'general', 'prompts', 'plugins'];
-  let activeTab = 0, openVersion = 0, recording = false, recordingReady = false, recordingVersion = 0, composing = false;
+  let activeTab = 0, openVersion = 0, recording = null, recordingReady = false, recordingVersion = 0, composing = false;
   const composingKey = event => composing || event.isComposing || event.keyCode === 229;
   const recordingKeys = new Set();
+  let recordingStop = null, recordingNeedsStop = false;
   let saved = { ...defaults, prompts: {} }, draft = { ...defaults, prompts: {} }, openState = false, saving = false, keyCleared = false, sessionApiKey = '', returnFocus = null, loadError = '';
   let petDrag = false, petOffset = null, petPosition = null, panelOffset = { x: 0, y: 0 };
-  const copySettings = value => ({ ...value, activationShortcut: [...value.activationShortcut], prompts: { ...value.prompts } });
+  const copySettings = value => ({ ...value, activationShortcut: [...value.activationShortcut], graphActivationShortcut: value.graphActivationShortcut?.slice() ?? null, prompts: { ...value.prompts } });
   function normalize(value = {}) {
     return {
       bodyColor: validHex(value.bodyColor) ? value.bodyColor.toUpperCase() : defaults.bodyColor,
@@ -306,7 +313,7 @@
       followMouse: typeof value.followMouse === 'boolean' ? value.followMouse : defaults.followMouse,
       autoCopyScreenshots: typeof value.autoCopyScreenshots === 'boolean' ? value.autoCopyScreenshots : defaults.autoCopyScreenshots,
       graphPluginEnabled: typeof value.graphPluginEnabled === 'boolean' ? value.graphPluginEnabled : defaults.graphPluginEnabled,
-      graphModeEnabled: value.graphPluginEnabled !== false && value.graphModeEnabled === true,
+      graphActivationShortcut: value.graphActivationShortcut == null ? null : shortcut.normalizeShortcut(value.graphActivationShortcut),
       activationShortcut: shortcut.normalizeShortcut(value.activationShortcut ?? defaults.activationShortcut),
       apiBaseUrl: typeof value.apiBaseUrl === 'string' ? value.apiBaseUrl : defaults.apiBaseUrl,
       model: typeof value.model === 'string' ? value.model : defaults.model,
@@ -394,29 +401,46 @@
     fillPrompt();
   }
   function renderShortcut() {
-    const codes = recording && recordingKeys.size ? [...recordingKeys] : draft.activationShortcut;
-    shortcutKeys.replaceChildren(...codes.map(code => {
-      const key = document.createElement('kbd'); key.textContent = shortcut.formatShortcut([code]); return key;
-    }));
-    shortcutButton.classList.toggle('is-recording', recording);
-    shortcutButton.setAttribute('aria-pressed', String(recording));
-    shortcutHint.textContent = recording ? (recordingReady ? '请按下启动键，松开完成 · Esc 取消' : '准备录制…') : '点击录制专用启动键；启用时会拦截所选按键。';
+    for (const control of shortcutControls) {
+      const active = recording === control, inherited = draft[control.field] === null;
+      const codes = active && recordingKeys.size ? [...recordingKeys] : draft[control.field] ?? draft.activationShortcut;
+      const keys = codes.map(code => {
+        const key = document.createElement('kbd'); key.textContent = shortcut.formatShortcut([code]); return key;
+      });
+      if (inherited && !active) {
+        const label = document.createElement('span'); label.textContent = '沿用兔球'; keys.unshift(label);
+      }
+      control.keys.replaceChildren(...keys);
+      control.button.classList.toggle('is-recording', active);
+      control.button.setAttribute('aria-pressed', String(active));
+      control.hintElement.textContent = active ? (recordingReady ? '请按下启动键，松开完成 · Esc 取消' : '准备录制…') : control.hint;
+    }
   }
   function stopRecording() {
-    if (!recording) return Promise.resolve(true);
-    recording = false; recordingReady = false; recordingVersion++; recordingKeys.clear();
-    renderShortcut(); emit('recording', { recording: false });
-    return bridge ? bridge.setShortcutRecording(false).then(() => true, () => { status.textContent = '未能结束录制，请重新打开设置。'; return false; }) : Promise.resolve(true);
+    if (recording) {
+      recording = null; recordingReady = false; recordingVersion++; recordingKeys.clear();
+      renderShortcut(); emit('recording', { recording: false });
+    }
+    if (recordingStop) return recordingStop;
+    if (!recordingNeedsStop) return Promise.resolve(true);
+    // 松键和保存共用结束回执；失败后保留草稿，下次保存可重试。
+    recordingStop = bridge.setShortcutRecording(false).then(() => { recordingNeedsStop = false; return true; }, () => {
+      status.textContent = '未能结束录制，请重试。'; return false;
+    }).finally(() => { recordingStop = null; });
+    return recordingStop;
   }
-  async function startRecording() {
+  async function startRecording(control) {
     if (recording) { stopRecording(); return; }
-    if (!openState || saving) return;
-    const version = ++recordingVersion;
-    recording = true; recordingReady = !bridge; recordingKeys.clear(); renderShortcut();
+    if (!openState || saving || composing) return;
+    const version = ++recordingVersion, pendingStop = recordingStop;
+    recording = control; recordingReady = !bridge; recordingKeys.clear(); renderShortcut();
     status.textContent = '';
-    emit('recording', { recording: true }); shortcutButton.focus({ preventScroll: true });
+    emit('recording', { recording: true }); control.button.focus({ preventScroll: true });
     if (!bridge) return;
     try {
+      if (pendingStop) await pendingStop;
+      if (!recording || version !== recordingVersion) return;
+      recordingNeedsStop = true;
       await bridge.setShortcutRecording(true);
       if (recording && version === recordingVersion) { recordingReady = true; renderShortcut(); }
     } catch {
@@ -443,7 +467,7 @@
     for (const button of graphButtons) button.disabled = saving || !saved.graphPluginEnabled || !draft.graphPluginEnabled;
   }
   function preview() {
-    draft = { ...draft, model: model.value, reasoning: reasoning.value, maxToolRounds: Number(toolRounds.value), historyLimit: historyLimit.value.trim() ? Number(historyLimit.value) : Number.NaN, petSize: Number(size.value), bodyColor: bodyInput.value.toUpperCase(), eyeColor: eyeInput.value.toUpperCase(), useBuiltinFont: builtinFont.checked, launchAtLogin: !!bridge && startup.checked, pauseOnFullscreen: fullscreen.checked, followMouse: follow.checked, autoCopyScreenshots: autoCopy.checked, graphPluginEnabled: graphPlugin.checked, graphModeEnabled: graphPlugin.checked && draft.graphModeEnabled };
+    draft = { ...draft, model: model.value, reasoning: reasoning.value, maxToolRounds: Number(toolRounds.value), historyLimit: historyLimit.value.trim() ? Number(historyLimit.value) : Number.NaN, petSize: Number(size.value), bodyColor: bodyInput.value.toUpperCase(), eyeColor: eyeInput.value.toUpperCase(), useBuiltinFont: builtinFont.checked, launchAtLogin: !!bridge && startup.checked, pauseOnFullscreen: fullscreen.checked, followMouse: follow.checked, autoCopyScreenshots: autoCopy.checked, graphPluginEnabled: graphPlugin.checked };
     syncOutputs(); syncGraphActions(); applySettings(draft); layout();
   }
   const ready = (async () => {
@@ -493,10 +517,10 @@
     }
     preview(); saving = true; syncGraphActions(); saveButton.disabled = true; saveButton.textContent = '保存中'; status.textContent = '';
     try {
-      if (!await recordingFinished) throw new Error('未能结束录制，请重新打开设置。');
+      if (!await recordingFinished) throw new Error('未能结束录制，请重试。');
       if (!Number.isSafeInteger(draft.maxToolRounds) || draft.maxToolRounds < 1) throw new Error('工具调用轮数上限应为正整数。');
       if (!Number.isSafeInteger(draft.historyLimit) || draft.historyLimit < 0) throw new Error('历史记录保留条数应为非负整数。');
-      const patch = { bodyColor: draft.bodyColor, eyeColor: draft.eyeColor, useBuiltinFont: draft.useBuiltinFont, petSize: draft.petSize, model: draft.model, reasoning: draft.reasoning, maxToolRounds: draft.maxToolRounds, historyLimit: draft.historyLimit, launchAtLogin: draft.launchAtLogin, pauseOnFullscreen: draft.pauseOnFullscreen, followMouse: draft.followMouse, autoCopyScreenshots: draft.autoCopyScreenshots, graphPluginEnabled: draft.graphPluginEnabled, graphModeEnabled: draft.graphModeEnabled, activationShortcut: [...draft.activationShortcut], prompts: { ...draft.prompts } };
+      const patch = { bodyColor: draft.bodyColor, eyeColor: draft.eyeColor, useBuiltinFont: draft.useBuiltinFont, petSize: draft.petSize, model: draft.model, reasoning: draft.reasoning, maxToolRounds: draft.maxToolRounds, historyLimit: draft.historyLimit, launchAtLogin: draft.launchAtLogin, pauseOnFullscreen: draft.pauseOnFullscreen, followMouse: draft.followMouse, autoCopyScreenshots: draft.autoCopyScreenshots, graphPluginEnabled: draft.graphPluginEnabled, graphActivationShortcut: draft.graphActivationShortcut?.slice() ?? null, activationShortcut: [...draft.activationShortcut], prompts: { ...draft.prompts } };
       const enteredKey = keyInput.value.trim();
       if (enteredKey) patch.apiKey = enteredKey;
       else if (keyCleared) patch.apiKey = '';
@@ -517,10 +541,15 @@
   }
   root.querySelector('form').addEventListener('submit', save);
   $('.rs-close').addEventListener('click', () => close());
-  shortcutButton.addEventListener('click', startRecording);
-  $('#rabbit-shortcut-reset').addEventListener('click', () => { stopRecording(); draft = { ...draft, activationShortcut: [...shortcut.DEFAULT_ACTIVATION_SHORTCUT] }; renderShortcut(); });
+  for (const control of shortcutControls) {
+    control.button.addEventListener('click', () => startRecording(control));
+    control.button.addEventListener('blur', () => { if (recording === control) stopRecording(); });
+    $(`#${control.prefix}-shortcut-reset`).addEventListener('click', () => {
+      stopRecording(); draft = { ...draft, [control.field]: control.field === 'activationShortcut' ? [...shortcut.DEFAULT_ACTIVATION_SHORTCUT] : null }; renderShortcut();
+    });
+  }
   for (const type of ['keydown', 'keyup']) document.addEventListener(type, event => {
-    if (!recording) return;
+    if (!recording || composingKey(event)) return;
     event.preventDefault(); event.stopImmediatePropagation();
     if (event.key === 'Escape') { stopRecording(); return; }
     if (!recordingReady || event.repeat) return;
@@ -533,11 +562,10 @@
       if (!shortcut.isSupportedShortcutCode(event.code)) { stopRecording(); status.textContent = '这个按键无法用作启动键，请重新输入。'; return; }
       recordingKeys.add(event.code); renderShortcut();
     } else if (recordingKeys.has(event.code)) {
-      try { draft = { ...draft, activationShortcut: shortcut.normalizeShortcut([...recordingKeys]) }; stopRecording(); }
+      try { draft = { ...draft, [recording.field]: shortcut.normalizeShortcut([...recordingKeys]) }; stopRecording(); }
       catch (error) { stopRecording(); status.textContent = error.message; }
     }
   }, true);
-  shortcutButton.addEventListener('blur', stopRecording);
   window.addEventListener('blur', () => { composing = false; stopRecording(); });
   window.addEventListener('pagehide', stopRecording);
   keyInput.addEventListener('input', () => {
@@ -589,27 +617,14 @@
   });
   panel.addEventListener('transitionend', event => { if (event.propertyName === 'transform') layout(); });
   const observer = new ResizeObserver(layout); observer.observe(scene); observer.observe(panel);
+  root.querySelector('.rs-usage').addEventListener('click',()=>window.RabbitUsage?.open());
   const header = document.querySelector('.header-actions');
   if (!bridge && header) {
     const button = document.createElement('button'); button.className = 'settings-launch'; button.type = 'button'; button.setAttribute('aria-label', '设置'); button.title = '设置';
     button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-1 3-3 1v4l-2 1 2 2v4l3 1 1 2h6l1-2 3-1v-4l2-2-2-1V7l-3-1-1-3H9Z"/><circle cx="12" cy="12" r="3"/></svg>';
     button.addEventListener('click', () => openState ? close() : open()); header.appendChild(button);
   }
-  async function setGraphMode(enabled) {
-    await ready;
-    if (enabled && !saved.graphPluginEnabled) throw new Error('请先在设置中启用大爆炸插件。');
-    const patch = { graphModeEnabled: enabled };
-    if (bridge) saved = normalize(await bridge.saveSettings(patch));
-    else {
-      const next = normalize({ ...saved, ...patch });
-      const { hasApiKey, ...publicConfig } = next;
-      localStorage.setItem(storeKey, JSON.stringify(publicConfig)); saved = next;
-    }
-    draft = { ...draft, graphModeEnabled: saved.graphModeEnabled };
-    applySettings(saved); emit('saved', { settings: copySettings(saved) });
-    return copySettings(saved);
-  }
-  window.RabbitSettings = Object.freeze({ open, close: () => close(), toggle: () => openState ? close() : open(), beginPetDrag, movePetDrag, endPetDrag, setGraphMode,
+  window.RabbitSettings = Object.freeze({ open, close: () => close(), toggle: () => openState ? close() : open(), beginPetDrag, movePetDrag, endPetDrag,
     applySettings: value => { saved = normalize(value); if (!openState) draft = copySettings(saved); promptStore.commit(saved.prompts); return applySettings(saved); }, ready,
-    getSnapshot: () => ({ open: openState, saving, recording, tab: tabNames[activeTab], settings: copySettings(saved), draft: copySettings(draft), palette: { ...palette, sphere: [...palette.sphere] } }) });
+    getSnapshot: () => ({ open: openState, saving, recording: !!recording, tab: tabNames[activeTab], settings: copySettings(saved), draft: copySettings(draft), palette: { ...palette, sphere: [...palette.sphere] } }) });
 })();

@@ -186,20 +186,37 @@ namespace RabbitBall {
             }
         }
 
-        public static CaptureResult CaptureDesktop(int x, int y, int width, int height) {
+        public static CaptureResult CaptureDesktop(int x, int y, int width, int height, int maxWidth = 0) {
             if (width <= 0 || height <= 0) throw new ArgumentException("显示器截图范围无效。");
-            // 整个虚拟桌面保留物理像素；直接传输 BGRA，避免 PNG 编解码往返。
-            using (Bitmap image = new Bitmap(width, height, PixelFormat.Format32bppArgb)) {
+            // 屏幕不透明；忽略 GDI 未定义的 alpha，避免缩放时混入透明像素。
+            using (Bitmap image = new Bitmap(width, height, PixelFormat.Format32bppRgb)) {
                 using (Graphics graphics = Graphics.FromImage(image)) {
                     graphics.CopyFromScreen(x, y, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
                 }
-                BitmapData data = image.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                return ReadDesktopPixels(image, maxWidth);
+            }
+        }
+
+        internal static CaptureResult ReadDesktopPixels(Bitmap source, int maxWidth = 0) {
+            // 仅装饰背景限宽；真实截图默认保留物理像素，统一传输不透明 BGRA。
+            using (Bitmap resized = maxWidth > 0 && source.Width > maxWidth ?
+                new Bitmap(maxWidth, Math.Max(1, (int)Math.Round((double)source.Height * maxWidth / source.Width)), PixelFormat.Format32bppRgb) : null) {
+                Bitmap image = resized ?? source;
+                if (resized != null) {
+                    using (Graphics graphics = Graphics.FromImage(resized)) using (ImageAttributes attributes = new ImageAttributes()) {
+                        graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        attributes.SetWrapMode(WrapMode.TileFlipXY);
+                        graphics.DrawImage(source, new Rectangle(0, 0, image.Width, image.Height),
+                            0, 0, source.Width, source.Height, GraphicsUnit.Pixel, attributes);
+                    }
+                }
+                BitmapData data = image.LockBits(new Rectangle(0, 0, image.Width, image.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
                 try {
-                    byte[] pixels = new byte[checked(width * height * 4)];
+                    byte[] pixels = new byte[checked(image.Width * image.Height * 4)];
                     Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
                     // 屏幕像素不带透明度；确保 NativeImage 与无损预览使用不透明 BGRA。
                     for (int offset = 3; offset < pixels.Length; offset += 4) pixels[offset] = 255;
-                    return new CaptureResult { ImageWidth = width, ImageHeight = height, ImageBitmap = pixels };
+                    return new CaptureResult { ImageWidth = image.Width, ImageHeight = image.Height, ImageBitmap = pixels };
                 } finally { image.UnlockBits(data); }
             }
         }
@@ -208,7 +225,7 @@ namespace RabbitBall {
 '@
 
     function Invoke-Capture {
-        param([switch]$Window, [switch]$Desktop, [int]$DesktopX, [int]$DesktopY, [int]$DesktopWidth, [int]$DesktopHeight)
+        param([switch]$Window, [switch]$Desktop, [int]$DesktopX, [int]$DesktopY, [int]$DesktopWidth, [int]$DesktopHeight, [int]$DesktopMaxWidth = 0)
         # 让窗口边界与鼠标位置都使用屏幕物理像素，避免高 DPI 下坐标被虚拟化。
         $previousDpiContext = [RabbitBall.ForegroundWindowNative]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
         if ($previousDpiContext -eq [IntPtr]::Zero) {
@@ -280,7 +297,7 @@ namespace RabbitBall {
         if ($Desktop) {
             try {
                 # 背景与窗口截图独立，任何一项失败都不替代另一项。
-                $desktopResult = [RabbitBall.ForegroundWindowNative]::CaptureDesktop($DesktopX, $DesktopY, $DesktopWidth, $DesktopHeight)
+                $desktopResult = [RabbitBall.ForegroundWindowNative]::CaptureDesktop($DesktopX, $DesktopY, $DesktopWidth, $DesktopHeight, $DesktopMaxWidth)
                 $result.desktopBitmap = $desktopResult.ImageBitmap
                 $result.desktopWidth = $desktopResult.ImageWidth
                 $result.desktopHeight = $desktopResult.ImageHeight
@@ -308,7 +325,7 @@ namespace RabbitBall {
         $request = $line | ConvertFrom-Json
         try {
             if ($request.type -eq 'desktop') {
-                $result = Invoke-Capture -Desktop -DesktopX $request.bounds.x -DesktopY $request.bounds.y -DesktopWidth $request.bounds.width -DesktopHeight $request.bounds.height
+                $result = Invoke-Capture -Desktop -DesktopX $request.bounds.x -DesktopY $request.bounds.y -DesktopWidth $request.bounds.width -DesktopHeight $request.bounds.height -DesktopMaxWidth $request.maxWidth
             } elseif ($request.type -eq 'window') {
                 if ($null -ne $request.backgroundBounds) {
                     $result = Invoke-Capture -Window -Desktop -DesktopX $request.backgroundBounds.x -DesktopY $request.backgroundBounds.y -DesktopWidth $request.backgroundBounds.width -DesktopHeight $request.backgroundBounds.height

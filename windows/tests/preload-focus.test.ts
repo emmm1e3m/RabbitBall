@@ -21,8 +21,10 @@ test('焦点和关闭 IPC 保留调用方持有的激活轮次', async () => {
       async invoke(channel: string, value: unknown) { calls.push({ channel, value }); return false; },
     },
     process: { platform: 'win32' },
+    location: { search: '?view=graph' }, URLSearchParams,
   });
   assert.ok(bridge);
+  assert.equal(bridge.surface, 'graph');
   bridge.onActivate(() => {});
   events.emit('rabbit:activate', {}, { activationId: 1, view: 'prompt' });
   await bridge.focusInput(1);

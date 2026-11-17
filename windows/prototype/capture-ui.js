@@ -3,7 +3,8 @@
   if(window.RabbitCapture)return;
   const shortcut=window.RabbitShortcut;
   let activationShortcut=shortcut.normalizeShortcut(window.RabbitSettings?.getSnapshot().settings.activationShortcut??shortcut.DEFAULT_ACTIVATION_SHORTCUT);
-  const shortcutLabel=()=>shortcut.formatShortcut(activationShortcut);
+  let graphActivationShortcut=null;
+  const shortcutLabel=()=>shortcut.formatShortcut(session?.shortcut??activationShortcut);
   const style=document.createElement('style');
   style.textContent=`
     #rabbit-capture-root { position:fixed;inset:0;z-index:10000;display:none;overflow:hidden;cursor:crosshair;touch-action:none;user-select:none;--capture-accent:var(--rb-accent,var(--rabbit-accent,#de88ad));--capture-ink:var(--rb-text,var(--rabbit-ink,#765366));--capture-veil:color-mix(in srgb,var(--capture-ink) 12%,transparent); }
@@ -12,7 +13,8 @@
     #rabbit-capture-root .capture-shade { position:absolute;inset:0;z-index:1;background:var(--capture-veil);pointer-events:none; }
     #rabbit-capture-root.is-selecting .capture-shade { display:none; }
     #rabbit-capture-root .capture-status { position:absolute;z-index:3;left:50%;top:18px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;max-width:calc(100% - 24px);padding:9px 15px 9px 9px;border:1px solid #fff;border-radius:21px;background:#fff;color:var(--capture-ink);font:14px/1.5 var(--rabbit-font);box-shadow:0 0 0 1px var(--rb-line,#f0e4ea),0 6px 24px #3025300b;pointer-events:none; }
-    #rabbit-capture-root .capture-status > svg { flex:none;box-sizing:content-box;width:18px;height:18px;padding:8px;border-radius:12px;background:var(--rb-soft,#fbf0f5);fill:none;stroke:var(--capture-accent);stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round; }
+    #rabbit-capture-root .capture-status > svg { flex:none;box-sizing:content-box;width:18px;height:18px;padding:8px;border-radius:12px;background:var(--rb-soft,#fbf0f5);fill:none;stroke:var(--capture-accent);stroke-width:1.5px;stroke-linecap:round;stroke-linejoin:round; }
+    #rabbit-capture-root .capture-status > svg > * { vector-effect:non-scaling-stroke; }
     #rabbit-capture-root .capture-status-title { white-space:nowrap;font-weight:500; }
     #rabbit-capture-root .capture-status-detail { margin-top:2px;color:var(--rb-text-muted,var(--rabbit-muted,#b59cab));font-size:12px; }
     #rabbit-capture-root .capture-status-count { color:var(--capture-accent);font-variant-numeric:tabular-nums; }
@@ -35,7 +37,6 @@
   let session=null,lastPoint=null,paintFrame=0;
   const emit=(name,detail)=>document.dispatchEvent(new CustomEvent('selection:'+name,{detail}));
   const facade=()=>window.RabbitAssistant;
-  const graphMode=()=>{const settings=window.RabbitSettings?.getSnapshot().settings;return !window.rabbitDesktop&&settings?.graphPluginEnabled!==false&&settings?.graphModeEnabled===true;};
   const clamp=(value,max)=>Math.max(0,Math.min(max,value));
   function point(x,y){return{x:clamp(x,innerWidth),y:clamp(y,innerHeight)};}
   function rectangle(drag){return{x:Math.min(drag.start.x,drag.end.x),y:Math.min(drag.start.y,drag.end.y),width:Math.abs(drag.end.x-drag.start.x),height:Math.abs(drag.end.y-drag.start.y)};}
@@ -77,15 +78,14 @@
     previous.touches.clear();
     root.classList.remove('is-active','is-selecting');background.removeAttribute('src');bitmap.width=bitmap.height=0;box.style.display='none';
     root.querySelectorAll('.capture-confirm').forEach(element=>{element.getAnimations().forEach(animation=>animation.cancel());element.remove();});
-    if(previous.visible)emit('close',{sessionId:previous.id,cancelled});
+    if(previous.visible)emit('close',{sessionId:previous.id,purpose:previous.purpose,cancelled});
     if(cancelled)previous.resolveCapture?.(null);
   }
   function show(data,native,visible=true){
     if(session)hide(true);
-    if(data.shortcut)activationShortcut=shortcut.normalizeShortcut(data.shortcut);
     if(data.color)root.style.setProperty('--capture-accent',data.color);
     if(typeof data.useBuiltinFont==='boolean')document.documentElement.dataset.builtinFont=String(data.useBuiltinFont);
-    const current={id:data.sessionId,native,visible,purpose:data.purpose,graph:data.purpose==='graph'||!native&&graphMode(),backgroundImageDataUrl:data.backgroundImageDataUrl,context:data.context,drag:null,frame:null,pointerId:null,touches:new Set(),pending:Promise.resolve(),finishing:false,failed:false,count:data.purpose==='images'?0:data.context?.images?.length??0};
+    const current={id:data.sessionId,native,visible,purpose:data.purpose,graph:data.purpose==='graph',shortcut:shortcut.normalizeShortcut(data.shortcut??activationShortcut),backgroundImageDataUrl:data.backgroundImageDataUrl,context:data.context,drag:null,frame:null,pointerId:null,touches:new Set(),pending:Promise.resolve(),finishing:false,failed:false,count:data.purpose==='images'?0:data.context?.images?.length??0};
     session=current;background.hidden=!!data.backgroundBitmap;bitmap.hidden=!data.backgroundBitmap;root.dataset.demo=String(!!data.context?.demo);
     if(data.backgroundBitmap){
       const {data:pixels,width,height}=data.backgroundBitmap;
@@ -96,7 +96,7 @@
     }else background.src=data.backgroundImageDataUrl;
     if(visible){
       root.classList.add('is-active');updateStatus();announcement.textContent=current.purpose==='images'?'拖动选择截图，松开鼠标完成，Esc 取消。':'截图模式已开启，按住 '+shortcutLabel()+' 拖动选择，'+completionLabel()+'。';
-      emit('open',{sessionId:current.id,context:data.context,demo:!native});
+      emit('open',{sessionId:current.id,purpose:current.purpose,context:data.context,demo:!native});
     }
     if(data.dragStart){const start=point(data.dragStart.x,data.dragStart.y);current.drag={start,end:lastPoint||start};schedulePaint();}
     return current;
@@ -118,9 +118,9 @@
     const rect=rectangle(current.drag);current.drag=null;releasePointer(current);renderBox();
     if(!current.native)queueRegion(current,rect);
   }
-  function startDemo(visible=true){
+  function startDemo(visible=true,target='prompt',keys=activationShortcut){
     if(session)return;
-    try{show(facade().demoCaptureStart(),false,visible);}
+    try{show({...facade().demoCaptureStart(),purpose:target,shortcut:keys},false,visible);}
     catch(error){emit('error',{message:error.message});}
   }
   function captureImages(){
@@ -156,14 +156,12 @@
         }
         if(target.nodes.length){
           facade().demoCaptureCancel();hide(false);
-          window.RabbitChat?.close?.();window.RabbitSettings?.close?.();
           await window.RabbitGraph.open({activationId:Date.now(),view:'graph',workspaceId:workspace.id,backgroundImageDataUrl:current.backgroundImageDataUrl});return;
         }
       }
       const context=await facade().demoCaptureEnd();if(session!==current)return;
       hide(false);
       if(current.graph){
-        window.RabbitChat?.close?.();window.RabbitSettings?.close?.();
         await window.RabbitGraphDemo.graphCaptureContext({workspaceId:workspace.id,graphId:target.id},context,current.backgroundImageDataUrl);
       }
       else await window.RabbitChat.activate(context);
@@ -232,38 +230,43 @@
     event.preventDefault();event.stopImmediatePropagation();cancel();
   },true);
   if(!window.rabbitDesktop){
-    let held=false,blocked=false,recording=false,holdTimer=0,previousGraphMode=graphMode();
+    let held=null,blocked=false,recording=false,holdTimer=0;
     const pressed=new Set();
     const clearHold=()=>{clearTimeout(holdTimer);holdTimer=0;};
-    const cancelPress=()=>{blocked=true;held=false;clearHold();cancel();};
-    const resetPress=()=>{pressed.clear();held=false;blocked=false;clearHold();cancel();};
+    const cancelPress=()=>{blocked=true;held=null;clearHold();cancel();};
+    const resetPress=()=>{pressed.clear();held=null;blocked=false;clearHold();cancel();};
+    const member=code=>activationShortcut.includes(code)||graphActivationShortcut?.includes(code)||held?.keys.includes(code)||pressed.has(code);
+    const route=()=>{
+      const graph=graphActivationShortcut&&shortcut.matchesShortcut(graphActivationShortcut,pressed),body=shortcut.matchesShortcut(activationShortcut,pressed);
+      if(graph&&(!body||graphActivationShortcut.length>=activationShortcut.length))return{target:'graph',keys:[...graphActivationShortcut],closeChat:false};
+      if(body){const chat=window.RabbitChat?.getSnapshot();return{target:'prompt',keys:[...activationShortcut],closeChat:!!(chat?.open||chat?.opening)&&!chat?.graph};}
+      return null;
+    };
+    const arm=next=>{held=next;clearHold();holdTimer=setTimeout(()=>{holdTimer=0;if(held===next&&!blocked&&!next.closeChat)startDemo(true,next.target,next.keys);},500);};
     document.addEventListener('settings:recording',event=>{recording=event.detail.recording;resetPress();});
     document.addEventListener('settings:open',resetPress);
-    document.addEventListener('settings:saved',()=>{
-      const enabled=graphMode(),activate=enabled&&!previousGraphMode;previousGraphMode=enabled;resetPress();
-      if(activate){startDemo(false);finishDemo();}
-    });
     document.addEventListener('keydown',event=>{
       if(session?.purpose==='images')return;
       if(recording||window.RabbitSettings?.getSnapshot().open)return;
       if(event.key==='Escape'&&(held||session)){cancelPress();event.preventDefault();event.stopImmediatePropagation();return;}
-      if(!activationShortcut.includes(event.code))return;
-      event.preventDefault();event.stopImmediatePropagation();
-      pressed.add(event.code);
-      if(event.repeat||held||blocked||!shortcut.matchesShortcut(activationShortcut,pressed))return;
-      if(window.RabbitGraph?.isOpen()){blocked=true;window.RabbitGraph.close();return;}
-      const chat=window.RabbitChat?.getSnapshot();
-      if(chat?.open||chat?.opening){blocked=true;window.RabbitChat.close();return;}
-      held=true;
-      holdTimer=setTimeout(()=>{holdTimer=0;if(held&&!blocked)startDemo();},500);
+      if(!member(event.code))return;
+      event.preventDefault();event.stopImmediatePropagation();pressed.add(event.code);
+      if(event.repeat||blocked)return;
+      const next=route();if(!next)return;
+      // 截图开始后固定目标；开始前允许 Alt + G 这种完整组合覆盖其 Alt 前缀。
+      if(held){if(!session&&next.keys.length>held.keys.length&&held.keys.every(code=>next.keys.includes(code)))arm(next);return;}
+      arm(next);
     },true);
     document.addEventListener('keyup',event=>{
       if(session?.purpose==='images')return;
-      if(recording||window.RabbitSettings?.getSnapshot().open||!activationShortcut.includes(event.code))return;
-      event.preventDefault();event.stopImmediatePropagation();
-      pressed.delete(event.code);
-      if(held){
-        held=false;blocked=true;clearHold();if(!session)startDemo(false);finishDemo();
+      if(recording||window.RabbitSettings?.getSnapshot().open||!member(event.code))return;
+      event.preventDefault();event.stopImmediatePropagation();pressed.delete(event.code);
+      if(held?.keys.includes(event.code)){
+        const current=held;held=null;blocked=true;clearHold();
+        if(session)finishDemo();
+        else if(current.target==='graph'&&window.RabbitGraph?.isOpen())window.RabbitGraph.close();
+        else if(current.closeChat)window.RabbitChat?.close();
+        else{startDemo(false,current.target,current.keys);finishDemo();}
       }
       if(!pressed.size)blocked=false;
     },true);
@@ -271,7 +274,9 @@
     window.addEventListener('pagehide',resetPress);
   }
   function refreshShortcut(){
-    activationShortcut=shortcut.normalizeShortcut(window.RabbitSettings?.getSnapshot().settings.activationShortcut??shortcut.DEFAULT_ACTIVATION_SHORTCUT);
+    const settings=window.RabbitSettings?.getSnapshot().settings;
+    activationShortcut=shortcut.normalizeShortcut(settings?.activationShortcut??shortcut.DEFAULT_ACTIVATION_SHORTCUT);
+    graphActivationShortcut=settings?.graphPluginEnabled===true?shortcut.normalizeShortcut(settings.graphActivationShortcut??activationShortcut):null;
     const button=document.getElementById('autoplay'),label=button?.querySelector('span');
     if(label)label.textContent=shortcutLabel()+' 提问';
     if(button)button.setAttribute('aria-label','启动提问（'+shortcutLabel()+'）');

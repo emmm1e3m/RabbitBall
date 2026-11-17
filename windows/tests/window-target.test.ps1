@@ -1,4 +1,4 @@
-﻿param([switch]$FramebufferOnly)
+﻿param([switch]$FramebufferOnly, [switch]$ValidateOnly)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -14,6 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -78,6 +79,35 @@ public static class WindowTargetTest {
         for (int index = windows.Count - 1; index >= 0; index--) DestroyWindow(windows[index]);
         windows.Clear();
     }
+    static void AssertDesktopPixels(ForegroundWindowNative.CaptureResult capture, int width, int height, string label) {
+        Assert(capture.ImageWidth == width && capture.ImageHeight == height && capture.ImageBitmap.Length == width * height * 4,
+            label + "：实际尺寸与 BGRA 长度应匹配");
+        bool opaque = true;
+        for (int offset = 3; offset < capture.ImageBitmap.Length; offset += 4) {
+            if (capture.ImageBitmap[offset] != 255) { opaque = false; break; }
+        }
+        Assert(opaque, label + "：所有像素应保持不透明");
+        int center = ((height / 2) * width + width / 2) * 4;
+        Assert(capture.ImageBitmap[center] == 200 && capture.ImageBitmap[center + 1] == 120 && capture.ImageBitmap[center + 2] == 40,
+            label + "：缩放不能因 GDI alpha 改变画面颜色");
+    }
+    public static void TestDesktopOutput() {
+        // 只验证实际像素转换函数，不读取屏幕、不创建原生窗口。
+        using (Bitmap source = new Bitmap(3200, 1002, PixelFormat.Format32bppRgb)) {
+            using (Graphics graphics = Graphics.FromImage(source)) graphics.Clear(Color.FromArgb(40, 120, 200));
+            AssertDesktopPixels(ForegroundWindowNative.ReadDesktopPixels(source), 3200, 1002, "默认保留原分辨率");
+            AssertDesktopPixels(ForegroundWindowNative.ReadDesktopPixels(source, 1600), 1600, 501, "背景限宽 1600 并保持宽高比");
+        }
+        using (Bitmap source = new Bitmap(8, 6, PixelFormat.Format32bppRgb)) {
+            using (Graphics graphics = Graphics.FromImage(source)) graphics.Clear(Color.FromArgb(40, 120, 200));
+            AssertDesktopPixels(ForegroundWindowNative.ReadDesktopPixels(source, 1600), 8, 6, "窄图不放大");
+        }
+        using (Bitmap source = new Bitmap(3200, 1, PixelFormat.Format32bppRgb)) {
+            using (Graphics graphics = Graphics.FromImage(source)) graphics.Clear(Color.FromArgb(40, 120, 200));
+            AssertDesktopPixels(ForegroundWindowNative.ReadDesktopPixels(source, 1600), 1600, 1, "极扁背景至少保留一行");
+        }
+        Console.WriteLine("desktop output assertions passed: original resolution; maxWidth 1600; no upscale; aspect ratio; opaque BGRA");
+    }
     public static void TestFramebuffer() {
         const string name = "RabbitBallFramebufferFixture";
         int printRequests = 0;
@@ -125,6 +155,8 @@ public static class WindowTargetTest {
                     capture.ImageBitmap[offset] + "," + capture.ImageBitmap[offset + 1] + "," +
                     capture.ImageBitmap[offset + 2] + "," + capture.ImageBitmap[offset + 3]);
             }
+            AssertDesktopPixels(ForegroundWindowNative.CaptureDesktop(x + 16, y + 16, 8, 8, 4), 4, 4,
+                "桌面采集第五参数应缩放实际屏幕像素");
             Assert(printRequests == 0, "截图不能向目标发送 WM_PRINT 或 WM_PRINTCLIENT");
             Register(coverName, handler, coverBrush); coverRegistered = true;
             IntPtr cover = CreateWindowEx(0x08000080, coverName, coverName, 0x80000000,
@@ -279,5 +311,7 @@ public static class WindowTargetTest {
 }
 '@
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition ($taskClass.Groups[1].Value + "`n" + $taskFixtureSource)
+[RabbitBallWindowTests.WindowTargetTest]::TestDesktopOutput()
+if ($ValidateOnly) { return }
 if ($FramebufferOnly) { [RabbitBallWindowTests.WindowTargetTest]::TestFramebuffer() }
 else { [RabbitBallWindowTests.WindowTargetTest]::Run() }

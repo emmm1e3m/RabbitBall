@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_ACTIVATION_SHORTCUT, formatShortcut, isModifierCode, isSupportedShortcutCode, matchesShortcut, nativeShortcut, normalizeShortcut, shortcutToAccelerator } from '../electron/shortcut.ts';
+import { DEFAULT_ACTIVATION_SHORTCUT, effectiveShortcutBindings, formatShortcut, isModifierCode, isSupportedShortcutCode, matchesShortcut, nativeShortcut, normalizeShortcut, shortcutAcceleratorBindings, shortcutToAccelerator } from '../electron/shortcut.ts';
 
 test('默认触发键为左 Alt，规范化按固定修饰键顺序排列', () => {
   assert.deepEqual(DEFAULT_ACTIVATION_SHORTCUT, ['AltLeft']);
@@ -108,4 +108,65 @@ test('非 Windows 不可表达的仅修饰键、同类双侧及数字区组合�
     assert.equal(shortcutToAccelerator(['Numpad1'], platform), undefined);
     assert.equal(shortcutToAccelerator(['IntlBackslash'], platform), undefined);
   }
+});
+
+test('图谱默认跟随本体组合，同键时仍保留两组原生绑定', () => {
+  assert.deepEqual(effectiveShortcutBindings({ activationShortcut: DEFAULT_ACTIVATION_SHORTCUT, graphActivationShortcut: null, graphPluginEnabled: true }), {
+    prompt: ['AltLeft'], graph: ['AltLeft'],
+  });
+  assert.deepEqual(effectiveShortcutBindings({ activationShortcut: ['KeyK', 'AltRight'], graphActivationShortcut: null, graphPluginEnabled: true }), {
+    prompt: ['AltRight', 'KeyK'], graph: ['AltRight', 'KeyK'],
+  });
+});
+
+test('本体和图谱独立保留左右按键，关闭图谱后仅恢复本体绑定', () => {
+  const settings = { activationShortcut: ['KeyK', 'AltLeft'], graphActivationShortcut: ['KeyK', 'AltRight'], graphPluginEnabled: true };
+  assert.deepEqual(effectiveShortcutBindings(settings), { prompt: ['AltLeft', 'KeyK'], graph: ['AltRight', 'KeyK'] });
+  assert.deepEqual(effectiveShortcutBindings({ ...settings, graphPluginEnabled: false }), { prompt: ['AltLeft', 'KeyK'] });
+  assert.deepEqual(shortcutAcceleratorBindings(effectiveShortcutBindings({ ...settings, graphPluginEnabled: false }), 'linux'), [
+    { target: 'prompt', accelerator: 'Alt+K' },
+  ]);
+});
+
+test('有效组合返回独立数组且不修改冻结设置', () => {
+  const original = Object.freeze(['KeyK', 'ControlRight']);
+  const settings = Object.freeze({ activationShortcut: original, graphActivationShortcut: null, graphPluginEnabled: true });
+  const first = effectiveShortcutBindings(settings);
+  first.prompt[0] = 'AltLeft';
+  assert.deepEqual(first.graph, ['ControlRight', 'KeyK']);
+  first.graph!.push('ShiftLeft');
+  assert.deepEqual(effectiveShortcutBindings(settings), { prompt: ['ControlRight', 'KeyK'], graph: ['ControlRight', 'KeyK'] });
+  assert.deepEqual(original, ['KeyK', 'ControlRight']);
+});
+
+test('相同组合的 accelerator 仅注册图谱路由', () => {
+  for (const platform of ['darwin', 'linux']) {
+    assert.deepEqual(shortcutAcceleratorBindings({ prompt: ['KeyK', 'ControlLeft'], graph: ['ControlLeft', 'KeyK'] }, platform), [
+      { target: 'graph', accelerator: 'Control+K' },
+    ]);
+  }
+});
+
+test('非 Windows 左右修饰键折叠造成冲突时图谱优先', () => {
+  for (const platform of ['darwin', 'linux']) {
+    assert.deepEqual(shortcutAcceleratorBindings({ prompt: ['AltLeft', 'KeyK'], graph: ['AltRight', 'KeyK'] }, platform), [
+      { target: 'graph', accelerator: 'Alt+K' },
+    ]);
+  }
+});
+
+test('不同 accelerator 分别保留对应路由并按图谱优先排序', () => {
+  assert.deepEqual(shortcutAcceleratorBindings({ prompt: ['ControlLeft', 'KeyP'], graph: ['MetaRight', 'KeyG'] }, 'darwin'), [
+    { target: 'graph', accelerator: 'Command+G' }, { target: 'prompt', accelerator: 'Control+P' },
+  ]);
+});
+
+test('不可表达的组合独立略过，不影响另一组或制造备用快捷键', () => {
+  assert.deepEqual(shortcutAcceleratorBindings({ prompt: ['AltLeft'], graph: ['AltRight'] }, 'linux'), []);
+  assert.deepEqual(shortcutAcceleratorBindings({ prompt: ['ControlLeft', 'KeyP'], graph: ['ControlLeft', 'ControlRight', 'KeyG'] }, 'linux'), [
+    { target: 'prompt', accelerator: 'Control+P' },
+  ]);
+  assert.deepEqual(shortcutAcceleratorBindings({ prompt: ['Numpad1'], graph: ['KeyG'] }, 'linux'), [
+    { target: 'graph', accelerator: 'G' },
+  ]);
 });

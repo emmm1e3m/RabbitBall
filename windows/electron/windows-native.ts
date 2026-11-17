@@ -3,20 +3,20 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import type { NativeShortcutKey } from './shortcut.js';
+import type { ActivationTarget, NativeShortcutKey } from './shortcut.js';
 
 export interface NativeConfiguration {
   pauseOnFullscreen: boolean;
   inputEnabled: boolean;
   allowOwnForeground: boolean;
   recording: boolean;
-  shortcut: NativeShortcutKey[];
+  shortcuts: { prompt: NativeShortcutKey[]; graph?: NativeShortcutKey[] };
 }
 
 export interface WindowsNative {
   ready: Promise<void>;
   configure(configuration: NativeConfiguration): Promise<void>;
-  beginSelection(): Promise<number>;
+  beginSelection(target: ActivationTarget): Promise<number>;
   cancelCapture(captureId: number): void;
   prepareOverlayWindow(handle: string): Promise<boolean>;
   focusWindow(handle: string): Promise<boolean>;
@@ -25,10 +25,10 @@ export interface WindowsNative {
 }
 
 interface NativeCallbacks {
-  onTriggerBegin(captureId: number): void;
-  onTriggerHold(captureId: number): void;
-  onTriggerEnd(captureId: number): void;
-  onTriggerCancel(captureId: number): void;
+  onTriggerBegin(captureId: number, target: ActivationTarget): void;
+  onTriggerHold(captureId: number, target: ActivationTarget): void;
+  onTriggerEnd(captureId: number, target: ActivationTarget): void;
+  onTriggerCancel(captureId: number, target: ActivationTarget): void;
   onSelectionPointer(captureId: number, phase: 'down' | 'up', point: { x: number; y: number }): void;
   onPointerDown(point: { x: number; y: number }): void;
   onPointerUp(point: { x: number; y: number }): void;
@@ -93,14 +93,15 @@ export function createWindowsNative(callbacks: NativeCallbacks): WindowsNative {
       const line = buffer.slice(0, separator).trim(); buffer = buffer.slice(separator + 1);
       if (!line) continue;
       try {
-        const event = JSON.parse(line) as { type?: unknown; fullscreen?: unknown; phase?: unknown; x?: unknown; y?: unknown; captureId?: unknown; requestId?: unknown; focused?: unknown; prepared?: unknown };
+        const event = JSON.parse(line) as { type?: unknown; target?: unknown; fullscreen?: unknown; phase?: unknown; x?: unknown; y?: unknown; captureId?: unknown; requestId?: unknown; focused?: unknown; prepared?: unknown };
         const captureId = typeof event.captureId === 'number' && Number.isSafeInteger(event.captureId) && event.captureId > 0 ? event.captureId : undefined;
+        const target = event.target === 'prompt' || event.target === 'graph' ? event.target : undefined;
         if (event.type === 'ready' && !initialized) { initialized = true; clearTimeout(timer); finish(); }
         else if (event.type === 'fullscreen' && typeof event.fullscreen === 'boolean') callbacks.onFullscreen(event.fullscreen);
-        else if (event.type === 'trigger-begin' && captureId !== undefined) deliverInput(() => callbacks.onTriggerBegin(captureId));
-        else if (event.type === 'trigger-hold' && captureId !== undefined) deliverInput(() => callbacks.onTriggerHold(captureId));
-        else if (event.type === 'trigger-end' && captureId !== undefined) deliverInput(() => callbacks.onTriggerEnd(captureId), captureId);
-        else if (event.type === 'trigger-cancel' && captureId !== undefined) deliverInput(() => callbacks.onTriggerCancel(captureId), captureId);
+        else if (event.type === 'trigger-begin' && captureId !== undefined && target) deliverInput(() => callbacks.onTriggerBegin(captureId, target));
+        else if (event.type === 'trigger-hold' && captureId !== undefined && target) deliverInput(() => callbacks.onTriggerHold(captureId, target));
+        else if (event.type === 'trigger-end' && captureId !== undefined && target) deliverInput(() => callbacks.onTriggerEnd(captureId, target), captureId);
+        else if (event.type === 'trigger-cancel' && captureId !== undefined && target) deliverInput(() => callbacks.onTriggerCancel(captureId, target), captureId);
         else if (event.type === 'selection-pointer' && captureId !== undefined && (event.phase === 'down' || event.phase === 'up') && typeof event.x === 'number' && Number.isFinite(event.x) && typeof event.y === 'number' && Number.isFinite(event.y)) {
           const { phase, x, y } = event;
           deliverInput(() => callbacks.onSelectionPointer(captureId, phase, { x, y }));
@@ -152,13 +153,13 @@ export function createWindowsNative(callbacks: NativeCallbacks): WindowsNative {
         child.stdin.write(JSON.stringify({ type: 'configure', requestId: id, ...configuration }) + '\n');
       });
     },
-    beginSelection() {
+    beginSelection(target) {
       if (stopped) return Promise.reject(new Error('全局触发助手不可用。'));
       const id = randomUUID();
       return new Promise<number>((resolve, reject) => {
         const timer = setTimeout(failure, 7000); timer.unref();
         selections.set(id, { resolve, reject, timer });
-        child.stdin.write(JSON.stringify({ type: 'begin-selection', requestId: id }) + '\n');
+        child.stdin.write(JSON.stringify({ type: 'begin-selection', requestId: id, target }) + '\n');
       });
     },
     cancelCapture(captureId) { if (!stopped) child.stdin.write(JSON.stringify({ type: 'cancel-capture', captureId }) + '\n'); },

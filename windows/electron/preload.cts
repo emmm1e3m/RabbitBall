@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { Activation, AgentEvent, AgentRequest, CaptureEvent, CaptureImage, CursorPoint, GraphPinInteraction, GraphPinRegions, HistoryEntry, HistorySummary, PointerPoint, PublicSettings, RabbitDesktop, SettingsPatch } from './contracts.js';
+import type { Activation, AgentEvent, AgentRequest, Attachment, CaptureEvent, CaptureImage, CursorPoint, GraphPinInteraction, GraphPinRegions, HistoryEntry, HistorySummary, PointerPoint, PublicSettings, RabbitDesktop, SettingsPatch, UsageScope, UsageSummary } from './contracts.js';
 import type { GraphCaptureRequest, GraphGenerateRequest, GraphMutation, GraphNodeRequest, GraphWorkspace, GraphWorkspaceSummary } from './graph-contracts.js';
 
 function subscribe<T>(channel: string, listener: (value: T) => void): () => void {
@@ -12,9 +12,15 @@ let observedPanelOwner: number | undefined;
 
 const desktop: RabbitDesktop = {
   platform: process.platform,
+  surface: new URLSearchParams(location.search).get('view') === 'graph' ? 'graph' : 'pet',
+  parseDocument: async input => {
+    const result = await ipcRenderer.invoke('rabbit:parse-document', input) as { value: Omit<Attachment, 'id'>; error?: string };
+    if (result.error) throw new Error('解析失败：' + result.error);
+    return result.value;
+  },
   graphList: () => ipcRenderer.invoke('rabbit:graph-list') as Promise<GraphWorkspaceSummary[]>,
   graphOpen: (id?: string) => ipcRenderer.invoke('rabbit:graph-open', id) as Promise<GraphWorkspace>,
-  graphActivate: (action?: 'rename-graph' | 'undo' | 'redo') => ipcRenderer.invoke('rabbit:graph-activate', action) as Promise<void>,
+  graphActivate: action => ipcRenderer.invoke('rabbit:graph-activate', action) as Promise<void>,
   graphCreate: (name: string) => ipcRenderer.invoke('rabbit:graph-create', name) as Promise<GraphWorkspace>,
   graphMutate: (id: string, mutation: GraphMutation) => ipcRenderer.invoke('rabbit:graph-mutate', id, mutation) as Promise<GraphWorkspace>,
   graphRevealDocument: (id: string) => ipcRenderer.invoke('rabbit:graph-reveal-document', id) as Promise<void>,
@@ -24,7 +30,11 @@ const desktop: RabbitDesktop = {
   graphRegenerate: (request: GraphNodeRequest) => ipcRenderer.invoke('rabbit:graph-regenerate', request) as Promise<void>,
   graphCancel: (request: GraphNodeRequest) => ipcRenderer.send('rabbit:graph-cancel', request),
   onGraphChanged: (listener: (workspace: GraphWorkspace) => void) => subscribe('rabbit:graph-changed', listener),
+  onGraphVisibilityChanged: listener => subscribe('rabbit:graph-visibility', listener),
+  onGraphWorkspaceChanged: listener => subscribe('rabbit:graph-active-workspace', listener),
   onGraphError: (listener: (error: { workspaceId?: string; message: string }) => void) => subscribe('rabbit:graph-error', listener),
+  usageQuery: (scope?: UsageScope) => ipcRenderer.invoke('rabbit:usage-query', scope) as Promise<UsageSummary>,
+  onUsageChanged: (listener: (scope: UsageScope) => void) => subscribe('rabbit:usage-changed', listener),
   editText: (action: 'cut' | 'copy' | 'selectAll' | 'undo' | 'redo') => ipcRenderer.invoke('rabbit:edit-text', action) as Promise<void>,
   readClipboardForPaste: () => ipcRenderer.invoke('rabbit:read-clipboard-for-paste') as Promise<{ text?: string; imageDataUrl?: string }>,
   loadSettings: () => ipcRenderer.invoke('rabbit:load-settings') as Promise<PublicSettings>,

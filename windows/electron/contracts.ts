@@ -28,8 +28,9 @@ export interface SettingsFields {
   followMouse: boolean;
   autoCopyScreenshots: boolean;
   graphPluginEnabled: boolean;
-  graphModeEnabled: boolean;
   activationShortcut: string[];
+  // null 表示沿用兔球启动键。
+  graphActivationShortcut: string[] | null;
   prompts: PromptSettings;
 }
 
@@ -65,9 +66,12 @@ export interface CaptureContext {
 }
 
 export interface Attachment {
+  file?: string;
   id: string;
   name: string;
   mimeType: string;
+  format?: string;
+  language?: string;
   dataUrl?: string;
   text?: string;
 }
@@ -85,14 +89,46 @@ export interface AgentRequest {
   graphContext?: GraphNodeRequest;
 }
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
+  reasoningTokens?: number;
+}
+
+export type UsageScope =
+  | { kind: 'graph'; workspaceId: string; graphId: string }
+  | { kind: 'chat'; conversationId: string };
+
+export interface UsageReport {
+  scope: UsageScope;
+  model: string;
+  usage?: TokenUsage;
+}
+
+export interface UsageSummary {
+  requestCount: number;
+  reportedRequestCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheReportedRequestCount: number;
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
+  reasoningTokens?: number;
+}
+
 export interface AgentEvent {
   id: string;
-  type: 'start' | 'delta' | 'tool' | 'done' | 'error' | 'cancelled';
+  type: 'start' | 'delta' | 'tool' | 'usage' | 'done' | 'error' | 'cancelled';
   text?: string;
   name?: string;
   message?: string;
   sources?: Array<{ title: string; url: string }>;
   toolCounts?: Record<string, number>;
+  usage?: TokenUsage;
 }
 
 export interface HistorySummary {
@@ -121,6 +157,7 @@ export interface Activation {
   view: 'prompt' | 'settings' | 'graph';
   workspaceId?: string;
   graphAction?: 'rename-graph' | 'undo' | 'redo';
+  graphSelection?: { graphId: string; nodeId: string };
   backgroundImageDataUrl?: string;
   context?: CaptureContext;
   anchor?: { x: number; y: number };
@@ -160,6 +197,11 @@ export type CaptureEvent =
 
 export interface RabbitDesktop extends GraphDesktop {
   platform: NodeJS.Platform;
+  surface: 'pet' | 'graph';
+  onGraphVisibilityChanged(listener: (visible: boolean) => void): () => void;
+  usageQuery(scope?: UsageScope): Promise<UsageSummary>;
+  onUsageChanged(listener: (scope: UsageScope) => void): () => void;
+  parseDocument(input: { name: string; bytes: Uint8Array; workspaceId?: string }): Promise<Omit<Attachment, 'id'>>;
   editText(action: 'cut' | 'copy' | 'selectAll' | 'undo' | 'redo'): Promise<void>;
   readClipboardForPaste(): Promise<{ text?: string; imageDataUrl?: string }>;
   loadSettings(): Promise<PublicSettings>;

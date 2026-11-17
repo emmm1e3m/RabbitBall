@@ -15,7 +15,8 @@
     .rabbit-rich-text a.rabbit-source { display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;margin:0 2px;vertical-align:-5px;border-radius:6px;background:color-mix(in srgb,var(--rabbit-accent) 9%,white);text-decoration:none; }
     .rabbit-rich-text a.rabbit-source:hover { background:color-mix(in srgb,var(--rabbit-accent) 18%,white); }
     .rabbit-rich-text a.rabbit-source:focus-visible { outline:2px solid var(--rabbit-accent);outline-offset:2px; }
-    .rabbit-rich-text a.rabbit-source svg { width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round; }
+    .rabbit-rich-text a.rabbit-source svg { width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5px;stroke-linecap:round;stroke-linejoin:round; }
+    .rabbit-rich-text a.rabbit-source svg > * { vector-effect:non-scaling-stroke; }
     .rabbit-rich-text blockquote { margin:.6em 0;padding-left:.9em;border-left:2px solid color-mix(in srgb,var(--rabbit-accent) 24%,white);color:var(--rabbit-muted); }
     .rabbit-rich-text code { font-family:var(--rabbit-font);font-size:.92em; }
     .rabbit-rich-text :not(pre) > code { padding:.12em .3em;border-radius:4px;background:color-mix(in srgb,var(--rabbit-ink) 5%,white); }
@@ -144,12 +145,11 @@
       return;
     }
     element.style.whiteSpace = 'normal';
-    // KaTeX 和 Markdown 的最终输出一起清理，不在清理后拼接用户内容。
+    // URL 已由 Markdown 限定为 HTTP(S)；净化保留默认属性规则，避免把 SVG 路径和尺寸当作 URL 删除。
     element.innerHTML = window.DOMPurify.sanitize(parser().render(source), {
       USE_PROFILES: { html: true, mathMl: true, svg: true },
       FORBID_TAGS: ['img', 'image'],
-      ALLOW_UNKNOWN_PROTOCOLS: false,
-      ALLOWED_URI_REGEXP: /^https?:\/\//i
+      ALLOW_UNKNOWN_PROTOCOLS: false
     });
     for (const link of element.querySelectorAll('a[href]')) {
       const title = link.textContent.trim() || link.getAttribute('href');

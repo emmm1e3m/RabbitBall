@@ -33,6 +33,293 @@ async function addCard(store: GraphStore, workspace: GraphWorkspace, title: stri
   return { workspace: result, node: result.graphs[0].nodes.at(-1)! };
 }
 
+test('直接提问来源可撤销重做并重载，原问题与父资料分开保留', async t => {
+  const { store, workspace, load } = await fixture(t);
+  const child = await addCard(store, workspace, '直接提问的回答');
+  const question = '为什么可以采用这个近似？';
+  await store.update(workspace.id, draft => {
+    draft.graphs[0].nodes.find(node => node.id === child.node.id)!.source = {
+      nodeId: workspace.graphs[0].rootId, selection: { kind: 'text', text: '' }, comment: '', question, revision: 0,
+    };
+  }, true);
+  const undone = await store.mutate(workspace.id, { type: 'undo' });
+  assert.equal(undone.graphs[0].nodes.find(node => node.id === child.node.id)?.source, undefined);
+  const restored = await store.mutate(workspace.id, { type: 'redo' });
+  assert.equal(restored.graphs[0].nodes.find(node => node.id === child.node.id)?.source?.question, question);
+  await store.dispose();
+  const reloaded = await (await load()).open(workspace.id);
+  const source = reloaded.graphs[0].nodes.find(node => node.id === child.node.id)?.source;
+  assert.equal(source?.question, question);
+  assert.equal(source?.annotationId, undefined);
+  assert.deepEqual(reloaded.graphs[0].nodes[0].annotations, []);
+});
+
+test('删除整张图谱同步移除Markdown及节点，撤销完整恢复资料且不恢复旧任务', async t => {
+  const { store, workspace, load } = await fixture(t);
+  const graphId = workspace.graphs[0].id, rootId = workspace.graphs[0].rootId;
+  const { node: child } = await addCard(store, workspace, '需要保留的回答');
+  await store.mutate(workspace.id, { type: 'append-node-attachments', graphId, nodeId: rootId,
+    attachments: [{ id: 'document', name: '推导.md', mimeType: 'text/markdown', format: 'markdown', text: '完整推导 $x^2$' }] });
+  await store.update(workspace.id, draft => {
+    const node = draft.graphs[0].nodes.find(node => node.id === child.id)!;
+    node.pinned = true; node.status = 'generating'; node.draft = '尚未完成';
+    node.source = { nodeId: rootId, question: '为什么成立？', selection: { kind: 'text', text: '' }, comment: '', revision: 0 };
+  });
+  const withOther = await store.mutate(workspace.id, { type: 'create-graph', title: '保留的空图' });
+  const otherId = withOther.lastGraphId!;
+  await store.mutate(workspace.id, { type: 'visit', graphId });
+  const removed = await store.mutate(workspace.id, { type: 'delete-graph', graphId });
+  assert.deepEqual(removed.graphs.map(graph => graph.id), [otherId]);
+  assert.equal(removed.lastGraphId, otherId);
+  const deletedDocument = await store.readDocument(workspace.id);
+  assert.ok(!deletedDocument.markdown.includes(graphId));
+  assert.ok(!deletedDocument.markdown.includes('需要保留的回答'));
+  assert.ok(!deletedDocument.markdown.includes('推导.md'));
+  const restored = await store.mutate(workspace.id, { type: 'undo' });
+  assert.deepEqual(restored.graphs.map(graph => graph.id), [graphId, otherId]);
+  assert.equal(restored.lastGraphId, otherId, '撤销不覆盖仍然有效的当前图谱选择');
+  const root = restored.graphs[0].nodes.find(node => node.id === rootId)!;
+  assert.deepEqual(root.images.map(image => image.imageDataUrl), [PNG, PNG]);
+  assert.equal(root.attachments?.[0].text, '完整推导 $x^2$');
+  const answer = restored.graphs[0].nodes.find(node => node.id === child.id)!;
+  assert.equal(answer.markdown, '需要保留的回答的正文。');
+  assert.equal(answer.source?.question, '为什么成立？');
+  assert.equal(answer.pinned, true);
+  assert.equal(answer.status, 'cancelled');
+  assert.equal(answer.draft, undefined);
+  assert.ok((await store.readDocument(workspace.id)).markdown.includes('推导.md'));
+  const redone = await store.mutate(workspace.id, { type: 'redo' });
+  assert.deepEqual(redone.graphs.map(graph => graph.id), [otherId]);
+  await store.dispose();
+  const reloaded = await (await load()).open(workspace.id);
+  assert.deepEqual(reloaded.graphs.map(graph => graph.id), [otherId]);
+  assert.equal(reloaded.lastGraphId, otherId);
+});
+
+test('整图删除选择相邻图，非当前图不切换，全删及重载后仍可新建', async t => {
+  const { store, workspace, load } = await fixture(t);
+  const first = workspace.graphs[0].id;
+  const second = (await store.mutate(workspace.id, { type: 'create-graph', title: '第二张' })).lastGraphId!;
+  const third = (await store.mutate(workspace.id, { type: 'create-graph', title: '第三张' })).lastGraphId!;
+  await store.mutate(workspace.id, { type: 'visit', graphId: second });
+  let current = await store.mutate(workspace.id, { type: 'delete-graph', graphId: second });
+  assert.equal(current.lastGraphId, third, '优先选择删除位置后的图谱');
+  current = await store.mutate(workspace.id, { type: 'delete-graph', graphId: third });
+  assert.equal(current.lastGraphId, first, '尾图删除后选择前一张');
+  await store.mutate(workspace.id, { type: 'undo' });
+  current = await store.mutate(workspace.id, { type: 'delete-graph', graphId: third });
+  assert.equal(current.lastGraphId, first, '删除非当前图保留选择');
+  await assert.rejects(store.mutate(workspace.id, { type: 'delete-graph', graphId: 'missing' }), /找不到/);
+  assert.deepEqual(await store.open(workspace.id), current);
+  current = await store.mutate(workspace.id, { type: 'delete-graph', graphId: first });
+  assert.deepEqual(current.graphs, []);
+  assert.equal(current.lastGraphId, undefined);
+  assert.equal((await store.readDocument(workspace.id)).markdown.trim(), '# 物理阅读');
+  await store.dispose();
+  const reloadedStore = await load(), empty = await reloadedStore.open(workspace.id);
+  assert.deepEqual(empty.graphs, []); assert.equal(empty.lastGraphId, undefined);
+  const created = await reloadedStore.mutate(workspace.id, { type: 'create-graph', title: '新的开始' });
+  assert.equal(created.graphs.length, 1);
+  assert.equal(created.graphs[0].title, '新的开始');
+  assert.equal(created.lastGraphId, created.graphs[0].id);
+});
+
+test('工作区背景跨图共享，公式与完整附件可撤销重做和重启恢复', async t => {
+  const { store, workspace, load } = await fixture(t);
+  await store.mutate(workspace.id, { type: 'create-graph', title: '另一个主题' });
+  const background = { text: '# 阅读背景\n\n$$E=mc^2$$\n```markdown\n## 原文标题\n```\n<!-- rabbitball:node {} -->\n', attachments: [
+    { id: 'paper', name: '公式材料.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', format: 'markdown', text: '# 原文\n' + '完整公式 $\\alpha_i^2$。'.repeat(3000) },
+    { id: 'background-image', name: '符号表.png', mimeType: 'image/png', dataUrl: PNG },
+    { id: 'plain-readme', name: 'README', mimeType: 'text/plain', format: 'text', text: '无后缀资料\n' },
+    { id: 'unknown-type', name: '资料.' + 'custom'.repeat(20), mimeType: 'text/plain', format: 'custom'.repeat(20), text: '未知长后缀仍保留完整类型和正文\n' },
+  ] };
+  const updated = await store.mutate(workspace.id, { type: 'set-background', background });
+  assert.equal(updated.graphs.length, 2);
+  assert.equal(updated.background?.text, background.text);
+  assert.deepEqual(updated.background?.attachments.map(({ file: _file, ...attachment }) => attachment), background.attachments);
+  const document = await store.readDocument(workspace.id);
+  assert.ok(document.markdown.includes(background.text));
+  assert.ok(!document.markdown.includes('base64,'));
+  assert.ok(!document.markdown.includes(background.attachments[0].text!));
+  const empty = await store.mutate(workspace.id, { type: 'undo' });
+  assert.equal(empty.background, undefined);
+  await store.mutate(workspace.id, { type: 'redo' });
+  const other = await store.create('独立工作区');
+  assert.equal(other.background, undefined);
+  await store.dispose();
+  const reloaded = await (await load()).open(workspace.id);
+  assert.equal(reloaded.background?.text, background.text);
+  assert.deepEqual(reloaded.background?.attachments.map(({ file: _file, ...attachment }) => attachment), background.attachments);
+  assert.equal(reloaded.graphs.length, 2);
+});
+
+test('外部编辑背景只更新背景，附件越界与超限输入不会覆盖已有资料', async t => {
+  const { store, workspace } = await fixture(t);
+  const background = { text: '原背景', attachments: [{ id: 'source-file', name: '资料.md', mimeType: 'text/markdown', text: '$\\psi$ 的定义' }] };
+  await store.mutate(workspace.id, { type: 'set-background', background });
+  const document = await store.readDocument(workspace.id);
+  const edited = await store.writeDocument(workspace.id, document.markdown.replace('原背景', '更新后的背景'), document.revision);
+  assert.equal(edited.background?.text, '更新后的背景');
+  assert.equal(edited.graphs[0].nodes[0].images.length, 2);
+  await assert.rejects(store.mutate(workspace.id, { type: 'set-background', background: { text: '不应覆盖', attachments: [{ ...background.attachments[0], text: 'x'.repeat(1_000_001) }] } }), /100 万字符/);
+  const current = await store.readDocument(workspace.id);
+  const escaped = current.markdown.replace(/assets\/[a-f0-9]{64}\.txt/, '../outside.txt');
+  await assert.rejects(store.writeDocument(workspace.id, escaped, current.revision), /资源路径无效/);
+  assert.equal((await store.open(workspace.id)).background?.text, '更新后的背景');
+  assert.equal((await store.readDocument(workspace.id)).markdown, current.markdown);
+});
+
+test('文件解析后立即暂存资源，卡片仅引用附件，撤销重做、跨图和重载保留全文', async t => {
+  const { store, workspace, load } = await fixture(t);
+  const originalDocument = await store.readDocument(workspace.id);
+  const text = '# 独立文档\r\n\r\n$\\frac{H}{2}$\r\n' + '完整资料不可截断。'.repeat(4000);
+  const staged = await store.stageAttachment(workspace.id, { name: '讲义[公式].docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', format: 'docx', text });
+  assert.match(staged.file!, /^assets\/[a-f0-9]{64}\.txt$/);
+  assert.equal(await readFile(path.join(store.getDirectory(workspace.id), staged.file!), 'utf8'), text);
+  assert.equal((await store.readDocument(workspace.id)).markdown, originalDocument.markdown, '暂存不修改工作区正文或背景草稿');
+  assert.equal((await store.open(workspace.id)).background, undefined);
+  assert.equal((await store.open(workspace.id)).revision, workspace.revision);
+  const graphId = workspace.graphs[0].id;
+  const customWorkspace = await store.mutate(workspace.id, { type: 'add-custom-node', graphId, parentId: workspace.graphs[0].rootId, markdown: '卡片说明', images: [] });
+  const custom = customWorkspace.graphs[0].nodes.at(-1)!;
+  const attachments = [{ id: 'lecture', ...staged }, { id: 'source', name: 'analysis.py', mimeType: 'text/plain', format: 'py', language: 'python', text: '# 完整代码\nprint(42)\n' }];
+  const added = await store.mutate(workspace.id, { type: 'append-node-attachments', graphId, nodeId: custom.id, attachments });
+  const node = added.graphs[0].nodes.find(node => node.id === custom.id)!;
+  assert.equal(node.markdown, '卡片说明');
+  assert.equal(node.contentRevision, custom.contentRevision + 1);
+  assert.equal(node.attachments![0].text, text);
+  const document = await store.readDocument(workspace.id);
+  assert.ok(document.markdown.includes(`[讲义\\[公式\\].docx](${staged.file})`));
+  assert.ok(!document.markdown.includes(text));
+  assert.ok(!document.markdown.includes('print(42)'));
+  const state = await readFile(path.join(store.getDirectory(workspace.id), 'state.json'), 'utf8');
+  assert.ok(!state.includes('完整资料不可截断'));
+  assert.equal((await store.mutate(workspace.id, { type: 'undo' })).graphs[0].nodes.find(node => node.id === custom.id)!.attachments, undefined);
+  await store.mutate(workspace.id, { type: 'redo' });
+  const removed = await store.mutate(workspace.id, { type: 'remove-node-attachment', graphId, nodeId: custom.id, attachmentId: 'lecture' });
+  assert.deepEqual(removed.graphs[0].nodes.find(node => node.id === custom.id)!.attachments!.map(item => item.id), ['source']);
+  assert.equal(await readFile(path.join(store.getDirectory(workspace.id), staged.file!), 'utf8'), text, '移除引用保留资源供撤销和其它引用使用');
+  await store.mutate(workspace.id, { type: 'undo' });
+  const other = await store.mutate(workspace.id, { type: 'create-graph', title: '新主题' });
+  const targetGraphId = other.lastGraphId!;
+  await store.mutate(workspace.id, { type: 'move-subtree', graphId, nodeId: custom.id, targetGraphId });
+  await store.dispose();
+  const reloaded = await (await load()).open(workspace.id);
+  const restored = reloaded.graphs.find(graph => graph.id === targetGraphId)!.nodes[0];
+  assert.equal(restored.id, custom.id);
+  assert.equal(restored.markdown, '卡片说明');
+  assert.equal(restored.attachments![0].text, text);
+  assert.equal(restored.attachments![1].language, 'python');
+  assert.equal(restored.attachments![1].text, attachments[1].text);
+});
+
+test('卡片附件拒绝未解析内容、超限和外部资源路径，失败保持原资料', async t => {
+  const { store, workspace } = await fixture(t), graph = workspace.graphs[0];
+  const mutation = { type: 'append-node-attachments' as const, graphId: graph.id, nodeId: graph.rootId };
+  const attachment = { id: 'file', name: 'README', mimeType: 'text/plain', format: 'text', text: '文档全文' };
+  await assert.rejects(store.mutate(workspace.id, { ...mutation, attachments: [{ id: 'image', name: '图.png', mimeType: 'image/png', dataUrl: PNG }] }), /先解析为文字/);
+  await assert.rejects(store.mutate(workspace.id, { ...mutation, attachments: [{ ...attachment, text: 'x'.repeat(1_000_001) }] }), /100 万字符/);
+  await assert.rejects(store.mutate(workspace.id, { ...mutation, attachments: Array.from({ length: 65 }, (_, index) => ({ ...attachment, id: `file-${index}` })) }), /64/);
+  const added = await store.mutate(workspace.id, { ...mutation, attachments: [attachment] });
+  const document = await store.readDocument(workspace.id);
+  await assert.rejects(store.writeDocument(workspace.id, document.markdown.replace(/assets\/[a-f0-9]{64}\.txt/g, '../outside.txt'), document.revision), /资源路径无效/);
+  assert.equal((await store.open(workspace.id)).graphs[0].nodes[0].attachments![0].text, '文档全文');
+  assert.equal((await store.readDocument(workspace.id)).markdown, document.markdown);
+  const duplicated = await store.mutate(workspace.id, { ...mutation, attachments: [attachment] });
+  assert.equal(new Set(duplicated.graphs[0].nodes[0].attachments!.map(item => item.id)).size, 2);
+  assert.equal(added.graphs[0].nodes[0].markdown, workspace.graphs[0].nodes[0].markdown);
+});
+
+test('背景附件在 Markdown 中有可读链接，正文与图谱结构保持独立', async t => {
+  const { store, workspace, load } = await fixture(t);
+  const attachment = { id: 'background-file', name: '说明.md', mimeType: 'text/markdown', format: 'md', text: '# 附件全文\n$$H=E$$' };
+  const updated = await store.mutate(workspace.id, { type: 'set-background', background: { text: '背景说明', attachments: [attachment] } });
+  const document = await store.readDocument(workspace.id);
+  assert.ok(document.markdown.includes(`[说明.md](${updated.background!.attachments[0].file})`));
+  assert.ok(!document.markdown.includes(attachment.text));
+  await store.dispose();
+  const reloaded = await (await load()).open(workspace.id);
+  assert.equal(reloaded.background!.text, '背景说明');
+  assert.equal(reloaded.background!.attachments[0].text, attachment.text);
+  assert.equal(reloaded.graphs.length, workspace.graphs.length);
+  assert.equal(reloaded.graphs[0].nodes[0].markdown, workspace.graphs[0].nodes[0].markdown);
+});
+
+test('移除节点图片保留已有批注子卡的来源图片快照，支持撤销', async t => {
+  const { store, workspace, load } = await fixture(t), graph = workspace.graphs[0], image = graph.nodes[0].images[0];
+  const child = await addCard(store, workspace, '图片解释');
+  await store.update(workspace.id, current => {
+    current.graphs[0].nodes.find(node => node.id === child.node.id)!.source = { nodeId: graph.rootId,
+      selection: { kind: 'image', imageId: image.id, rect: { x: 0, y: 0, width: 1, height: 1 } }, comment: '解释图', revision: 1 };
+  });
+  const removed = await store.mutate(workspace.id, { type: 'remove-node-image', graphId: graph.id, nodeId: graph.rootId, imageId: image.id });
+  assert.equal(removed.graphs[0].nodes[0].images.some(item => item.id === image.id), false);
+  assert.equal(removed.graphs[0].nodes[1].source!.selectionImage!.imageDataUrl, image.imageDataUrl);
+  const undone = await store.mutate(workspace.id, { type: 'undo' });
+  assert.equal(undone.graphs[0].nodes[0].images.some(item => item.id === image.id), true);
+  await store.mutate(workspace.id, { type: 'redo' });
+  await store.dispose();
+  const reloaded = await (await load()).open(workspace.id);
+  assert.equal(reloaded.graphs[0].nodes[1].source!.selectionImage!.imageDataUrl, image.imageDataUrl);
+});
+
+test('卡片混合文件按真实添加顺序撤回，重开和撤销重做保留顺序', async t => {
+  const { store, workspace, load } = await fixture(t), graph = workspace.graphs[0];
+  const custom = await store.mutate(workspace.id, { type: 'add-custom-node', graphId: graph.id, parentId: graph.rootId, markdown: '', images: [] });
+  const nodeId = custom.graphs[0].nodes.at(-1)!.id;
+  const target = { graphId: graph.id, nodeId };
+  const file = (id: string) => ({ id, name: `${id}.md`, mimeType: 'text/markdown', format: 'md', text: `完整内容 ${id}` });
+  await store.mutate(workspace.id, { type: 'append-node-attachments', ...target, attachments: [file('first')] });
+  // 图片与文件可拥有相同的旧 ID，顺序键仍能区分各自的素材。
+  await store.mutate(workspace.id, { type: 'append-node-images', ...target, images: [{ ...capture.images[0], id: 'first' }] });
+  const appended = await store.mutate(workspace.id, { type: 'append-node-attachments', ...target, attachments: [file('last')] });
+  const order = ['attachment:first', 'image:first', 'attachment:last'];
+  assert.deepEqual(appended.graphs[0].nodes.at(-1)!.materialOrder, order);
+  const document = await store.readDocument(workspace.id);
+  assert.ok(document.markdown.includes(`"materialOrder":${JSON.stringify(order)}`));
+  await store.dispose();
+  const reopened = await load();
+  assert.deepEqual((await reopened.open(workspace.id)).graphs[0].nodes.at(-1)!.materialOrder, order);
+  const removed = await reopened.mutate(workspace.id, { type: 'remove-latest-node-asset', ...target });
+  assert.deepEqual(removed.graphs[0].nodes.at(-1)!.materialOrder, order.slice(0, 2));
+  assert.deepEqual(removed.graphs[0].nodes.at(-1)!.attachments!.map(item => item.id), ['first']);
+  assert.equal(removed.graphs[0].nodes.at(-1)!.images.length, 1);
+  assert.deepEqual((await reopened.mutate(workspace.id, { type: 'undo' })).graphs[0].nodes.at(-1)!.materialOrder, order);
+  await reopened.mutate(workspace.id, { type: 'redo' });
+  const repeats = await Promise.all([
+    reopened.mutate(workspace.id, { type: 'remove-latest-node-asset', ...target }),
+    reopened.mutate(workspace.id, { type: 'remove-latest-node-asset', ...target }),
+  ]);
+  assert.deepEqual(repeats[0].graphs[0].nodes.at(-1)!.materialOrder, ['attachment:first']);
+  assert.equal(repeats[0].graphs[0].nodes.at(-1)!.images.length, 0);
+  assert.equal(repeats[1].graphs[0].nodes.at(-1)!.attachments, undefined);
+  assert.equal(repeats[1].graphs[0].nodes.at(-1)!.materialOrder, undefined);
+  const empty = await reopened.mutate(workspace.id, { type: 'remove-latest-node-asset', ...target });
+  assert.equal(empty.revision, repeats[1].revision, '空卡片不产生无意义的写入或历史');
+});
+
+test('截图、单项移除与旧记录补齐共用同一素材顺序', async t => {
+  const { store, workspace, load } = await fixture(t), graph = workspace.graphs[0];
+  const target = { graphId: graph.id, nodeId: graph.rootId };
+  assert.deepEqual(graph.nodes[0].materialOrder, ['image:screen-1', 'image:screen-2']);
+  await store.mutate(workspace.id, { type: 'append-node-attachments', ...target, attachments: [{ id: 'file', name: 'README', mimeType: 'text/plain', text: '全文' }] });
+  const captured = await store.attachCapture(workspace.id, graph.id, { ...capture, images: [{ ...capture.images[0], id: 'recent-screen' }] });
+  assert.deepEqual(captured.graphs[0].nodes[0].materialOrder, ['image:screen-1', 'image:screen-2', 'attachment:file', 'image:recent-screen']);
+  const removed = await store.mutate(workspace.id, { type: 'remove-node-image', ...target, imageId: 'screen-2' });
+  assert.deepEqual(removed.graphs[0].nodes[0].materialOrder, ['image:screen-1', 'attachment:file', 'image:recent-screen']);
+  const latest = await store.mutate(workspace.id, { type: 'remove-latest-node-asset', ...target });
+  assert.deepEqual(latest.graphs[0].nodes[0].materialOrder, ['image:screen-1', 'attachment:file']);
+  const document = await store.readDocument(workspace.id), directory = store.getDirectory(workspace.id);
+  await store.dispose();
+  await writeFile(document.path, document.markdown.replace(/,"materialOrder":\[[^\]]*\]/g, ''), 'utf8');
+  const saved = JSON.parse(await readFile(path.join(directory, 'state.json'), 'utf8'));
+  for (const savedGraph of saved.graphs) for (const savedNode of savedGraph.nodes) delete savedNode.materialOrder;
+  await writeFile(path.join(directory, 'state.json'), JSON.stringify(saved), 'utf8');
+  const reloaded = await (await load()).open(workspace.id);
+  assert.deepEqual(reloaded.graphs[0].nodes[0].materialOrder, ['image:screen-1', 'attachment:file']);
+  assert.equal(reloaded.graphs[0].nodes[0].attachments![0].text, '全文');
+});
+
 test('一个工作区一份 Markdown，根截图直接插入；正文、资源与界面状态可重启恢复', async t => {
   const { store, workspace, directory, load } = await fixture(t);
   const added = await addCard(store, workspace, '核心概念');

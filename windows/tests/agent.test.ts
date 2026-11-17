@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createAgentConversation, runAgent } from '../electron/agent.ts'
-import type { AgentConversation } from '../electron/agent.ts'
-import type { AgentEvent, AgentRequest, CaptureContext, PrivateSettings } from '../electron/contracts.ts'
+import { createAgentConversation, runAgent, setAgentUsageRecorder } from '../electron/agent.ts'
+import type { AgentConversation, AgentOptions } from '../electron/agent.ts'
+import type { AgentEvent, AgentRequest, CaptureContext, PrivateSettings, UsageReport } from '../electron/contracts.ts'
 import { DEFAULT_PROMPTS } from '../electron/prompts.ts'
 
 const settings = {
@@ -13,9 +13,9 @@ const settings = {
   prompts: { ...DEFAULT_PROMPTS },
 } as PrivateSettings
 
-function sse(deltas: unknown[], finish = 'stop', complete = true): Response {
+function sse(deltas: unknown[], finish = 'stop', complete = true, usage?: unknown): Response {
   const data = ': keep-alive\r\n\r\n' + deltas.map(delta => `data: ${JSON.stringify({ choices: [{ delta, finish_reason: null }] })}\r\n\r\n`).join('') +
-    (complete ? `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finish }] })}\r\n\r\ndata: [DONE]\r\n\r\n` : '')
+    (complete ? `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finish }], ...(usage === undefined ? {} : { usage }) })}\r\n\r\ndata: [DONE]\r\n\r\n` : '')
   const bytes = new TextEncoder().encode(data)
   // 故意从 JSON、CRLF 与中文 UTF-8 字节中间拆分，验证真实流的任意边界。
   return new Response(new ReadableStream<Uint8Array>({
@@ -30,12 +30,12 @@ function sse(deltas: unknown[], finish = 'stop', complete = true): Response {
   }), { headers: { 'Content-Type': 'text/event-stream' } })
 }
 
-function toolReply(query = '兔球 官方文档', reasoning = '仅在服务端保留的推理'): Response {
+function toolReply(query = '兔球 官方文档', reasoning = '仅在服务端保留的推理', usage?: unknown): Response {
   return sse([
     { reasoning_content: reasoning },
     { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'search_', arguments: '{"query":' } }] },
     { tool_calls: [{ index: 0, function: { name: 'web', arguments: JSON.stringify(query) + '}' } }] },
-  ], 'tool_calls')
+  ], 'tool_calls', true, usage)
 }
 
 async function mocked(fetcher: typeof fetch, run: () => Promise<void>): Promise<void> {
@@ -44,13 +44,177 @@ async function mocked(fetcher: typeof fetch, run: () => Promise<void>): Promise<
   try { await run() } finally { globalThis.fetch = original }
 }
 
-async function collect(request: Partial<AgentRequest> = {}, customSettings = settings, context?: CaptureContext, conversation = createAgentConversation()): Promise<AgentEvent[]> {
+async function collect(request: Partial<AgentRequest> = {}, customSettings = settings, context?: CaptureContext, conversation = createAgentConversation(), background?: AgentOptions['background'], reference?: AgentOptions['reference']): Promise<AgentEvent[]> {
   const events: AgentEvent[] = []
   await runAgent({ id: 'request-1', conversationId: 'conversation-1', turnId: 'turn-1', text: '请解释一下', action: 'ask', ...request }, customSettings, {
-    signal: new AbortController().signal, onEvent: event => events.push(event), context, conversation,
+    signal: new AbortController().signal, onEvent: event => events.push(event), context, conversation, background, reference,
   })
   return events
 }
+
+test('本体逐模型请求记录真实用量，工具前后轮都归入原图谱', async t => {
+  const reports: UsageReport[] = []
+  setAgentUsageRecorder(async report => { reports.push(report) })
+  t.after(() => setAgentUsageRecorder(undefined))
+  let rounds = 0
+  const conversation = createAgentConversation()
+  await mocked(async (url, init) => {
+    if (String(url).endsWith('/tools/search')) return Response.json({ results: [] })
+    const body = JSON.parse(String(init?.body))
+    assert.deepEqual(body.stream_options, { include_usage: true })
+    return rounds++ === 0
+      ? toolReply('查询', '内部推理', { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, prompt_cache_hit_tokens: 60, prompt_cache_miss_tokens: 40, completion_tokens_details: { reasoning_tokens: 10 } })
+      : sse([{ content: '查阅后的回答' }], 'stop', true, { prompt_tokens: 150, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 100 }, completion_tokens_details: { reasoning_tokens: 20 } })
+  }, async () => {
+    const events = await collect({ graphContext: { workspaceId: 'workspace', graphId: 'graph', nodeId: 'leaf' } }, settings, undefined, conversation)
+    assert.equal(events.at(-1)?.type, 'done')
+    assert.deepEqual(events.filter(event => event.type === 'usage').map(event => event.usage), [
+      { promptTokens: 100, completionTokens: 20, totalTokens: 120, cacheHitTokens: 60, cacheMissTokens: 40, reasoningTokens: 10 },
+      { promptTokens: 150, completionTokens: 30, totalTokens: 180, cacheHitTokens: 100, cacheMissTokens: 50, reasoningTokens: 20 },
+    ])
+  })
+  assert.equal(reports.length, 2)
+  assert.ok(reports.every(report => report.scope.kind === 'graph' && report.scope.workspaceId === 'workspace' && report.scope.graphId === 'graph'))
+  assert.ok(reports.every(report => report.model === settings.model))
+  assert.ok(conversation.messages.every(message => !('usage' in message)), '用量不作为消息传给下一轮模型')
+})
+
+test('未返回用量及失败请求仍记录请求次数，缓存未知不转为零', async t => {
+  const reports: UsageReport[] = []
+  setAgentUsageRecorder(async report => { reports.push(report) })
+  t.after(() => setAgentUsageRecorder(undefined))
+  await mocked(async () => sse([{ content: '无用量回答' }]), async () => {
+    const events = await collect()
+    assert.equal(events.some(event => event.type === 'usage'), false)
+  })
+  await mocked(async () => new Response('拒绝', { status: 429 }), async () => {
+    assert.equal((await collect()).at(-1)?.type, 'error')
+  })
+  assert.deepEqual(reports, Array.from({ length: 2 }, () => ({ scope: { kind: 'chat', conversationId: 'conversation-1' }, model: settings.model })))
+})
+
+test('兼容独立usage帧与重复累计帧，每个模型轮只结算最后一份', async t => {
+  const reports: UsageReport[] = []
+  setAgentUsageRecorder(async report => { reports.push(report) })
+  t.after(() => setAgentUsageRecorder(undefined))
+  await mocked(async () => new Response([
+    { choices: [{ delta: { content: '完整回答' }, finish_reason: null }], usage: null },
+    { choices: [], usage: { prompt_tokens: 80, completion_tokens: 8 } },
+    { choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 80, completion_tokens: 12, prompt_tokens_details: { cached_tokens: 0 } } },
+    { choices: [], usage: { prompt_tokens: 80, completion_tokens: 12, prompt_tokens_details: { cached_tokens: 0 } } },
+  ].map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n'), async () => {
+    const events = await collect()
+    assert.equal(events.filter(event => event.type === 'usage').length, 1)
+  })
+  assert.equal(reports.length, 1)
+  assert.deepEqual(reports[0].usage, { promptTokens: 80, completionTokens: 12, totalTokens: 92, cacheHitTokens: 0, cacheMissTokens: 80 })
+})
+
+test('长度中断仍保留已返回消耗，无效缓存和推理明细不污染真实总量', async t => {
+  const reports: UsageReport[] = []
+  setAgentUsageRecorder(async report => { reports.push(report) })
+  t.after(() => setAgentUsageRecorder(undefined))
+  await mocked(async () => sse([{ content: '尚未完成' }], 'length', true, {
+    prompt_tokens: 25, completion_tokens: 8, prompt_cache_hit_tokens: 99, prompt_cache_miss_tokens: -1, completion_tokens_details: { reasoning_tokens: 99 },
+  }), async () => { assert.equal((await collect()).at(-1)?.type, 'error') })
+  assert.deepEqual(reports[0].usage, { promptTokens: 25, completionTokens: 8, totalTokens: 33 })
+  await mocked(async () => sse([{ content: '正常回复' }], 'stop', true, { prompt_tokens: '25', completion_tokens: -1 }), async () => { await collect() })
+  assert.equal(reports[1].usage, undefined)
+})
+
+test('文件上下文保留名称、格式和代码语言，长文不静默截断', async () => {
+  const text = 'x'.repeat(65_000) + '\n末尾应完整保留'
+  await mocked(async (_url, init) => {
+    const body = JSON.parse(String(init?.body))
+    const parts = body.messages.findLast((message: any) => message.role === 'user').content
+    const metadata = parts.find((part: any) => part.text?.includes('文件标签：')).text
+    assert.ok(metadata.includes('示例.py')); assert.ok(metadata.includes('python'))
+    assert.ok(metadata.includes('"format":"py"')); assert.ok(parts.some((part: any) => part.text === text))
+    return sse([{ content: '已读取。' }])
+  }, async () => {
+    await collect({ attachments: [{ id: 'code', name: '示例.py', mimeType: 'text/plain', format: 'py', language: 'python', text }] })
+  })
+})
+
+test('图谱背景每轮只发送当前一份，更新和清空后重新生成仍保留原问题、选区和附件', async () => {
+  const conversation = createAgentConversation(), sent: Array<{ messages: AgentConversation['messages'] }> = []
+  const original = { text: '原问题与选区路径', attachments: [{ id: 'file', name: '原附件.py', mimeType: 'text/plain', text: '原附件内容' }] }
+  const oldBackground = { text: '旧背景正文', images: [{ id: 'old-image', title: '旧背景图片', imageDataUrl: 'data:image/png;base64,b2xk' }] }
+  const newBackground = { text: '新背景正文', images: [{ id: 'new-image', title: '新背景图片', imageDataUrl: 'data:image/png;base64,bmV3' }] }
+  const newSelection: CaptureContext = { id: 'new', title: '另一个选区', capturedAt: 1, images: [{ id: 'new-node', title: '不得替换原选区', imageDataUrl: 'data:image/png;base64,bm9kZQ==' }] }
+  await mocked(async (_url, init) => {
+    sent.push(JSON.parse(String(init?.body)))
+    return sse([{ content: '回答。' }])
+  }, async () => {
+    assert.equal((await collect(original, settings, undefined, conversation, oldBackground)).at(-1)?.type, 'done')
+    const originalInput = structuredClone(conversation.messages.slice(0, 2))
+    assert.equal(conversation.turns[0].userEnd, 2)
+    assert.ok(!JSON.stringify(conversation.messages).includes('旧背景'))
+    assert.equal((await collect({ id: 'second', turnId: 'turn-2', text: '追问' }, settings, newSelection, conversation, oldBackground)).at(-1)?.type, 'done')
+    assert.equal((JSON.stringify(sent[1].messages).match(/旧背景正文/g) ?? []).length, 1)
+    assert.equal((JSON.stringify(sent[1].messages).match(/data:image\/png;base64,b2xk/g) ?? []).length, 1)
+    assert.equal((await collect({ id: 'third', regenerate: true, text: '不能重建为新问题', attachments: [] }, settings, newSelection, conversation, newBackground)).at(-1)?.type, 'done')
+    assert.deepEqual(sent[2].messages.filter((_, index) => index !== 1), originalInput)
+    assert.ok(JSON.stringify(sent[2].messages).includes('新背景正文'))
+    assert.ok(!JSON.stringify(sent[2].messages).includes('旧背景'))
+    assert.ok(!JSON.stringify(sent[2].messages).includes('不得替换原选区'))
+    assert.equal((await collect({ id: 'fourth', regenerate: true }, settings, newSelection, conversation, null)).at(-1)?.type, 'done')
+    assert.deepEqual(sent[3].messages, originalInput)
+    assert.equal(conversation.background, null)
+  })
+})
+
+test('图谱路径每次仅一份，历史只留真实对话，改变路径仍保留稳定公共前缀', async () => {
+  const state = createAgentConversation(), sent: any[] = []
+  const background = { text: '公共背景', images: [] }
+  const path = (name: string): NonNullable<AgentOptions['reference']> => ({ messages: [
+    { role: 'user', content: [{ type: 'text', text: `参考路径-${name}` }, { type: 'image_url', image_url: { url: `data:image/png;base64,${name}`, detail: 'high' } }] },
+    { role: 'assistant', content: `沿途回复-${name}` },
+  ] })
+  const first = { text: '原问题', attachments: [{ id: 'file', name: 'README', mimeType: 'text/plain', text: '用户独有附件' }] }
+  await mocked(async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return sse([{ content: '回答' }]) }, async () => {
+    await collect(first, settings, undefined, state, background, path('AAA'))
+    const firstHistory = structuredClone(state.messages)
+    await collect({ id: 'next', turnId: 'turn-2', text: '追问' }, settings, undefined, state, background, path('BBB'))
+    assert.deepEqual(sent[1].messages.slice(0, 2), sent[0].messages.slice(0, 2))
+    assert.deepEqual(sent[1].messages.slice(4, 6), firstHistory.slice(1))
+    assert.ok(!JSON.stringify(sent[1]).includes('参考路径-AAA'))
+    assert.equal((JSON.stringify(sent[1]).match(/参考路径-BBB/g) ?? []).length, 1)
+    assert.ok(!JSON.stringify(state.messages).includes('参考路径'))
+    assert.ok(!JSON.stringify(state.messages).includes('data:image/png'))
+    assert.ok(JSON.stringify(state.messages).includes('用户独有附件'))
+    assert.equal(state.turns[1].userEnd, 4)
+    await collect({ id: 'same', turnId: 'turn-3', text: '继续追问' }, settings, undefined, state, background, path('BBB'))
+    assert.deepEqual(sent[2].messages.slice(0, sent[1].messages.length), sent[1].messages)
+    await collect({ id: 'again', regenerate: true, text: '不能改写原问题' }, settings, undefined, state, { text: '最新背景', images: [] }, path('CCC'))
+    assert.ok(JSON.stringify(sent[3]).includes('原问题'))
+    assert.ok(JSON.stringify(sent[3]).includes('用户独有附件'))
+    assert.ok(!JSON.stringify(sent[3]).includes('追问'))
+    assert.ok(!JSON.stringify(sent[3]).includes('参考路径-BBB'))
+    assert.ok(JSON.stringify(sent[3]).includes('参考路径-CCC'))
+    assert.ok(JSON.stringify(sent[3]).includes('最新背景'))
+    await collect({ id: 'clear', regenerate: true }, settings, undefined, state, null, null)
+    assert.deepEqual(sent[4].messages, firstHistory.slice(0, 2))
+  })
+})
+
+test('独立参考在工具循环中保持位置和请求前缀，图谱提取与翻译可使用参考资料', async () => {
+  const state = createAgentConversation(), sent: any[] = []
+  const reference: NonNullable<AgentOptions['reference']> = { messages: [{ role: 'user', content: '本次唯一路径' }, { role: 'assistant', content: '图谱中的回复' }] }
+  await mocked(async (url, init) => {
+    if (String(url).endsWith('/tools/search')) return Response.json({ results: [] })
+    sent.push(JSON.parse(String(init?.body)))
+    return sent.length === 1 ? toolReply() : sse([{ content: '结果' }])
+  }, async () => {
+    await collect({}, settings, undefined, state, null, reference)
+  })
+  assert.deepEqual(sent[1].messages.slice(0, sent[0].messages.length), sent[0].messages)
+  assert.equal(sent[1].messages.at(-2).tool_calls[0].id, sent[1].messages.at(-1).tool_call_id)
+  assert.equal((JSON.stringify(sent[1].messages).match(/本次唯一路径/g) ?? []).length, 1)
+  for (const action of ['extract', 'translate'] as const) await mocked(async () => sse([{ content: '内容' }]), async () => {
+    assert.equal((await collect({ action, text: '' }, settings, undefined, createAgentConversation(), null, reference)).at(-1)?.type, 'done')
+  })
+})
 
 test('SSE 可跨字节拆包，思考强度映射正确且不向界面发送 reasoning', async () => {
   for (const [level, effort] of [['low', 'low'], ['medium', 'high'], ['high', 'max']] as const) {

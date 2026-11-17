@@ -13,7 +13,7 @@ const near = (actual: number, expected: number) => assert.ok(Math.abs(actual - e
 const samePoint = (actual: Point, expected: Point) => { near(actual.x, expected.x); near(actual.y, expected.y); };
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
-function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
+function animation(sceneOrigin: Point = { x: 0, y: 0 }, surface: 'pet' | 'graph' = 'pet') {
   let width = 1440, height = 900, now = 0, nextFrame = 0;
   const frames = new Map<number, (time: number) => void>();
   const listeners = new Map<string, Array<(event: any) => void>>();
@@ -48,6 +48,7 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
       windowListeners.get(type)!.push(handler);
     },
     rabbitDesktop: {
+      surface,
       setInteractive(value: boolean) { interactiveChanges.push(value); },
       reportPetPosition(point: Point) { reports.push({ time: now, point: { ...point } }); },
       petViewportReady(id: number) {
@@ -79,6 +80,8 @@ function animation(sceneOrigin: Point = { x: 0, y: 0 }) {
   }, { filename: 'rabbit-animation.js' });
   return {
     reports, ready, interactiveChanges, hitTests,
+    runtime: () => ({ hasPetAPI: !!window.RabbitBallDemo, frames: frames.size, documentListeners: listeners.size, windowListeners: windowListeners.size }),
+    clickControl(id: string) { for (const handler of elements.get(id)!.handlers.get('click') ?? []) handler({}); },
     hover(ancestors: string[]) { hitAncestors = ancestors; },
     acknowledge(id: number, accepted: boolean) {
       assert.ok(acknowledgements.has(id), '先等待真实就绪请求，再返回主进程确认');
@@ -133,7 +136,7 @@ test('动画暂停后仍更新系统命中，进入与离开兔球都不依赖�
   assert.equal(app.state().frame,frame);
 });
 
-test('原生命中只上报布尔状态，按住兔球与激活图谱时维持输入', () => {
+test('原生命中只上报布尔状态，按住兔球维持输入，图谱开关不接管本体输入', () => {
   const app=animation(),point={x:240,y:200};app.tick(1);
   assert.equal(app.interactiveChanges.at(-1),false);
   const reports=app.interactiveChanges.length;app.tick(3);assert.equal(app.interactiveChanges.length,reports);
@@ -142,9 +145,40 @@ test('原生命中只上报布尔状态，按住兔球与激活图谱时维持�
   app.petEvent('pointerup',point,{pointerType:'touch',pointerId:8});
   assert.equal(app.interactiveChanges.at(-1),false);
   app.dispatch('graph:open',{activationId:8});app.tick(1);
-  assert.equal(app.interactiveChanges.at(-1),true);
+  assert.equal(app.interactiveChanges.at(-1),false);
   app.dispatch('graph:close',{});app.tick(1);
   assert.equal(app.interactiveChanges.at(-1),false);
+});
+
+test('独立图谱窗口在实际动画入口提前返回，不创建兔球接口、监听或动画帧', () => {
+  const app=animation({x:0,y:0},'graph');
+  assert.deepEqual(app.runtime(),{hasPetAPI:false,frames:0,documentListeners:0,windowListeners:0});
+  app.dispatch('graph:open',{activationId:1});app.tick(10);
+  assert.deepEqual(app.reports,[]);assert.deepEqual(app.interactiveChanges,[]);
+  assert.equal(app.runtime().frames,0);
+});
+
+test('本体收到图谱开关不改变跟随、停靠、普通聊天或正在进行的拖动', () => {
+  for(const scene of ['follow','docked','chat','drag']){
+    const app=animation(),point={x:600,y:450};let closes=0,ends=0;
+    app.setChat({cancelDemo(){},close(){closes++;},beginPetDrag(){},endPetDrag(){ends++;},movePetDrag:(value:Point)=>value});
+    if(scene==='follow'){app.cursor(1000,650);app.tick(25);assert.ok(app.state().flight);}
+    if(scene==='docked'){app.dispatch('settings:change',{settings:{petSize:1,followMouse:false}});app.tick(120);assert.equal(app.state().followEnabled,false);}
+    if(scene==='chat'||scene==='drag'){
+      app.dispatch('chat:open',{bounds:{x:100,y:100,width:360,height:94},petPosition:point});
+      app.dispatch('chat:activity',{mode:'think',busy:true});
+    }
+    if(scene==='drag'){app.petEvent('pointerdown',point);app.petEvent('pointermove',{x:650,y:480});assert.equal(app.state().drag.active,true);}
+    const before=app.state();
+    for(const type of ['graph:open','graph:close']){
+      app.dispatch(type,{activationId:9});assert.deepEqual(app.state(),before,`${scene}: ${type}`);
+    }
+    assert.equal(closes,0);assert.equal(ends,0);
+    app.tick(1);assert.equal(app.interactiveChanges.at(-1),scene==='drag');
+    if(scene==='follow')assert.ok(app.state().flight.progress>before.flight.progress);
+    if(scene==='chat'||scene==='drag'){assert.equal(app.state().chatOpen,true);assert.equal(app.state().mode,'think');}
+    if(scene==='drag'){app.petEvent('pointerup',{x:650,y:480});assert.equal(ends,1);assert.equal(app.state().drag,null);}
+  }
 });
 
 test('鼠标停在另一显示器后兔球沿动画飞出旧视口，重新测量不把目标夹回旧屏', () => {
@@ -548,38 +582,38 @@ test('设置打开时拖动兔球带动面板并保留位置，轻点不关闭�
   samePoint({x:app.state().x.x,y:app.state().y.x},end);
 });
 
-test('兔球轻点只由所属主指针触发，第二触点和取消不能开关图谱会话', () => {
-  const app=animation(),point={x:600,y:450};let opened=0;
-  app.setChat({getSnapshot:()=>({open:false,opening:false}),activateGraph(){opened++;}});
+test('兔球轻点只由所属主指针触发表情，第二触点和取消无效，普通聊天入口保持独立', () => {
+  const app=animation(),point={x:600,y:450};let tapped=0,opened=0,graphs=0;
+  app.setChat({cancelDemo(){tapped++;},activate(){opened++;},getSnapshot:()=>({open:false,opening:false}),activateGraph(){graphs++;}});
   app.dispatch('graph:open',{activationId:7});
   const first={pointerId:11,pointerType:'touch',isPrimary:true},second={pointerId:12,pointerType:'touch',isPrimary:false};
   app.petEvent('pointerdown',point,first);
   app.petEvent('pointerdown',point,second);app.petEvent('pointerup',point,second);app.petEvent('click',point,second);
-  assert.equal(opened,0);assert.equal(app.state().drag.id,11);
+  assert.equal(tapped,0);assert.equal(app.state().drag.id,11);
   app.petEvent('pointercancel',point,first);app.petEvent('click',point,first);
-  assert.equal(opened,0);assert.equal(app.state().drag,null);
+  assert.equal(tapped,0);assert.equal(app.state().drag,null);
   for(const pointerType of ['mouse','touch','pen']){
     const pointer={pointerId:21,pointerType,isPrimary:true};
     app.petEvent('pointerdown',point,pointer);app.petEvent('pointermove',{x:point.x+20,y:point.y},pointer);
     app.petEvent('pointerup',{x:point.x+20,y:point.y},pointer);app.petEvent('click',point,pointer);
-    const before=opened;
+    const before=tapped;
     // 新轻点不受上一次拖动后的任意时间窗口影响。
     app.petEvent('pointerdown',point,pointer);app.petEvent('pointerup',point,pointer);app.petEvent('click',point,pointer);
-    assert.equal(opened,before+1);
+    assert.equal(tapped,before+1);
   }
-  assert.equal(opened,3);
-  app.petEvent('click',point,{detail:0,pointerId:-1,pointerType:''});assert.equal(opened,4,'键盘点击继续工作');
+  assert.equal(tapped,3);
+  app.petEvent('click',point,{detail:0,pointerId:-1,pointerType:''});assert.equal(tapped,4,'键盘点击继续工作');
+  app.clickControl('autoplay');assert.equal(opened,1);assert.equal(graphs,0);
 });
 
 test('兔球拖动在失焦、暂停和离页时结束，迟到移动不恢复拖动', () => {
-  for(const transition of ['blur','suspended','pagehide','pause','graph-close']){
+  for(const transition of ['blur','suspended','pagehide','pause']){
     const app=animation(),point={x:600,y:450};let ended=0;
-    app.setChat({close(){},beginPetDrag(){},endPetDrag(){ended++;},movePetDrag:(value:Point)=>value});
+    app.setChat({cancelDemo(){},close(){},beginPetDrag(){},endPetDrag(){ended++;},movePetDrag:(value:Point)=>value});
     app.dispatch('chat:open',{bounds:{x:100,y:100,width:360,height:94},petPosition:point});
     app.petEvent('pointerdown',point);app.petEvent('pointermove',{x:650,y:480});
     if(transition==='suspended')app.dispatch('desktop:suspended',true);
     else if(transition==='pause')app.pause();
-    else if(transition==='graph-close')app.dispatch('graph:close',{});
     else app.windowEvent(transition);
     assert.equal(ended,1);assert.equal(app.state().drag,null);
     const settled={x:app.state().tx,y:app.state().ty};

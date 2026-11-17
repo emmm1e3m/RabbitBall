@@ -24,7 +24,7 @@ function summary(entry: HistoryEntry): HistorySummary {
 function snapshot(conversation: AgentConversation): AgentConversation {
   // 只保存模型上下文；配置和 API Key 不进入历史。未提交的工具调用不跨重启保留。
   return structuredClone({ prompts: conversation.prompts, messages: conversation.messages.slice(0, conversation.committedLength),
-    turns: conversation.turns, generation: conversation.generation, committedLength: conversation.committedLength });
+    turns: conversation.turns, generation: conversation.generation, committedLength: conversation.committedLength, background: conversation.background ?? null, reference: conversation.reference ?? null });
 }
 
 export class HistoryStore {

@@ -237,7 +237,7 @@ test('连续滚轮手势保持设备判别，触控板平移、鼠标滚轮缩�
 });
 
 // 替换浏览器与 IPC 边界，生命周期仍执行完整生产组件。
-function fixture(savedSettings?: { graphPluginEnabled: boolean; graphModeEnabled: boolean }, options: { manualFrames?: boolean; reducedMotion?: boolean } = {}) {
+function fixture(savedSettings?: { graphPluginEnabled: boolean; graphActivationShortcut?: string[] | null; activationShortcut?: string[] }, options: { manualFrames?: boolean; reducedMotion?: boolean; storage?: Map<string,string>; surface?: 'pet' | 'graph' } = {}) {
   const events: any[] = [], listeners = new Map<string, Array<(event: any) => void>>(), documentCapture = new Map<string, Array<(event: any) => void>>();
   const timers = new Map<number, { at: number; run: () => void }>();
   const frames = new Map<number, { run: (timestamp: number) => void; handle?: ReturnType<typeof setImmediate> }>();
@@ -286,8 +286,8 @@ function fixture(savedSettings?: { graphPluginEnabled: boolean; graphModeEnabled
     append(...children: Element[]) { children.forEach(child => this.appendChild(child)); }
     insertBefore(child: Element, reference: Element | null) { if (!reference) return this.appendChild(child); child.remove(); child.parentElement = this; const index = this.children.indexOf(reference); this.children.splice(index < 0 ? this.children.length : index, 0, child); return child; }
     prepend(child: Element) { child.remove(); child.parentElement = this; this.children.unshift(child); }
-    replaceChildren(...children: Element[]) { this.children.forEach(child => { child.parentElement = null; }); this.children = []; this.content = ''; this.append(...children); }
-    remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
+    replaceChildren(...children: Element[]) { if(this.children.some(child=>child.contains(document.activeElement)))document.activeElement=document.body;this.children.forEach(child => { child.parentElement = null; }); this.children = []; this.content = ''; this.append(...children); }
+    remove() { if(this.parentElement&&this.contains(document.activeElement))document.activeElement=document.body;if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
     contains(child: Element): boolean { return child === this || this.children.some(node => node.contains(child)); }
     cloneNode(deep = false): Element {
       const result = new Element(this.tagName);
@@ -378,6 +378,7 @@ function fixture(savedSettings?: { graphPluginEnabled: boolean; graphModeEnabled
   const windowListeners = new Map<string, Array<(event: any) => void>>();
   const window: any = {
     innerWidth: 1200, innerHeight: 800, getSelection: document.getSelection,
+    localStorage: { getItem: (key: string) => options.storage?.get(key)??null, setItem: (key: string,value: string) => options.storage?.set(key,value) },
     matchMedia: () => ({ matches: options.reducedMotion ?? false }),
     addEventListener(type: string, listener: (event: any) => void) { if (!windowListeners.has(type)) windowListeners.set(type, []); windowListeners.get(type)!.push(listener); },
     removeEventListener(type: string, listener: (event: any) => void) { windowListeners.set(type, (windowListeners.get(type) || []).filter(item => item !== listener)); },
@@ -393,11 +394,13 @@ function fixture(savedSettings?: { graphPluginEnabled: boolean; graphModeEnabled
   const bridgeCalls: any[] = [];
   const captures: any[] = [], imageCaptures: Array<{ request: unknown; pending: ReturnType<typeof deferred<CaptureImage[] | null>> }> = [];
   let changed: (workspace: GraphWorkspace) => void = () => {}, error: (error: any) => void = () => {};
+  let graphVisibilityChanged: (visible: boolean) => void = () => {}, graphWorkspaceChanged: (workspace: GraphWorkspace) => void = () => {}, graphListCount = 0;
   let active = workspace('default');
   let mutationResult: ((mutation: any) => GraphWorkspace) | null = null;
   window.rabbitDesktop = {
+    surface: options.surface,
     graphOpen(workspaceId?: string) { bridgeCalls.push({ method: 'graphOpen', workspaceId }); const pending = deferred<GraphWorkspace>(); requests.push({ workspaceId, pending }); return pending.promise; },
-    graphList: async () => [], graphCreate: async () => active,
+    graphList: async () => { graphListCount++; return []; }, graphCreate: async () => active,
     graphMutate: async (workspaceId: string, mutation: unknown) => { bridgeCalls.push({ method: 'graphMutate', workspaceId, mutation }); mutations.push({ workspaceId, mutation }); if (mutationResult) active = mutationResult(mutation); return active; },
     graphRevealDocument: async () => {}, graphCapture: async (request: unknown) => { captures.push(request); },
     graphCaptureImages: (request: unknown) => { const pending = deferred<CaptureImage[] | null>(); imageCaptures.push({ request, pending }); return pending.promise; },
@@ -408,6 +411,8 @@ function fixture(savedSettings?: { graphPluginEnabled: boolean; graphModeEnabled
     graphRegenerate: async (request: unknown) => { regenerated.push(request); },
     graphCancel: (request: unknown) => { cancelled.push(request); },
     onGraphChanged(listener: typeof changed) { changed = listener; return () => {}; },
+    onGraphVisibilityChanged(listener: typeof graphVisibilityChanged) { graphVisibilityChanged = listener; return () => {}; },
+    onGraphWorkspaceChanged(listener: typeof graphWorkspaceChanged) { graphWorkspaceChanged = listener; return () => {}; },
     onGraphError(listener: typeof error) { error = listener; return () => {}; },
   };
   const context = vm.createContext({ window, document, innerWidth: 1200, innerHeight: 800, structuredClone,
@@ -425,9 +430,13 @@ function fixture(savedSettings?: { graphPluginEnabled: boolean; graphModeEnabled
     setTimeout: (run: () => void, delay = 0) => { timers.set(++serial, { at: now + delay, run }); return serial; }, clearTimeout: (id: number) => timers.delete(id),
   });
   vm.runInContext(readFileSync(new URL('../prototype/graph-selection.js', import.meta.url), 'utf8'), context, { filename: 'graph-selection.js' });
+  vm.runInContext(readFileSync(new URL('../prototype/documents.js', import.meta.url), 'utf8'), context, { filename: 'documents.js' });
   const source = readFileSync(new URL('../prototype/graph-ui.js', import.meta.url), 'utf8');
   vm.runInContext(source, context, { filename: 'graph-ui.js' });
   return { window, document, events, requests, mutations, cancelled, regenerated, generated, captures, imageCaptures, pinRegions, pinInteractions, activations, bridgeCalls, animations, api: window.RabbitGraph,
+    get graphListCount() { return graphListCount; },
+    graphVisible(visible: boolean) { graphVisibilityChanged(visible); },
+    workspaceChanged(value: GraphWorkspace) { active = value; graphWorkspaceChanged(value); },
     async resolve(index: number, value: GraphWorkspace) { active = value; requests[index].pending.resolve(value); await flush(); await flush(); },
     changed(value: GraphWorkspace) { active = value; changed(value); },
     mutateWith(handler: (mutation: any) => GraphWorkspace) { mutationResult = handler; },
@@ -500,6 +509,37 @@ test('等待 graphOpen 时关闭后，迟到结果不能重新打开界面', asy
   assert.equal(closing[0].detail.activationId, 21);
 });
 
+test('图谱背景正常显示，无背景时隐藏，迟到加载不读取像素或改变新界面', async () => {
+  for (const next of ['no-background', 'closed']) {
+    const app = fixture(undefined, { surface: 'graph' }), root = app.document.querySelector('#rabbit-graph-root');
+    const background = root.querySelector('.rg-background'), createElement = app.document.createElement;
+    let pixelReads = 0;
+    app.document.createElement = (tag: string) => {
+      const element = createElement(tag);
+      if (tag === 'canvas') element.getContext = () => ({
+        drawImage() {}, getImageData() { pixelReads++; return { data: new Uint8ClampedArray(32 * 32 * 4) }; },
+      });
+      return element;
+    };
+    const image = 'data:image/png;base64,AA==';
+    const opening = app.api.open({ workspaceId: 'A', backgroundImageDataUrl: image });
+    await app.resolve(0, workspace('A')); await opening;
+    assert.equal(background.hidden, false); assert.equal(background.src, image);
+    background.dispatchEvent({ type: 'load' });
+    assert.equal(pixelReads, 0, '背景展示不需要读取像素');
+    if (next === 'no-background') {
+      const reopening = app.api.open({ workspaceId: 'B' });
+      await app.resolve(1, workspace('B')); await reopening;
+      assert.equal(background.hidden, true);
+    } else app.api.close();
+    const snapshot = app.api.getSnapshot(), classes = root.className, hidden = background.hidden;
+    background.dispatchEvent({ type: 'load' });
+    assert.equal(pixelReads, 0, next);
+    assert.equal(background.hidden, hidden, next); assert.equal(root.className, classes, next);
+    assert.deepEqual(app.api.getSnapshot(), snapshot, next);
+  }
+});
+
 test('工作区更新只接收当前文档的新修订，陈旧或其它工作区消息不覆盖画布', async () => {
   const app = fixture();
   const opening = app.api.open({ activationId: 31, workspaceId: 'A', view: 'graph' });
@@ -553,87 +593,181 @@ test('触控板平移和Ctrl缩放经过画布入口生效，卡内阅读滚动�
   assert.ok(app.api.getSnapshot().view.zoom < zoomed.zoom);
 });
 
-test('进入和切图居中根节点，拖动缩放与窗口缩小时统一约束视角', async () => {
+test('进入和切图恢复各自保存的视角，拖动缩放与窗口缩小时统一约束视角', async () => {
   const app = fixture(), data = workspace('A'), original = data.graphs[0]; original.layoutUnit = 240;
-  original.view = { x: 5000, y: -5000, zoom: .4 };
+  original.view = { x: 40, y: -80, zoom: .75 };
   original.nodes.push(...[['a', 'root'], ['b', 'a']].map(([id, parentId]) => ({ ...structuredClone(original.nodes[0]), id, parentId, kind: 'card' as const })));
-  data.graphs.push({ ...structuredClone(original), id: 'second-graph', title: '第二张图', view: { x: -9000, y: 7000, zoom: 1.8 } });
-  const opening = app.api.open({ activationId: 365, workspaceId: 'A', view: 'graph' }); await app.resolve(0, data); await opening;
-  const viewport = app.document.querySelector('.rg-viewport'), root = app.document.getElementById('rabbit-graph-root');
-  const assertRootCentered = () => {
-    const snapshot = app.api.getSnapshot(), graph = snapshot.workspace.graphs.find((item: any) => item.id === snapshot.graphId), card = app.document.querySelector('.rg-world').querySelectorAll('.rg-card').find((item: any) => item.dataset.nodeId === graph.rootId);
-    const width = parseFloat(root.style['--rg-width']);
-    assert.equal(snapshot.view.zoom, 1);
-    assert.ok(Math.abs(snapshot.view.x + parseFloat(card.style.left) + width / 2 - viewport.clientWidth / 2) < 1e-9);
-    assert.ok(Math.abs(snapshot.view.y + parseFloat(card.style.top) + parseFloat(card.style.height) / 2 - viewport.clientHeight / 2) < 1e-9);
-  };
-  const dragFar = () => { app.pointer(viewport, 'pointerdown'); app.pointer(viewport, 'pointermove', { clientX: -1e6, clientY: -1e6 }); app.pointer(viewport, 'pointerup', { clientX: -1e6, clientY: -1e6 }); return app.api.getSnapshot().view; };
-  assertRootCentered();
+  const secondView = { x: -50, y: -90, zoom: 1.2 };
+  data.graphs.push({ ...structuredClone(original), id: 'second-graph', title: '第二张图', view: secondView });
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const viewport = app.document.querySelector('.rg-viewport'), view = () => JSON.parse(JSON.stringify(app.api.getSnapshot().view));
+  assert.deepEqual(view(), original.view);
+  const dragFar = () => { app.pointer(viewport, 'pointerdown'); app.pointer(viewport, 'pointermove', { clientX: -1e6, clientY: -1e6 }); app.pointer(viewport, 'pointerup', { clientX: -1e6, clientY: -1e6 }); return view(); };
   const limited = dragFar(); assert.ok(Math.abs(limited.x) < 10000 && Math.abs(limited.y) < 10000);
   assert.deepEqual(dragFar(), limited);
-  app.wheel(viewport, { deltaY: 1000, ctrlKey: true }); assert.equal(app.api.getSnapshot().view.zoom, .4);
+  app.wheel(viewport, { deltaY: 1000, ctrlKey: true }); assert.equal(view().zoom, .4);
   const zoomedEdge = dragFar(); assert.deepEqual(dragFar(), zoomedEdge);
   app.resize(600, 400); await flush(); await flush();
-  assert.equal(app.api.getSnapshot().view.zoom, .4, 'resize保留当前缩放');
+  assert.equal(view().zoom, .4);
   const resizedEdge = dragFar(); assert.deepEqual(dragFar(), resizedEdge);
-  assert.notEqual(resizedEdge.x, zoomedEdge.x, '窗口变化后边界按新viewport重新计算');
-  app.click(app.document.querySelector('[aria-label="打开图谱：第二张图"]')); await flush(); assertRootCentered();
-  app.wheel(viewport, { deltaX: 30, deltaY: 20 });
-  app.click(app.document.querySelector('[aria-label="打开图谱：图"]')); await flush(); assertRootCentered();
+  assert.notEqual(resizedEdge.x, zoomedEdge.x);
+  app.resize(1200, 800); await flush(); await flush(); const firstView = view();
+  app.click(app.document.querySelector('[aria-label="打开图谱：第二张图"]')); await flush(); assert.deepEqual(view(), secondView);
+  app.wheel(viewport, { deltaX: 30, deltaY: 20 }); const changedSecond = view();
+  app.click(app.document.querySelector('[aria-label="打开图谱：图"]')); await flush(); assert.deepEqual(view(), firstView);
+  app.click(app.document.querySelector('[aria-label="打开图谱：第二张图"]')); await flush(); assert.deepEqual(view(), changedSecond);
 });
 
-test('当前图回正逐帧更新真实视角，流式刷新不中断平滑到根中心', async () => {
+test('再次点击当前图和流式刷新保留正在查看的位置，不启动回中动画', async () => {
   const app = fixture(undefined, { manualFrames: true }), data = workspace('A'); data.graphs[0].layoutUnit = 240;
-  const opening = app.api.open({ activationId: 366, workspaceId: 'A', view: 'graph' }); await app.resolve(0, data); await opening;
-  const target = { x: 180, y: -60, zoom: 1 }, viewport = app.document.querySelector('.rg-viewport'), world = app.document.querySelector('.rg-world');
-  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), target, '首次打开直接居中');
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const viewport = app.document.querySelector('.rg-viewport'), world = app.document.querySelector('.rg-world');
   app.pointer(viewport, 'pointerdown'); app.pointer(viewport, 'pointermove', { clientX: 90, clientY: 60 }); app.pointer(viewport, 'pointerup', { clientX: 90, clientY: 60 });
   const before = app.api.getSnapshot().view;
-  app.click(app.document.querySelector('[aria-label="打开图谱：图"]')); app.frame(0);
+  app.click(app.document.querySelector('[aria-label="打开图谱：图"]')); app.frame(120);
   assert.deepEqual(app.api.getSnapshot().view, before);
-  app.frame(120); const middle = app.api.getSnapshot().view;
-  assert.ok(middle.x < before.x && middle.x > target.x); assert.ok(middle.y < before.y && middle.y > target.y);
-  assert.ok((before.x - middle.x) / (before.x - target.x) > 120 / 420, '使用非线性减速曲线');
-  assert.equal(world.style.transform, `translate(${middle.x}px,${middle.y}px) scale(${middle.zoom})`);
   const updated = app.api.getSnapshot().workspace; updated.revision++; updated.graphs[0].nodes[0].title = '更新中'; app.changed(updated);
-  app.frame(300);
-  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), target);
-  assert.equal(world.style.transform, 'translate(180px,-60px) scale(1)');
+  app.frame(1000); assert.deepEqual(app.api.getSnapshot().view, before);
+  assert.equal(world.style.transform, `translate(${before.x}px,${before.y}px) scale(${before.zoom})`);
 });
 
-test('快速切图只有最后一次回正完成，手动平移中断后不被迟到动画复位', async () => {
+test('快速切图立即恢复目标视角，淡入动画结束不覆盖后续平移', async () => {
   const app = fixture(undefined, { manualFrames: true }), data = workspace('A'); data.graphs[0].layoutUnit = 240;
-  for (const [id, x] of [['B', 1000], ['C', -500]] as const) {
-    const graph = structuredClone(data.graphs[0]); graph.id = id; graph.title = id; graph.nodes[0].x = x; data.graphs.push(graph);
+  for (const [id, x] of [['B', 40], ['C', 90]] as const) {
+    const current = structuredClone(data.graphs[0]); current.id = id; current.title = id; current.view = { x, y: -80, zoom: .8 }; data.graphs.push(current);
   }
-  const opening = app.api.open({ activationId: 367, workspaceId: 'A', view: 'graph' }); await app.resolve(0, data); await opening;
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
   app.click(app.document.querySelector('[aria-label="打开图谱：B"]')); app.frame(120);
-  app.click(app.document.querySelector('[aria-label="打开图谱：C"]')); app.frame(120); app.frame(300); await flush();
-  assert.equal(app.api.getSnapshot().graphId, 'C');
-  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), { x: 980, y: -60, zoom: 1 });
-  app.frame(1000); assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), { x: 980, y: -60, zoom: 1 });
+  app.click(app.document.querySelector('[aria-label="打开图谱：C"]'));
+  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), data.graphs[2].view);
   const viewport = app.document.querySelector('.rg-viewport'); app.wheel(viewport, { deltaX: -60, deltaY: -40 });
-  app.click(app.document.querySelector('[aria-label="打开图谱：C"]')); app.frame(120);
-  app.wheel(viewport, { deltaX: 8, deltaY: 4 }); const interrupted = app.api.getSnapshot().view;
-  app.frame(1000); await flush(); app.frame(1000);
-  assert.deepEqual(app.api.getSnapshot().view, interrupted);
+  const changed = app.api.getSnapshot().view; app.frame(1000); await flush(); app.frame(1000);
+  assert.deepEqual(app.api.getSnapshot().view, changed);
 });
 
-test('减少动态效果时回正和切图直接到位且不留下延迟视角修改', async () => {
+test('减少动态效果时也保留视角，只有未初始化的新图默认居中', async () => {
   const app = fixture(undefined, { manualFrames: true, reducedMotion: true }), data = workspace('A'); data.graphs[0].layoutUnit = 240;
-  const second = structuredClone(data.graphs[0]); second.id = 'second'; second.title = '第二张图'; second.nodes[0].x = 1000; data.graphs.push(second);
-  const opening = app.api.open({ activationId: 368, workspaceId: 'A', view: 'graph' }); await app.resolve(0, data); await opening;
-  app.wheel(app.document.querySelector('.rg-viewport'), { deltaX: 30, deltaY: 20 });
-  app.click(app.document.querySelector('[aria-label="打开图谱：图"]'));
-  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), { x: 180, y: -60, zoom: 1 });
+  const second = structuredClone(data.graphs[0]); second.id = 'second'; second.title = '第二张图'; second.nodes[0].x = 1000; second.layoutInitialized = false; data.graphs.push(second);
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.wheel(app.document.querySelector('.rg-viewport'), { deltaX: 30, deltaY: 20 }); const saved = app.api.getSnapshot().view;
+  app.click(app.document.querySelector('[aria-label="打开图谱：图"]')); assert.deepEqual(app.api.getSnapshot().view, saved);
   app.click(app.document.querySelector('[aria-label="打开图谱：第二张图"]'));
-  const target = { x: -520, y: -60, zoom: 1 };
-  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), target);
+  const target = { x: -520, y: -60, zoom: 1 }; assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), target);
   app.frame(1000); await flush(); assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), target);
 });
 
+test('切图、退出重进及渲染器重建恢复位置缩放和展开卡片，主动收起会被记住', async () => {
+  const storage = new Map<string,string>(), app = fixture(undefined, { storage }), data = workspace('A');
+  data.graphs.push({ ...structuredClone(data.graphs[0]), id: 'second', title: '第二张图' });
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const viewport = app.document.querySelector('.rg-viewport'); app.wheel(viewport, { deltaY: -160, ctrlKey: true }); app.wheel(viewport, { deltaX: 15, deltaY: 10 });
+  const saved = JSON.parse(JSON.stringify(app.api.getSnapshot().view));
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+  app.click(app.document.querySelector('[aria-label="打开图谱：第二张图"]')); await flush();
+  assert.equal(app.document.querySelector('.rg-focus').querySelector('.rg-card'), null);
+  app.click(app.document.querySelector('[aria-label="打开图谱：图"]')); await flush();
+  assert.equal(app.document.querySelector('.rg-focus .rg-card').dataset.nodeId, 'root');
+  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), saved);
+  app.api.close(); const reopening = app.api.open({ workspaceId: 'A' }); await app.resolve(1, data); await reopening;
+  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), saved);
+  assert.equal(app.document.querySelector('.rg-focus .rg-card').dataset.nodeId, 'root');
+  app.api.close();
+  const restarted = fixture(undefined, { storage }), restart = restarted.api.open({ workspaceId: 'A' }); await restarted.resolve(0, data); await restart;
+  assert.deepEqual(JSON.parse(JSON.stringify(restarted.api.getSnapshot().view)), saved);
+  assert.equal(restarted.document.querySelector('.rg-focus .rg-card').dataset.nodeId, 'root');
+  restarted.click(restarted.document.querySelector('.rg-focus')); await flush(); restarted.api.close();
+  const closed = restarted.api.open({ workspaceId: 'A' }); await restarted.resolve(1, data); await closed;
+  assert.equal(restarted.document.querySelector('.rg-focus').querySelector('.rg-card'), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(restarted.api.getSnapshot().view)), saved);
+});
+
+test('视图记忆按工作区隔离，消失的展开卡片不阻止恢复视角', async () => {
+  const storage = new Map<string,string>(), app = fixture(undefined, { storage }), first = workspace('A'), second = workspace('B');
+  second.graphs[0].id = first.graphs[0].id; second.lastGraphId = first.lastGraphId; second.graphs[0].view = { x: 120, y: 30, zoom: .6 };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, first); await opening;
+  app.wheel(app.document.querySelector('.rg-viewport'), { deltaX: 45, deltaY: 20 }); const saved = JSON.parse(JSON.stringify(app.api.getSnapshot().view));
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+  const another = app.api.open({ workspaceId: 'B' }); await app.resolve(1, second); await another;
+  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), second.graphs[0].view);
+  assert.equal(app.document.querySelector('.rg-focus').querySelector('.rg-card'), null);
+  const changed = structuredClone(first); changed.graphs[0].rootId = 'replacement'; changed.graphs[0].nodes[0].id = 'replacement';
+  const back = app.api.open({ workspaceId: 'A' }); await app.resolve(2, changed); await back;
+  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), saved);
+  assert.equal(app.document.querySelector('.rg-focus').querySelector('.rg-card'), null);
+  assert.equal(JSON.parse(storage.get('rabbitball.graph-view:["A","graph-A"]')!).focusId, null);
+});
+
+test('缩略图只提供用量和删除，删除整张图后撤销恢复原位置及展开卡片', async () => {
+  const storage = new Map<string,string>(), app = fixture(undefined, { storage }), data = workspace('A');
+  const waitFor = async (ready: () => boolean, message: string) => {
+    const deadline = Date.now() + 2000;
+    while(!ready()) { assert.ok(Date.now() < deadline, message); await flush(); }
+  };
+  data.graphs.push({ ...structuredClone(data.graphs[0]), id: 'second', title: '第二张图' });
+  let current = structuredClone(data); const deleted: GraphWorkspace[] = [], usage: any[] = [];
+  app.window.RabbitUsage = { open: (scope: any) => usage.push(scope) };
+  app.mutateWith(mutation => {
+    if(mutation.type === 'delete-graph') {
+      deleted.push(structuredClone(current));
+      const index = current.graphs.findIndex(item => item.id === mutation.graphId); assert.notEqual(index, -1);
+      current.graphs.splice(index, 1);
+      if(current.lastGraphId === mutation.graphId) current.lastGraphId = current.graphs[Math.min(index, current.graphs.length - 1)]?.id;
+    } else if(mutation.type === 'undo') { const revision = current.revision; current = deleted.pop()!; current.revision = revision; }
+    else if(mutation.type === 'visit') current.lastGraphId = mutation.graphId;
+    else if(mutation.type === 'view') { const target = current.graphs.find(item => item.id === mutation.graphId); assert.ok(target, '不向已删除图提交迟到视图'); target.view = mutation.view; }
+    current.revision++; return structuredClone(current);
+  });
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const firstThumb = app.document.querySelector('.rg-thumb');
+  assert.equal(firstThumb.querySelector('.rg-thumb-controls').children.length, 2);
+  app.click(app.document.querySelector('[aria-label="查看图谱用量：第二张图"]'));
+  assert.equal(app.api.getSnapshot().graphId, 'graph-A');
+  assert.deepEqual(JSON.parse(JSON.stringify(usage)), [{kind:'graph',workspaceId:'A',graphId:'second'}]);
+  app.wheel(app.document.querySelector('.rg-viewport'), { deltaY: -120, ctrlKey: true });
+  const saved = JSON.parse(JSON.stringify(app.api.getSnapshot().view));
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+  app.click(app.document.querySelector('[aria-label="删除图谱：图"]')); await flush();
+  assert.equal(app.api.getSnapshot().graphId, 'second');
+  assert.deepEqual(app.api.getSnapshot().workspace.graphs.map((item: any) => item.id), ['second']);
+  assert.equal(app.document.querySelector('[aria-label="打开图谱：图"]'), null);
+  assert.ok(app.document.querySelector('.rg-toast').textContent.includes('已删除图谱'));
+  const undo = app.document.querySelector('.rg-toast').querySelector('button');
+  assert.equal(typeof undo.onclick, 'function', '点击真实撤销按钮，不能由夹具的宽松选择器命中toast容器');
+  app.click(undo);
+  await waitFor(() => app.mutations.some(item => item.mutation.type === 'undo'), '撤销操作应提交到桌面桥');
+  await waitFor(() => app.api.getSnapshot().graphId === 'graph-A' && !!app.document.querySelector('.rg-focus .rg-card'), '撤销完成后应恢复原图及展开卡片');
+  assert.equal(app.api.getSnapshot().graphId, 'graph-A');
+  assert.deepEqual(JSON.parse(JSON.stringify(app.api.getSnapshot().view)), saved);
+  assert.equal(app.document.querySelector('.rg-focus .rg-card').dataset.nodeId, 'root');
+  assert.equal(app.api.getSnapshot().workspace.graphs.length, 2);
+  app.click(app.document.querySelector('[aria-label="删除图谱：图"]')); await flush();
+  app.click(app.document.querySelector('[aria-label="删除图谱：第二张图"]')); await flush();
+  app.tick(300); await flush();
+  assert.equal(app.api.getSnapshot().graphId, null);
+  assert.equal(app.api.getSnapshot().workspace.graphs.length, 0);
+  assert.equal(app.document.querySelector('.rg-world').querySelector('.rg-card'), null);
+  app.click(app.document.querySelector('.rg-toast').querySelector('button'));
+  await waitFor(() => app.api.getSnapshot().graphId === 'second' && app.api.getSnapshot().workspace.graphs.length === 1, '空工作区撤销后应恢复最后删除的图');
+  assert.equal(app.api.getSnapshot().graphId, 'second');
+  assert.equal(app.api.getSnapshot().workspace.graphs.length, 1);
+});
+
+test('图谱删除失败保留当前视图和展开卡片，并显示失败原因', async () => {
+  const app = fixture(), data = workspace('A'), opening = app.api.open({ workspaceId: 'A' });
+  await app.resolve(0, data); await opening;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+  const view = app.api.getSnapshot().view;
+  app.mutateWith(mutation => { if(mutation.type === 'delete-graph') throw new Error('文件暂不可写'); return data; });
+  app.click(app.document.querySelector('[aria-label="删除图谱：图"]')); await flush();
+  assert.equal(app.api.getSnapshot().graphId, 'graph-A');
+  assert.equal(app.api.getSnapshot().workspace.graphs.length, 1);
+  assert.deepEqual(app.api.getSnapshot().view, view);
+  assert.equal(app.document.querySelector('.rg-focus .rg-card').dataset.nodeId, 'root');
+  assert.ok(app.document.querySelector('.rg-toast').textContent.includes('文件暂不可写'));
+});
+
 test('正文单指保留原生手势，双指平移缩放不受pointercancel影响且松一指无跳变', async () => {
-  const app = fixture(), data = workspace('A'); data.graphs[0].layoutUnit = 240; data.graphs[0].nodes[0].markdown = '可选正文';
+  const app = fixture(), data = workspace('A'); data.graphs[0].layoutUnit = 240; data.graphs[0].view = { x: 180, y: -60, zoom: 1 }; data.graphs[0].nodes[0].markdown = '可选正文';
   const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
   const body = app.document.querySelector('.rg-world .rg-body'), viewport = app.document.querySelector('.rg-viewport');
   const point = (identifier: number, clientX: number, clientY: number) => ({ identifier, clientX, clientY, target: body });
@@ -939,9 +1073,9 @@ test('聊天上下文只在工作区或图谱切换时通知，同图选卡和�
   assert.deepEqual(contexts(), [{ workspaceId: 'A', graphId: 'graph-A' }, { workspaceId: 'A', graphId: 'second-graph' }, { workspaceId: 'B', graphId: 'graph-B' }, null]);
 });
 
-test('更新移除当前图时清除旧牌并居中接替图根节点，无图上下文只通知一次', async () => {
+test('更新移除当前图时清除旧牌并恢复接替图视角，无图上下文只通知一次', async () => {
   const app = fixture(), data = workspace('A'); data.graphs[0].layoutUnit = 240;
-  const second = { ...structuredClone(data.graphs[0]), id: 'second-graph', title: '第二张图', view: { x: 42, y: -15, zoom: .75 } };
+  const second = { ...structuredClone(data.graphs[0]), id: 'second-graph', title: '第二张图', view: { x: 50, y: -15, zoom: .75 } };
   second.nodes[0].title = '第二张图的根'; data.graphs.push(second);
   const opening = app.api.open({ activationId: 44, workspaceId: 'A', view: 'graph' }); await app.resolve(0, data); await opening;
   const oldCard = app.document.querySelector('.rg-world').querySelector('.rg-card');
@@ -954,9 +1088,7 @@ test('更新移除当前图时清除旧牌并居中接替图根节点，无图�
   assert.equal(newCard.dataset.graphId, second.id); assert.equal(newCard.querySelector('.rg-title').title, '第二张图的根');
   assert.equal(app.document.querySelector('.rg-focus').querySelector('.rg-card'), null);
   const view = app.api.getSnapshot().view;
-  assert.equal(view.zoom, 1);
-  assert.equal(view.x + parseFloat(newCard.style.left) + 120, 600);
-  assert.equal(view.y + parseFloat(newCard.style.top) + parseFloat(newCard.style.height) / 2, 400);
+  assert.deepEqual(JSON.parse(JSON.stringify(view)), second.view);
   assert.equal(app.mutations.some(item => item.mutation.type === 'view' && item.mutation.graphId === 'graph-A'), false);
   const empty = structuredClone(replacement); empty.revision++; empty.graphs = []; delete empty.lastGraphId;
   app.changed(empty); app.changed({ ...empty, revision: empty.revision + 1 }); await flush();
@@ -1338,13 +1470,10 @@ test('普通及展开的根、模型卡和自定义卡均可直接添加空白�
     assert.equal(app.imageCaptures.length, 0, '创建自定义卡片无需先截图');
     const custom = app.document.querySelector('.rg-focus .rg-card');
     assert.equal(custom.dataset.nodeId, 'created-custom'); assert.equal(custom.querySelectorAll('img').length, 0);
-    assert.ok(custom.textContent.includes('添加截图或文本'));
-    assert.ok(custom.querySelector('[aria-label="添加截图"]')); assert.ok(custom.querySelector('[aria-label="添加文本"]'));
+    assert.ok(custom.querySelector('[aria-label="添加截图"]')); assert.ok(custom.querySelector('.rg-source-input'));
     assert.ok(custom.querySelector('[aria-label="添加自定义卡片"]'));
     assert.equal(custom.querySelector('[aria-label="重新生成"]'), null); assert.equal(custom.querySelector('[aria-label="重新分析"]'), null);
-    app.click(custom.querySelector('[aria-label="添加文本"]')); await flush();
-    const editor = custom.querySelector('.rg-root-text'); editor.querySelector('textarea').value = '纯文本自定义资料';
-    app.click(editor.querySelector('[aria-label="保存文本"]')); await flush();
+    const input = editSource(custom, '纯文本自定义资料'); input.dispatchEvent({ type: 'blur' }); await flush();
     assert.equal(current.graphs[0].nodes.find(item => item.id === 'created-custom')!.markdown, '纯文本自定义资料');
     assert.equal(app.imageCaptures.length, 0); assert.equal(custom.querySelectorAll('img').length, 0);
   }
@@ -1393,9 +1522,7 @@ test('自定义子卡可追加截图和编辑文字，再以两次Enter完成批
     type: 'append-node-images', graphId: 'graph-A', nodeId: 'custom', images: [second],
   } });
   assert.equal(app.document.querySelector('.rg-focus .rg-card'), focus); assert.equal(focus.querySelectorAll('img').length, 2);
-  app.click(focus.querySelector('[aria-label="添加文本"]')); await flush();
-  const editor = focus.querySelector('.rg-root-text'), text = editor.querySelector('[aria-label="自定义卡片文本"]'); assert.ok(text);
-  text.value = '用于比较的自定义资料'; app.click(editor.querySelector('[aria-label="保存文本"]')); await flush();
+  const text = editSource(focus, '用于比较的自定义资料'); text.dispatchEvent({ type: 'blur' }); await flush();
   const edit = app.mutations.find(item => item.mutation.type === 'edit');
   assert.equal(edit.mutation.nodeId, 'custom'); assert.equal(edit.mutation.markdown, '用于比较的自定义资料');
   const image = focus.querySelector('img');
@@ -1420,10 +1547,10 @@ test('自定义卡片创建迟到成功仍保存原父节点，但不抢走另�
   assert.equal(mutations.length, 1, '创建尚未完成不重复提交');
   const next = app.api.open({ workspaceId: 'B' }); await app.resolve(1, workspace('B')); await next;
   app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
-  const focus = app.document.querySelector('.rg-focus .rg-card'), control = focus.querySelector('[aria-label="添加文本"]'); control.focus();
+  const focus = app.document.querySelector('.rg-focus .rg-card'), control = focus.querySelector('.rg-source-input'); control.focus();
   const saved = structuredClone(data); saved.revision++; saved.graphs[0].nodes.push({ ...structuredClone(root), id: 'custom', parentId: 'parent', title: '自定义卡片' });
   pending.resolve(saved); await flush();
-  assert.deepEqual(JSON.parse(JSON.stringify(mutations)), [{ workspaceId: 'A', mutation: {
+  assert.deepEqual(JSON.parse(JSON.stringify(mutations.filter(item => item.mutation.type === 'add-custom-node'))), [{ workspaceId: 'A', mutation: {
     type: 'add-custom-node', graphId: 'graph-A', parentId: 'parent', images: [], markdown: '',
   } }]);
   assert.equal(app.api.getSnapshot().workspaceId, 'B'); assert.ok(app.document.querySelector('.rg-focus .rg-card') === focus);
@@ -1450,7 +1577,7 @@ test('自定义卡片创建失败或父卡删除后，不展开幽灵卡片且�
   assert.equal(app.imageCaptures.length, 0);
 });
 
-test('根节点内联编辑支持添加、修改和取消，子卡不出现根资料工具', async () => {
+test('资料卡默认输入并自动保存，预览显示正文以供批注，模型子卡保持阅读', async () => {
   const app = fixture(), data = workspace('A'), root = data.graphs[0].nodes[0];
   data.graphs[0].nodes.push({ ...structuredClone(root), id: 'child', parentId: 'root', kind: 'card' });
   let current = structuredClone(data);
@@ -1462,59 +1589,138 @@ test('根节点内联编辑支持添加、修改和取消，子卡不出现根�
   const world = app.document.querySelector('.rg-world'), cards = world.querySelectorAll('.rg-card');
   app.click(cards.find((item: any) => item.dataset.nodeId === 'root')); await flush();
   const focus = app.document.querySelector('.rg-focus .rg-card');
-  app.click(focus.querySelector('[aria-label="添加文本"]')); await flush();
-  const editor = focus.querySelector('.rg-root-text'), input = editor.querySelector('[aria-label="根节点文本"]');
-  assert.equal(editor.parentElement, focus.querySelector('.rg-content'));
+  const input = focus.querySelector('.rg-source-input'), preview = focus.querySelector('[aria-label="预览内容并添加批注"]');
+  assert.equal(input.parentElement, focus.querySelector('.rg-content'));
   assert.equal(app.document.querySelector('.rg-dialog'), null);
-  input.value = '补充的根节点文本'; input.dispatchEvent({ type: 'input', bubbles: true });
-  app.click(editor.querySelector('[aria-label="保存文本"]')); await flush();
+  assert.equal(preview.hidden, true); editSource(focus, '补充的根节点文本');
+  assert.equal(preview.hidden, false); app.tick(599); await flush(); assert.equal(app.mutations.some(item => item.mutation.type === 'edit'), false);
+  app.tick(1); await flush();
   assert.deepEqual(JSON.parse(JSON.stringify(app.mutations.filter(item => item.mutation.type === 'edit'))), [{ workspaceId: 'A', mutation: {
     type: 'edit', graphId: 'graph-A', nodeId: 'root', title: root.title, markdown: '补充的根节点文本', contentRevision: root.contentRevision,
   } }]);
-  assert.equal(focus.querySelector('.rg-root-text'), null);
+  assert.equal(focus.querySelector('.rg-source-input'), input);
   assert.equal(app.document.querySelector('.rg-focus .rg-card'), focus);
-  app.click(focus.querySelector('[aria-label="编辑文本"]')); await flush();
-  const editing = focus.querySelector('.rg-root-text');
-  assert.equal(editing.querySelector('textarea').value, '补充的根节点文本');
-  editing.querySelector('textarea').value = '取消这一版';
-  app.click(editing.querySelector('[aria-label="取消编辑"]')); await flush();
-  assert.equal(focus.querySelector('.rg-root-text'), null);
+  app.click(preview); await flush();
+  assert.equal(input.hidden, true); assert.equal(focus.querySelector('.rg-body').hidden, false);
+  assert.equal(focus.querySelector('.rg-body').textContent, '补充的根节点文本');
+  const body = focus.querySelector('.rg-body');
+  app.window.RabbitGraphSelection = { ...app.window.RabbitGraphSelection, capture: () => ({ selection: { kind: 'text', text: '根节点', start: 3, end: 6 }, anchor: { left: 20, top: 20, right: 80, bottom: 40 } }) };
+  app.window.getSelection = () => ({ isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: body }), toString: () => '根节点', removeAllRanges() {} });
+  app.pointer(body, 'pointerup'); app.tick(0); assert.ok(app.document.querySelector('.rg-note-editor'), '预览正文沿用原有选文批注入口');
+  app.document.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {} });
+  app.window.getSelection = () => ({ rangeCount: 0, toString: () => '', removeAllRanges() {} });
+  app.click(preview); await flush(); assert.equal(input.hidden, false); assert.ok(app.document.activeElement === input);
   assert.equal(app.mutations.filter(item => item.mutation.type === 'edit').length, 1);
   app.click(app.document.querySelector('.rg-focus')); await flush();
   app.click(cards.find((item: any) => item.dataset.nodeId === 'child')); await flush();
   const child = app.document.querySelector('.rg-focus .rg-card');
   assert.equal(child.querySelector('[aria-label="添加截图"]'), null);
-  assert.equal(child.querySelector('[aria-label="添加文本"]'), null);
-  assert.equal(child.querySelector('[aria-label="编辑文本"]'), null);
+  assert.equal(child.querySelector('.rg-source-input'), null);
 });
 
-test('根文本Enter保存，Shift+Enter和输入法保持输入，失败保留编辑器可重试', async () => {
+test('资料输入保留普通换行和输入法，保存失败留稿并可再次自动保存', async () => {
   const app = fixture(), data = workspace('A'); data.graphs[0].nodes[0].markdown = '原文';
   const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
   app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
   const focus = app.document.querySelector('.rg-focus .rg-card');
-  app.click(focus.querySelector('[aria-label="编辑文本"]')); await flush();
-  const editor = focus.querySelector('.rg-root-text'), input = editor.querySelector('textarea'); input.value = '第一行\n第二行';
+  const input = editSource(focus, '第一行\n第二行');
   const enter = (values: Record<string, unknown> = {}) => {
     const event: any = { type: 'keydown', key: 'Enter', bubbles: true, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...values };
     input.dispatchEvent(event); return event;
   };
-  assert.equal(enter({ shiftKey: true }).defaultPrevented, false);
-  assert.equal(enter({ isComposing: true }).defaultPrevented, false);
-  assert.equal(enter({ keyCode: 229 }).defaultPrevented, false);
+  assert.equal(enter().defaultPrevented, false); assert.equal(enter({ shiftKey: true }).defaultPrevented, false);
+  assert.equal(enter({ ctrlKey: true, isComposing: true }).defaultPrevented, false);
+  assert.equal(enter({ ctrlKey: true, keyCode: 229 }).defaultPrevented, false);
   assert.equal(app.mutations.filter(item => item.mutation.type === 'edit').length, 0);
   let attempts = 0;
-  app.mutateWith(mutation => { if (mutation.type === 'edit' && ++attempts === 1) throw new Error('保存失败'); return data; });
-  assert.equal(enter().defaultPrevented, true); await flush();
-  assert.equal(focus.querySelector('.rg-root-text'), editor);
+  app.mutateWith(mutation => { if (mutation.type === 'edit') { if (++attempts === 1) throw new Error('保存失败'); const saved = structuredClone(data); saved.revision++; saved.graphs[0].nodes[0].markdown = mutation.markdown; return saved; } return data; });
+  app.tick(600); await flush();
+  assert.equal(focus.querySelector('.rg-source-input'), input);
   assert.equal(input.value, '第一行\n第二行');
-  assert.equal(editor.querySelector('[aria-label="保存文本"]').disabled, false);
-  enter(); await flush();
+  assert.match(app.document.querySelector('.rg-toast').textContent, /保存失败/);
+  input.dispatchEvent({ type: 'blur' }); await flush();
   const edits = app.mutations.filter(item => item.mutation.type === 'edit');
   assert.equal(edits.length, 2); assert.deepEqual(edits[1], edits[0]);
   assert.equal(edits[0].mutation.markdown, '第一行\n第二行');
-  assert.equal(focus.querySelector('.rg-root-text'), null);
+  assert.equal(focus.querySelector('.rg-source-input'), input);
   assert.equal(app.generated.length, 0, '编辑根文字不自动触发批注生成');
+});
+
+test('资料输入先保存再以问题生成，有未生成批注时优先使用批注，重复激活只提交一次', async () => {
+  for (const annotated of [false, true]) {
+    const app = fixture(), data = workspace('A');
+    if (annotated) data.graphs[0].nodes[0].annotations = [{ id: 'note', selection: { kind: 'text', text: '资料', start: 0, end: 2 }, comment: '解释重点' }];
+    let current = structuredClone(data);
+    app.mutateWith(mutation => { if (mutation.type === 'edit') { current = structuredClone(current); current.revision++; current.graphs[0].nodes[0].markdown = mutation.markdown; current.graphs[0].nodes[0].contentRevision++; } return current; });
+    const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+    app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+    const card = app.document.querySelector('.rg-focus .rg-card'), generate = card.querySelector('.rg-generate');
+    if (!annotated) assert.equal(generate.disabled, true);
+    const input = editSource(card, '  请解释这个问题\n结合附件回答  '); assert.equal(generate.disabled, false);
+    input.dispatchEvent({ type: 'keydown', key: 'Enter', ctrlKey: true, bubbles: true, preventDefault() {}, stopPropagation() { this.stopped = true; } });
+    app.click(generate); await flush(); await flush();
+    assert.equal(app.mutations.filter(item => item.mutation.type === 'edit').length, 1);
+    assert.equal(current.graphs[0].nodes[0].markdown, input.value);
+    assert.deepEqual(JSON.parse(JSON.stringify(app.generated)), [{ workspaceId: 'A', graphId: 'graph-A', nodeId: 'root',
+      ...(annotated ? { annotationIds: ['note'] } : { question: '请解释这个问题\n结合附件回答' }) }]);
+  }
+});
+
+test('问题生成的保存失败保留输入和焦点，重试成功后才收回卡片', async () => {
+  const app = fixture(), data = workspace('A'); let attempts = 0;
+  app.mutateWith(mutation => { if (mutation.type === 'edit') { if (++attempts === 1) throw new Error('磁盘暂不可写'); const saved = structuredClone(data); saved.revision++; saved.graphs[0].nodes[0].markdown = mutation.markdown; return saved; } return data; });
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); const card = app.document.querySelector('.rg-focus .rg-card');
+  const input = editSource(card, '不能丢失的问题'), generate = card.querySelector('.rg-generate'); input.focus();
+  app.click(generate); await flush();
+  assert.equal(app.generated.length, 0); assert.ok(app.document.querySelector('.rg-focus .rg-card') === card);
+  assert.equal(input.value, '不能丢失的问题'); assert.match(app.document.querySelector('.rg-toast').textContent, /磁盘暂不可写/);
+  app.click(generate); await flush(); await flush();
+  assert.equal(attempts, 2); assert.equal(app.generated[0].question, '不能丢失的问题');
+  assert.equal(app.document.querySelector('.rg-focus .rg-card'), null);
+});
+
+test('生成服务失败后重开资料卡仍保留已保存的问题，可再次提交', async () => {
+  const app = fixture(), data = workspace('A'); let current = structuredClone(data), attempts = 0;
+  app.mutateWith(mutation => { if (mutation.type === 'edit') { current = structuredClone(current); current.revision++; current.graphs[0].nodes[0].markdown = mutation.markdown; } return current; });
+  const original = app.window.rabbitDesktop.graphGenerate;
+  app.window.rabbitDesktop.graphGenerate = async (request: any) => { await original(request); if (++attempts === 1) throw new Error('服务暂不可用'); };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); let card = app.document.querySelector('.rg-focus .rg-card');
+  editSource(card, '重试同一个问题'); app.click(card.querySelector('.rg-generate')); await flush(); await flush();
+  assert.match(app.document.querySelector('.rg-toast').textContent, /服务暂不可用/);
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); card = app.document.querySelector('.rg-focus .rg-card');
+  assert.equal(card.querySelector('.rg-source-input').value, '重试同一个问题');
+  app.click(card.querySelector('.rg-generate')); await flush(); await flush();
+  assert.equal(app.generated.length, 2); assert.equal(app.generated[1].question, app.generated[0].question);
+});
+
+test('自动保存期间继续输入会顺序保存最新草稿，旧回复不覆盖正在输入的文字', async () => {
+  const app = fixture(), data = workspace('A'), pending = deferred<void>(); let current = structuredClone(data);
+  app.mutateWith(mutation => { if (mutation.type === 'edit') { assert.equal(mutation.contentRevision, current.graphs[0].nodes[0].contentRevision); current = structuredClone(current); current.revision++; current.graphs[0].nodes[0].markdown = mutation.markdown; current.graphs[0].nodes[0].contentRevision++; } return current; });
+  const original = app.window.rabbitDesktop.graphMutate; let count = 0;
+  app.window.rabbitDesktop.graphMutate = async (id: string, mutation: any) => { if (mutation.type === 'edit' && ++count === 1) await pending.promise; return original(id, mutation); };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); const card = app.document.querySelector('.rg-focus .rg-card');
+  const input = editSource(card, '第一版'); app.tick(600); await flush();
+  editSource(card, '第二版包含新的问题'); pending.resolve(); await flush(); await flush();
+  assert.deepEqual(app.mutations.filter(item => item.mutation.type === 'edit').map(item => item.mutation.markdown), ['第一版', '第二版包含新的问题']);
+  assert.equal(input.value, '第二版包含新的问题'); assert.equal(current.graphs[0].nodes[0].markdown, input.value);
+});
+
+test('问题等待保存时切换工作区，迟到生成保持原目标且不收回新卡', async () => {
+  const app = fixture(), data = workspace('A'), pending = deferred<GraphWorkspace>();
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const original = app.window.rabbitDesktop.graphMutate;
+  app.window.rabbitDesktop.graphMutate = (id: string, mutation: any) => mutation.type === 'edit' ? pending.promise : original(id, mutation);
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); const card = app.document.querySelector('.rg-focus .rg-card');
+  editSource(card, 'A的问题'); app.click(card.querySelector('.rg-generate')); await flush();
+  const next = app.api.open({ workspaceId: 'B' }); await app.resolve(1, workspace('B')); await next;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); const other = app.document.querySelector('.rg-focus .rg-card'), input = editSource(other, 'B的草稿'); input.focus();
+  const saved = structuredClone(data); saved.revision++; saved.graphs[0].nodes[0].markdown = 'A的问题'; pending.resolve(saved); await flush(); await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(app.generated)), [{ workspaceId: 'A', graphId: 'graph-A', nodeId: 'root', question: 'A的问题' }]);
+  assert.equal(app.api.getSnapshot().workspaceId, 'B'); assert.ok(app.document.querySelector('.rg-focus .rg-card') === other);
+  assert.equal(input.value, 'B的草稿'); assert.ok(app.document.activeElement === input);
 });
 
 test('来源和普通卡片悬停预览目标图后，释放到末端只提交一次跨图移动', async () => {
@@ -1882,7 +2088,7 @@ test('Enter保存期间切换工作区，迟到成功不生成、不收起或抢
   const next = app.api.open({ workspaceId: 'B' }); await app.resolve(1, workspace('B')); await next;
   app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
   const focusB = app.document.querySelector('.rg-focus .rg-card');
-  const focusedControl = focusB.querySelector('[aria-label="添加文本"]'); focusedControl.focus();
+  const focusedControl = focusB.querySelector('.rg-source-input'); focusedControl.focus();
   const updated = structuredClone(data); updated.revision++; updated.graphs[0].nodes[0].annotations.push(submitted.annotation);
   saved.resolve(updated); await flush();
   assert.equal(app.api.getSnapshot().workspaceId, 'B');
@@ -1912,7 +2118,7 @@ test('Enter保存迟到完成不抢走同卡下一条批注或重新展开卡片
       app.click(app.document.querySelector('.rg-focus')); await flush();
       app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
       const reopened = app.document.querySelector('.rg-focus .rg-card'); assert.notEqual(reopened, oldFocus);
-      active = reopened.querySelector('[aria-label="添加文本"]'); active.focus();
+      active = reopened.querySelector('.rg-source-input'); active.focus();
     }
     const updated = structuredClone(data); updated.revision++; updated.graphs[0].nodes[0].annotations.push(submitted.annotation);
     saved.resolve(updated); await flush();
@@ -2104,34 +2310,35 @@ test('删除已有批注只提交移除批注操作，不删除其已生成子�
   assert.ok(app.api.getSnapshot().workspace.graphs[0].nodes.some((node: GraphNode) => node.id === 'branch'));
 });
 
-test('模式已关闭时从设置进入图谱，重复通知和未保存草稿回滚都不关闭图谱', async () => {
-  const saved = { graphPluginEnabled: true, graphModeEnabled: false }, app = fixture(saved);
+test('从设置进入图谱后，独立触发键草稿和保存通知不关闭图谱', async () => {
+  const saved = { graphPluginEnabled: true, graphActivationShortcut: null }, app = fixture(saved, { surface: 'graph' });
   const opening = app.api.open({ activationId: 121, workspaceId: 'A', view: 'graph', graphAction: 'rename-graph' });
   await app.resolve(0, workspace('A')); await opening;
   for (const type of ['settings:change', 'settings:saved']) app.emit(type, { settings: { ...saved } });
-  assert.equal(app.api.isOpen(), true);
-  app.emit('settings:change', { settings: { ...saved, graphModeEnabled: true } });
-  app.emit('settings:change', { settings: { ...saved, graphModeEnabled: false } });
+  app.emit('settings:change', { settings: { ...saved, graphActivationShortcut: ['AltRight'] } });
+  app.emit('settings:change', { settings: { ...saved, graphActivationShortcut: null } });
   assert.equal(app.api.isOpen(), true);
   assert.ok(app.document.querySelector('[aria-label="重命名图谱"]'));
   assert.equal(app.events.filter(event => event.type === 'graph:close').length, 0);
 });
 
-test('已保存的大爆炸模式从开启变为关闭时退出所属图谱', async () => {
-  const saved = { graphPluginEnabled: true, graphModeEnabled: true }, app = fixture(saved);
+test('保存独立触发键保留图谱和展开卡片，不改变当前视角', async () => {
+  const saved = { graphPluginEnabled: true, graphActivationShortcut: ['AltRight'] }, app = fixture(saved, { surface: 'graph' });
   const opening = app.api.open({ activationId: 131, workspaceId: 'A', view: 'graph' });
   await app.resolve(0, workspace('A')); await opening;
-  saved.graphModeEnabled = false;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+  const view = app.api.getSnapshot().view, card = app.document.querySelector('.rg-focus .rg-card');
+  saved.graphActivationShortcut = ['ControlRight', 'Space'];
   app.emit('settings:saved', { settings: { ...saved } });
   app.emit('settings:change', { settings: { ...saved } });
-  assert.equal(app.api.isOpen(), false);
-  const closed = app.events.filter(event => event.type === 'graph:close');
-  assert.equal(closed.length, 1);
-  assert.equal(closed[0].detail.activationId, 131);
+  assert.equal(app.api.isOpen(), true);
+  assert.equal(app.document.querySelector('.rg-focus .rg-card'), card);
+  assert.deepEqual(app.api.getSnapshot().view, view);
+  assert.equal(app.events.filter(event => event.type === 'graph:close').length, 0);
 });
 
 test('禁用插件立即关闭图谱并保留工作区数据', async () => {
-  const saved = { graphPluginEnabled: true, graphModeEnabled: false }, app = fixture(saved);
+  const saved = { graphPluginEnabled: true, graphActivationShortcut: null }, app = fixture(saved);
   const opening = app.api.open({ activationId: 141, workspaceId: 'A', view: 'graph' });
   await app.resolve(0, workspace('A')); await opening;
   app.emit('settings:change', { settings: { ...saved, graphPluginEnabled: false } });
@@ -2140,8 +2347,96 @@ test('禁用插件立即关闭图谱并保留工作区数据', async () => {
   assert.equal(app.api.getSnapshot().workspace.graphs.length, 1);
 });
 
+test('图谱窗口不读取桌面固定卡，也不渲染或上报固定卡命中区', async () => {
+  const app = fixture(undefined, { surface: 'graph' }); await flush();
+  assert.equal(app.graphListCount, 0); assert.equal(app.requests.length, 0);
+  const data = workspace('A'); data.graphs[0].nodes[0].pinned = true;
+  data.graphs.push({ ...structuredClone(data.graphs[0]), id: 'other', title: '另一图' });
+  const opening = app.api.open({ activationId: 201, workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.wheel(app.document.querySelector('.rg-viewport'), { deltaX: 10000, deltaY: 10000 });
+  app.resize(800, 600); await flush(); app.api.close(); await flush();
+  app.emit('desktop:cursor', { x: 400, y: 20 }); app.emit('chat:close');
+  assert.equal(app.document.querySelector('.rg-pins').children.length, 0);
+  assert.equal(app.document.querySelector('#rabbit-graph-root').classList.contains('has-pins'), false);
+  assert.equal(app.pinRegions.length, 0); assert.equal(app.pinInteractions.length, 0);
+});
+
+test('本体收到图谱可见状态隐藏固定卡，关闭图谱后按当前面板状态恢复', async () => {
+  const app = fixture(undefined, { surface: 'pet' }), data = workspace('A'); await flush();
+  data.graphs[0].nodes[0].pinned = true; app.workspaceChanged(data);
+  assert.equal(app.document.querySelector('.rg-pins').children.length, 1);
+  assert.ok(app.pinRegions.at(-1).rects.length > 0);
+  app.graphVisible(true);
+  assert.equal(app.document.querySelector('.rg-pins').children.length, 0);
+  assert.deepEqual(app.pinRegions.at(-1).rects, []);
+  app.emit('chat:open'); app.graphVisible(false);
+  assert.equal(app.document.querySelector('.rg-pins').children.length, 0, '本体聊天仍打开时不恢复固定卡');
+  app.emit('chat:close');
+  assert.equal(app.document.querySelector('.rg-pins').children.length, 1);
+  assert.ok(app.pinRegions.at(-1).rects.length > 0);
+  assert.equal(app.api.isOpen(), false); assert.equal(app.api.getChatContext(), null);
+});
+
+test('本体同步图谱工作区切换后只显示新工作区固定卡，旧区迟到更新不回切', async () => {
+  const app = fixture(undefined, { surface: 'pet' }), first = workspace('A'), second = workspace('B'); await flush();
+  for(const data of [first,second]) { const node = data.graphs[0].nodes[0]; node.pinned = true; node.images = [{ id: data.id, title: data.id, imageDataUrl: `data:image/png;base64,${data.id}A==` }]; }
+  app.workspaceChanged(first);
+  assert.equal(app.document.querySelector('.rg-pin .rg-card').dataset.graphId, 'graph-A');
+  app.graphVisible(true); app.workspaceChanged(second);
+  assert.equal(app.document.querySelector('.rg-pins').children.length, 0);
+  app.graphVisible(false);
+  const card = app.document.querySelector('.rg-pin .rg-card');
+  assert.equal(card.dataset.graphId, 'graph-B'); assert.equal(card.querySelector('img').src, second.graphs[0].nodes[0].images[0].imageDataUrl);
+  first.revision += 100; app.changed(first);
+  assert.equal(app.api.getSnapshot().workspaceId, 'B');
+  assert.equal(app.document.querySelector('.rg-pins').children.length, 1);
+  assert.equal(app.document.querySelector('.rg-pin .rg-card'), card);
+});
+
+test('本体打开图谱只转发独立窗口激活，不打开本地图谱或生成聊天上下文', async () => {
+  const app = fixture(undefined, { surface: 'pet' }); await flush();
+  await app.api.open({ activationId: 202, workspaceId: 'A', graphSelection: { graphId: 'graph-A', nodeId: 'leaf' } });
+  await app.api.open({ graphAction: 'undo' });
+  assert.deepEqual(JSON.parse(JSON.stringify(app.activations)), [{ workspaceId: 'A', graphId: 'graph-A', nodeId: 'leaf' }, 'undo']);
+  assert.equal(app.requests.length, 0); assert.equal(app.api.isOpen(), false);
+  assert.equal(app.api.getChatContext(), null);
+  assert.equal(app.document.querySelector('#rabbit-graph-root').classList.contains('is-open'), false);
+  assert.equal(app.events.some(event => event.type === 'graph:open'), false);
+});
+
+test('本体固定卡激活传递完整工作区图谱节点，图谱窗口按graphSelection定位', async () => {
+  const pet = fixture(undefined, { surface: 'pet' }), data = workspace('A'); await flush();
+  const node = data.graphs[0].nodes[0]; node.pinned = true; node.images = [{ id: 'A-image', title: '原图', imageDataUrl: 'data:image/png;base64,AA==' }];
+  data.graphs.push({ ...structuredClone(data.graphs[0]), id: 'other', title: '其他图' }); data.lastGraphId = 'other';
+  pet.workspaceChanged(data);
+  const pin = pet.document.querySelectorAll('.rg-pin').find((item: any) => item.querySelector('.rg-card').dataset.graphId === 'graph-A');
+  pet.click(pin.querySelector('img')); await flush();
+  assert.equal(pet.requests[0].workspaceId, 'A');
+  await pet.resolve(0, data); await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(pet.activations)), [{ workspaceId: 'A', graphId: 'graph-A', nodeId: 'root' }]);
+  assert.equal(pet.api.isOpen(), false); assert.equal(pet.api.getChatContext(), null);
+  const graph = fixture(undefined, { surface: 'graph' });
+  const opening = graph.api.open({ activationId: 203, workspaceId: 'A', graphSelection: { graphId: 'graph-A', nodeId: 'root' } });
+  await graph.resolve(0, data); await opening;
+  assert.equal(graph.api.getSnapshot().graphId, 'graph-A'); assert.equal(graph.api.getSnapshot().nodeId, 'root');
+  assert.deepEqual(JSON.parse(JSON.stringify(graph.api.getChatContext())), { workspaceId: 'A', graphId: 'graph-A', nodeId: 'root' });
+  assert.equal(graph.pinRegions.length, 0);
+});
+
+test('图谱窗口的对话按钮直接打开和收起图谱聊天，不依赖兔球元素', async () => {
+  const app = fixture(undefined, { surface: 'graph' }), activated: any[] = []; let open = false, closed = 0;
+  app.window.RabbitChat = { getSnapshot: () => ({ open }), activateGraph: (options: any) => { activated.push(options); open = true; }, close: () => { open = false; closed++; } };
+  assert.equal(app.document.getElementById('pet'), null);
+  const opening = app.api.open({ activationId: 204, workspaceId: 'A' }); await app.resolve(0, workspace('A')); await opening;
+  app.click(app.document.querySelector('[aria-label="图谱对话"]'));
+  assert.deepEqual(JSON.parse(JSON.stringify(activated)), [{ activationId: 204 }]);
+  assert.equal(app.api.isOpen(), true);
+  app.click(app.document.querySelector('[aria-label="图谱对话"]'));
+  assert.equal(closed, 1); assert.equal(app.api.isOpen(), true);
+});
+
 test('可见卡片不重复固定，移出视口和退出后保留预览，禁用插件清空命中区', async () => {
-  const saved = { graphPluginEnabled: true, graphModeEnabled: false }, app = fixture(saved), data = workspace('A');
+  const saved = { graphPluginEnabled: true, graphActivationShortcut: null }, app = fixture(saved), data = workspace('A');
   data.graphs[0].nodes.push({ ...structuredClone(data.graphs[0].nodes[0]), id: 'pinned-child', parentId: 'root', kind: 'card', pinned: true });
   for (let index = 0; index < 6; index++) data.graphs[0].nodes.push({ ...structuredClone(data.graphs[0].nodes[0]), id: 'far-' + index,
     parentId: index ? 'far-' + (index - 1) : 'pinned-child', kind: 'card', x: 800 + index * 480, pinned: false });
@@ -2502,4 +2797,440 @@ test('取消固定离场遇到停用插件、其他面板或工作区切换即�
     departure.pending.resolve(); await flush();
     assert.equal(app.document.querySelector('.rg-pin'), null); assert.deepEqual(app.pinRegions.at(-1).rects, []);
   }
+});
+
+test('流式更新省略背景正文时复用本工作区缓存，支持空文本和内容类型更换', async () => {
+  const app = fixture(), data = workspace('A');
+  data.background = { text: '背景说明', attachments: [
+    { id: 'document', name: '资料.py', mimeType: 'text/plain', text: 'A 文档正文' },
+    { id: 'figure', name: '图.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,QQ==' },
+  ] };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const compact = (value: GraphWorkspace, revision: number) => ({ ...structuredClone(value), revision,
+    background: { ...value.background!, attachments: value.background!.attachments.map(({ text, dataUrl, ...metadata }) => metadata) } });
+  const other = structuredClone(data); other.id = 'B'; other.background!.attachments[0].text = 'B 文档正文';
+  app.changed(other);
+  app.changed(compact(data, 2)); await flush();
+  assert.equal(app.api.getSnapshot().workspace.background.attachments[0].text, 'A 文档正文');
+  assert.equal(app.api.getSnapshot().workspace.background.attachments[1].dataUrl, 'data:image/png;base64,QQ==');
+  const replacement = structuredClone(data); replacement.revision = 3;
+  replacement.background!.attachments[0].text = '';
+  replacement.background!.attachments[1] = { id: 'figure', name: '图说明.txt', mimeType: 'text/plain', text: '图片已替换为文字' };
+  app.changed(replacement); app.changed(compact(replacement, 4)); await flush();
+  const files = app.api.getSnapshot().workspace.background.attachments;
+  assert.equal(files[0].text, '');
+  assert.equal(files[1].text, '图片已替换为文字');
+  assert.equal(files[1].dataUrl, undefined);
+  app.api.close();
+});
+
+function backgroundEditor(app: ReturnType<typeof fixture>) {
+  app.click(app.document.querySelector('[aria-label="背景信息"]'));
+  const panel = app.document.querySelector('.rg-background-dialog');
+  return {
+    panel, input: panel.querySelector('textarea'), picker: panel.querySelector('input'),
+    save: panel.querySelectorAll('button').find((button: any) => button.textContent === '保存'),
+    cancel: panel.querySelectorAll('button').find((button: any) => button.textContent === '取消'),
+    edit(text: string) { const input = panel.querySelector('textarea'); input.value = text; input.dispatchEvent({ type: 'input' }); },
+    async attach(files: Array<{ name: string }>) { const picker = panel.querySelector('input'); picker.files = files; await picker.onchange(); },
+  };
+}
+
+function backspace(target: any, values: Record<string, unknown> = {}) {
+  const event: any = { type: 'keydown', key: 'Backspace', bubbles: true, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...values };
+  target.dispatchEvent(event); return event;
+}
+
+function editSource(card: any, value: string) {
+  const input = card.querySelector('.rg-source-input'); assert.ok(input);
+  input.value = value; input.dispatchEvent({ type: 'input', bubbles: true }); return input;
+}
+
+test('附件导入重建DOM后恢复当前编辑区域焦点，背景与自定义卡可直接连续退格', async () => {
+  const app=fixture(),data=workspace('A');
+  app.window.RabbitDocuments={...app.window.RabbitDocuments,async readFile(file:any){return{id:file.name,name:file.name,mimeType:'text/plain',text:'资料'};}};
+  const opening=app.api.open({workspaceId:'A'});await app.resolve(0,data);await opening;
+  const editor=backgroundEditor(app);
+  assert.equal(app.document.activeElement,editor.panel.querySelector('.rg-background-attach'));
+  const reading=editor.attach([{name:'one.txt'},{name:'two.txt'}]);
+  assert.equal(app.document.activeElement,app.document.body,'清空预览容器会让其中的上传按钮失去焦点');
+  await reading;assert.equal(app.document.activeElement,editor.input);
+  assert.equal(backspace(app.document.activeElement).defaultPrevented,true);
+  assert.equal(backspace(app.document.activeElement,{repeat:true}).defaultPrevented,true);
+  assert.equal(editor.panel.querySelectorAll('.rabbit-attachment-tile').length,0);
+  app.click(editor.cancel);await flush();
+  let current=structuredClone(data);
+  app.mutateWith(mutation=>{
+    if(mutation.type==='append-node-attachments'){current=structuredClone(current);current.revision++;current.graphs[0].nodes[0].attachments=mutation.attachments;current.graphs[0].nodes[0].contentRevision++;}
+    if(mutation.type==='remove-latest-node-asset'){current=structuredClone(current);current.revision++;current.graphs[0].nodes[0].attachments!.pop();current.graphs[0].nodes[0].contentRevision++;}
+    return current;
+  });
+  app.click(app.document.querySelector('.rg-world .rg-card'));await flush();
+  const card=app.document.querySelector('.rg-focus .rg-card'),picker=card.querySelector('[aria-label="添加卡片文件"]');
+  picker.focus();picker.files=[{name:'three.txt'},{name:'four.txt'}];await picker.onchange();
+  assert.ok(app.document.activeElement===card.querySelector('.rg-source-input'),'文件选择器结束后回到默认输入框');
+  assert.equal(backspace(app.document.activeElement).defaultPrevented,true);await flush();
+  assert.equal(backspace(app.document.activeElement,{repeat:true}).defaultPrevented,true);await flush();
+  assert.equal(current.graphs[0].nodes[0].attachments!.length,0);
+});
+
+test('背景空说明在上传按钮和输入框内逐次退格删除草稿，保护文字和输入法并保留失败草稿', async () => {
+  const app=fixture(),data=workspace('A');
+  data.background={text:'',attachments:[
+    {id:'first',name:'最早.txt',mimeType:'text/plain',text:'资料'},
+    {id:'middle',name:'中间.png',mimeType:'image/png',dataUrl:'data:image/png;base64,AQ=='},
+    {id:'last',name:'最新.pdf',mimeType:'text/plain',text:'文档'},
+  ]};
+  const opening=app.api.open({workspaceId:'A'});await app.resolve(0,data);await opening;
+  const editor=backgroundEditor(app),attach=editor.panel.querySelector('.rg-background-attach');
+  for(const text of ['文字',' ','\n']){editor.edit(text);assert.equal(backspace(attach).defaultPrevented,false);}
+  editor.edit('');
+  for(const flags of [{ctrlKey:true},{altKey:true},{metaKey:true},{isComposing:true},{keyCode:229}])assert.equal(backspace(editor.input,flags).defaultPrevented,false);
+  editor.input.dispatchEvent({type:'compositionstart',bubbles:true});assert.equal(backspace(attach).defaultPrevented,false);
+  editor.input.dispatchEvent({type:'compositionend',bubbles:true});
+  assert.equal(backspace(attach).defaultPrevented,true);
+  assert.equal(app.document.activeElement,editor.input,'预览重建后焦点仍能接收下一次退格');
+  assert.deepEqual(editor.panel.querySelectorAll('.rabbit-attachment-name').map((item:any)=>item.textContent),['最早.txt','中间.png']);
+  assert.equal(backspace(editor.input,{repeat:true}).defaultPrevented,true);
+  assert.equal(app.api.getSnapshot().workspace.background.attachments.length,3,'退格只改背景草稿');
+  app.mutateWith(mutation=>{if(mutation.type==='set-background')throw new Error('写入失败');return data;});
+  app.click(editor.save);await flush();
+  assert.equal(editor.panel.querySelectorAll('.rabbit-attachment-tile').length,1);
+  assert.match(editor.panel.querySelector('.rg-background-status').textContent,/写入失败/);
+  assert.equal(backspace(attach,{repeat:true}).defaultPrevented,true);
+  assert.equal(backspace(editor.input).defaultPrevented,false);
+  app.mutateWith(mutation=>{const saved=structuredClone(data);saved.revision++;if(mutation.type==='set-background')saved.background=mutation.background;return saved;});
+  app.click(editor.save);await flush();
+  assert.equal(app.api.getSnapshot().workspace.background.attachments.length,0);
+});
+
+test('空自定义卡上传按钮直接退格，连续按键串行删除混合素材的当前尾部', async () => {
+  const app=fixture(),data=workspace('A'),node=data.graphs[0].nodes[0];
+  node.images=[{id:'one',title:'第一图',imageDataUrl:'data:image/png;base64,AQ=='},{id:'three',title:'第三图',imageDataUrl:'data:image/png;base64,Aw=='}];
+  node.attachments=[{id:'two',name:'第二份.txt',mimeType:'text/plain',text:'资料'}];node.materialOrder=['image:one','attachment:two','image:three'];
+  let current=structuredClone(data);const removed:string[]=[];
+  app.mutateWith(mutation=>{if(mutation.type==='remove-latest-node-asset'){current=structuredClone(current);current.revision++;const target=current.graphs[0].nodes[0],last=target.materialOrder!.pop()!;removed.push(last);target.images=target.images.filter(item=>'image:'+item.id!==last);target.attachments=target.attachments!.filter(item=>'attachment:'+item.id!==last);target.contentRevision++;}return current;});
+  const opening=app.api.open({workspaceId:'A'});await app.resolve(0,data);await opening;app.click(app.document.querySelector('.rg-world .rg-card'));await flush();
+  const card=app.document.querySelector('.rg-focus .rg-card'),attach=card.querySelector('[aria-label="添加文件或图片"]');
+  assert.ok(app.document.activeElement===card.querySelector('.rg-source-input'),'展开完成即可输入或退格');
+  const original=app.window.rabbitDesktop.graphMutate,gate=deferred<void>();let started=0,active=0,maximum=0;
+  app.window.rabbitDesktop.graphMutate=async(id:string,mutation:any)=>{if(mutation.type!=='remove-latest-node-asset')return original(id,mutation);started++;active++;maximum=Math.max(maximum,active);if(started===1)await gate.promise;try{return await original(id,mutation);}finally{active--;}};
+  card.querySelector('[aria-label="移除附件：第三图"]').focus();
+  assert.equal(backspace(app.document.activeElement).defaultPrevented,true);assert.equal(backspace(attach,{repeat:true}).defaultPrevented,true);assert.equal(backspace(attach,{repeat:true}).defaultPrevented,true);
+  assert.equal(backspace(attach,{repeat:true}).defaultPrevented,false);assert.equal(started,1);
+  gate.resolve();await flush();await flush();await flush();
+  assert.deepEqual(removed,['image:three','attachment:two','image:one']);assert.equal(maximum,1);
+  assert.ok(app.document.activeElement===card.querySelector('.rg-source-input'),'目标tile被删除后回到默认输入框');
+  assert.equal(backspace(attach).defaultPrevented,false);
+});
+
+test('自定义文本编辑保护文字和组合输入，删除失败留稿，删除后的保存等待并采用新修订', async () => {
+  const app=fixture(),data=workspace('A'),node=data.graphs[0].nodes[0];node.markdown='原说明';
+  node.images=[{id:'image',title:'原图',imageDataUrl:'data:image/png;base64,AQ=='}];node.attachments=[{id:'file',name:'最新.txt',mimeType:'text/plain',text:'资料'}];node.materialOrder=['image:image','attachment:file'];
+  let current=structuredClone(data),attempts=0;
+  app.mutateWith(mutation=>{
+    if(mutation.type==='remove-latest-node-asset'){if(++attempts===1)throw new Error('删除写入失败');current=structuredClone(current);current.revision++;const target=current.graphs[0].nodes[0];target.materialOrder!.pop();target.attachments=[];target.contentRevision++;}
+    if(mutation.type==='edit'){const target=current.graphs[0].nodes[0];assert.equal(mutation.contentRevision,target.contentRevision);current=structuredClone(current);current.revision++;current.graphs[0].nodes[0].markdown=mutation.markdown;current.graphs[0].nodes[0].contentRevision++;}
+    return current;
+  });
+  const opening=app.api.open({workspaceId:'A'});await app.resolve(0,data);await opening;app.click(app.document.querySelector('.rg-world .rg-card'));await flush();
+  const card=app.document.querySelector('.rg-focus .rg-card'),input=card.querySelector('.rg-source-input');
+  for(const text of ['文字',' ','\n']){input.value=text;assert.equal(backspace(input).defaultPrevented,false);}
+  editSource(card,'');
+  for(const flags of [{ctrlKey:true},{altKey:true},{metaKey:true},{isComposing:true},{keyCode:229}])assert.equal(backspace(input,flags).defaultPrevented,false);
+  input.dispatchEvent({type:'compositionstart',bubbles:true});assert.equal(backspace(input).defaultPrevented,false);input.dispatchEvent({type:'compositionend',bubbles:true});
+  assert.equal(backspace(input).defaultPrevented,true);await flush();assert.match(app.document.querySelector('.rg-toast').textContent,/删除写入失败/);
+  assert.equal(card.querySelector('.rg-source-input'),input);assert.equal(input.value,'');assert.equal(current.graphs[0].nodes[0].attachments!.length,1);
+  const original=app.window.rabbitDesktop.graphMutate,gate=deferred<void>();
+  app.window.rabbitDesktop.graphMutate=async(id:string,mutation:any)=>{if(mutation.type==='remove-latest-node-asset')await gate.promise;return original(id,mutation);};
+  assert.equal(backspace(input).defaultPrevented,true);editSource(card,'删除期间写下的新说明');input.dispatchEvent({type:'blur'});await flush();
+  assert.equal(app.mutations.filter(item=>item.mutation.type==='edit').length,0);
+  gate.resolve();await flush();await flush();await flush();
+  assert.equal(current.graphs[0].nodes[0].markdown,'删除期间写下的新说明');assert.equal(current.graphs[0].nodes[0].attachments!.length,0);
+  assert.equal(card.querySelector('.rg-source-input'),input);
+});
+
+test('混合文件按选择顺序写入，保存失败后的待导入尾项优先退格且不删除旧资料', async () => {
+  const app=fixture(),data=workspace('A');let current=structuredClone(data),failImport=false;
+  app.window.RabbitDocuments={...app.window.RabbitDocuments,async readFile(file:any){return file.name.endsWith('.png')?{id:file.name,name:file.name,mimeType:'image/png',dataUrl:'data:image/png;base64,AQ=='}:{id:file.name,name:file.name,mimeType:'text/plain',text:'资料'};}};
+  app.mutateWith(mutation=>{if(mutation.type.startsWith('append-node-')){if(failImport)throw new Error('导入写入失败');current=structuredClone(current);current.revision++;const node=current.graphs[0].nodes[0];if(mutation.type==='append-node-images')node.images.push(...mutation.images);else node.attachments=[...node.attachments||[],...mutation.attachments];node.contentRevision++;}return current;});
+  const opening=app.api.open({workspaceId:'A'});await app.resolve(0,data);await opening;app.click(app.document.querySelector('.rg-world .rg-card'));await flush();
+  const card=app.document.querySelector('.rg-focus .rg-card'),picker=card.querySelector('[aria-label="添加卡片文件"]');
+  picker.files=[{name:'first.png'},{name:'middle.pdf'},{name:'last.png'}];await picker.onchange();
+  assert.deepEqual(app.mutations.filter(item=>item.mutation.type.startsWith('append-node-')).map(item=>item.mutation.type),['append-node-images','append-node-attachments','append-node-images']);
+  failImport=true;picker.files=[{name:'pending.pdf'},{name:'pending.png'}];await picker.onchange();
+  const input=card.querySelector('.rg-source-input');
+  assert.equal(card.querySelector('.rg-source-upload-actions').querySelectorAll('button').find((button:any)=>button.textContent==='重试保存').disabled,false);
+  assert.equal(backspace(input).defaultPrevented,true);
+  assert.deepEqual(card.querySelector('.rg-source-pending').querySelectorAll('.rabbit-attachment-name').map((item:any)=>item.textContent),['pending.pdf']);
+  assert.equal(backspace(input,{repeat:true}).defaultPrevented,true);assert.equal(card.querySelector('.rg-source-pending').children.length,0);
+  assert.equal(app.mutations.filter(item=>item.mutation.type==='remove-latest-node-asset').length,0);
+  assert.equal(current.graphs[0].nodes[0].images.length,2);assert.equal(current.graphs[0].nodes[0].attachments!.length,1);
+});
+
+test('通用进退场使用独立位移，toast与居中对话框保留自身定位transform', async () => {
+  const app = fixture(), opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, workspace('A')); await opening;
+  app.mutateWith(mutation => { if (mutation.type === 'create-graph') throw new Error('创建失败'); return app.api.getSnapshot().workspace; });
+  app.click(app.document.querySelector('[aria-label="新建空白图谱"]')); await flush();
+  const toast = app.document.querySelector('.rg-toast'), incoming = app.animations.find(item => item.element === toast)!;
+  assert.ok(toast); assert.equal(incoming.keyframes[0].translate, '0 9px');
+  assert.ok(incoming.keyframes.every(frame => !('transform' in frame)), '不得覆盖toast的translateX(-50%)');
+  const editor = backgroundEditor(app); app.click(editor.cancel); await flush();
+  const outgoing = app.animations.filter(item => item.element === editor.panel).at(-1)!;
+  assert.equal(outgoing.keyframes[1].translate, '0 7px');
+  assert.ok(outgoing.keyframes.every(frame => !('transform' in frame)));
+});
+
+test('背景信息属于工作区，切图及流式更新不覆盖草稿，保存保留附件与公式', async () => {
+  const app = fixture(), data = workspace('A');
+  data.graphs.push({ ...structuredClone(data.graphs[0]), id: 'second', title: '第二张图' });
+  data.background = { text: '原有说明', attachments: [{ id: 'formula', name: '公式.md', mimeType: 'text/markdown', text: '$$E=mc^2$$' }] };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  assert.match(app.document.querySelector('.rg-background-summary').textContent, /文字说明.*1 个附件/);
+  const editor = backgroundEditor(app); assert.equal(editor.input.value, '原有说明'); editor.edit('理解量子测量');
+  const changed = structuredClone(data); changed.revision++; changed.graphs[0].nodes[0].markdown = '正在更新'; app.changed(changed);
+  assert.equal(editor.input.value, '理解量子测量');
+  app.click(app.document.querySelector('[aria-label="打开图谱：第二张图"]')); await flush();
+  assert.equal(editor.input.value, '理解量子测量');
+  app.mutateWith(mutation => { const saved = app.api.getSnapshot().workspace; saved.revision++; if (mutation.type === 'set-background') saved.background = structuredClone(mutation.background); return saved; });
+  app.click(editor.save); await flush(); await flush();
+  const write = app.mutations.find(item => item.mutation.type === 'set-background');
+  assert.equal(write.workspaceId, 'A'); assert.equal(write.mutation.background.text, '理解量子测量');
+  assert.equal(write.mutation.background.attachments[0].text, '$$E=mc^2$$');
+  assert.equal(app.document.querySelector('.rg-background-dialog'), null);
+  assert.equal(app.document.querySelector('.rg-background-button').classList.contains('is-dirty'), false);
+  assert.equal(backgroundEditor(app).input.value, '理解量子测量');
+});
+
+test('背景附件支持多文件和图片，逐项失败保留已读资料并可移除后保存', async () => {
+  const app = fixture(), data = workspace('A'), opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.window.RabbitDocuments = { ...app.window.RabbitDocuments, async readFile(file: any, options: any) {
+    assert.equal(options.workspaceId, 'A');
+    if (file.name === '坏文件.pdf') throw new Error('解析失败');
+    return file.name === '图片.png' ? { id: file.name, name: file.name, mimeType: 'image/png', dataUrl: 'data:image/png;base64,aW1hZ2U=' } : { id: file.name, name: file.name, mimeType: 'text/markdown', text: '文档正文' };
+  } };
+  const editor = backgroundEditor(app); await editor.attach([{ name: '资料.docx' }, { name: '坏文件.pdf' }, { name: '图片.png' }]);
+  assert.equal(editor.panel.querySelectorAll('.rabbit-attachment-tile').length, 2);
+  assert.equal(editor.panel.querySelector('img').src, 'data:image/png;base64,aW1hZ2U=');
+  assert.match(editor.panel.querySelector('.rg-background-status').textContent, /坏文件.pdf.*解析失败/);
+  assert.equal(editor.save.disabled, false);
+  app.click(editor.panel.querySelector('[aria-label="移除附件：资料.docx"]'));
+  assert.equal(editor.panel.querySelectorAll('.rabbit-attachment-tile').length, 1);
+  app.click(editor.save); await flush();
+  const write = app.mutations.find(item => item.mutation.type === 'set-background');
+  assert.equal(write.mutation.background.attachments.length, 1);
+  assert.equal(write.mutation.background.attachments[0].name, '图片.png');
+});
+
+test('背景附件在文字说明上方，干净状态不占据提示空间', async () => {
+  const app = fixture(), data = workspace('A');
+  data.background = { text: '简短说明', attachments: [{ id: 'note', name: '参考.pdf', mimeType: 'text/plain', text: '解析全文' }] };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const editor = backgroundEditor(app), files = editor.panel.querySelector('.rg-background-files');
+  assert.ok(editor.panel.children.indexOf(files) < editor.panel.children.indexOf(editor.input));
+  assert.equal(files.querySelector('.rabbit-attachment-name').textContent, '参考.pdf');
+  assert.equal(editor.panel.querySelector('.rg-background-status').textContent, '');
+  assert.ok(!files.textContent.includes('解析全文'));
+});
+
+test('自定义卡混合导入文档和图片并可逐项移除，预览优先且正文保持说明', async () => {
+  const app = fixture(), data = workspace('A'), original = data.graphs[0].nodes[0];
+  data.graphs[0].nodes.push({ ...structuredClone(original), id: 'custom', parentId: 'root', title: '自定义卡片', markdown: '简短说明' });
+  const document = { id: 'doc', name: '理论.pdf', mimeType: 'text/plain', format: 'pdf', file: 'assets/theory.txt', text: '完整文档正文不能塞进卡片' };
+  const picture = { id: 'image', name: '示意图.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,AQ==' };
+  const reads: any[] = [];
+  app.window.RabbitDocuments = { ...app.window.RabbitDocuments, async readFile(file: any, options: any) { reads.push({ file: file.name, workspaceId: options.workspaceId }); return file.name.endsWith('.pdf') ? document : picture; } };
+  let current = structuredClone(data);
+  app.mutateWith(mutation => {
+    current = structuredClone(current); current.revision++;
+    const node = current.graphs[0].nodes.find(item => item.id === mutation.nodeId);
+    if (mutation.type === 'append-node-attachments') node!.attachments = [...node!.attachments || [], ...mutation.attachments];
+    if (mutation.type === 'append-node-images') node!.images.push(...mutation.images);
+    if (mutation.type === 'remove-node-attachment') node!.attachments = node!.attachments!.filter(item => item.id !== mutation.attachmentId);
+    if (mutation.type === 'remove-node-image') node!.images = node!.images.filter(item => item.id !== mutation.imageId);
+    return current;
+  });
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const world = app.document.querySelector('.rg-world').querySelectorAll('.rg-card').find((card: any) => card.dataset.nodeId === 'custom');
+  app.click(world); await flush();
+  const card = app.document.querySelector('.rg-focus .rg-card'), picker = card.querySelector('[aria-label="添加卡片文件"]');
+  picker.files = [{ name: document.name }, { name: picture.name }]; await picker.onchange(); await flush();
+  assert.deepEqual(reads, [{ file: document.name, workspaceId: 'A' }, { file: picture.name, workspaceId: 'A' }]);
+  const writes = app.mutations.filter(item => item.mutation.type.startsWith('append-node-'));
+  assert.equal(writes.length, 2); assert.ok(writes.every(item => item.workspaceId === 'A' && item.mutation.nodeId === 'custom'));
+  assert.equal(writes[0].mutation.attachments[0].file, 'assets/theory.txt');
+  assert.deepEqual(JSON.parse(JSON.stringify(writes[1].mutation.images)), [{ id: 'image', title: picture.name, imageDataUrl: picture.dataUrl }]);
+  assert.equal(card.querySelector('.rg-node-files .rabbit-attachment-name').textContent, document.name);
+  assert.equal(world.querySelector('.rg-node-files').querySelectorAll('.rabbit-attachment-tile').length, 1);
+  assert.equal(card.querySelector('.rg-body').textContent, '简短说明'); assert.ok(!card.textContent.includes(document.text));
+  const content = card.querySelector('.rg-content'), controls = card.querySelector('.rg-source-actions');
+  assert.equal(content.children[0], card.querySelector('.rg-source-input'), '默认输入问题或资料');
+  assert.ok(content.children.indexOf(controls)<content.children.indexOf(card.querySelector('.rg-node-files')), '附件前可直接继续添加资料');
+  assert.ok(content.children.indexOf(card.querySelector('.rg-node-files')) < content.children.indexOf(card.querySelector('.rg-body')));
+  assert.equal(card.querySelector('.rg-source-pending').children.length, 0);
+  app.click(card.querySelector('[aria-label="移除附件：理论.pdf"]')); await flush();
+  assert.equal(card.querySelector('.rg-node-files').children.length, 0);
+  app.click(card.querySelector('[aria-label="移除附件：示意图.png"]')); await flush();
+  assert.equal(card.querySelectorAll('.rg-image').length, 0);
+  assert.deepEqual(app.mutations.filter(item => item.mutation.type.startsWith('remove-node-')).map(item => item.mutation.type), ['remove-node-attachment', 'remove-node-image']);
+});
+
+test('卡片文件保存失败保留预览，关闭重开后可重试而无需重新解析', async () => {
+  const app = fixture(), data = workspace('A'); let reads = 0, writes = 0;
+  const attachment = { id: 'draft', name: '资料.docx', mimeType: 'text/plain', text: '待保存全文' };
+  app.window.RabbitDocuments = { ...app.window.RabbitDocuments, async readFile() { reads++; return attachment; } };
+  app.mutateWith(mutation => {
+    if (mutation.type === 'append-node-attachments') {
+      if (++writes === 1) throw new Error('写入失败');
+      const saved = structuredClone(data); saved.revision++; saved.graphs[0].nodes[0].attachments = mutation.attachments; return saved;
+    }
+    return data;
+  });
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+  let card = app.document.querySelector('.rg-focus .rg-card');
+  const picker = card.querySelector('[aria-label="添加卡片文件"]'); picker.files = [{ name: attachment.name }]; await picker.onchange();
+  assert.match(card.querySelector('.rg-source-upload-status').textContent, /保存失败.*写入失败/);
+  assert.equal(card.querySelector('.rg-source-pending').children.length, 1);
+  app.click(app.document.querySelector('.rg-focus')); await flush();
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); card = app.document.querySelector('.rg-focus .rg-card');
+  assert.equal(card.querySelector('.rg-source-pending').children.length, 1);
+  app.click(card.querySelector('.rg-source-upload-actions').querySelectorAll('button').find((button: any) => button.textContent === '重试保存')); await flush(); await flush();
+  assert.equal(reads, 1); assert.equal(writes, 2);
+  assert.equal(card.querySelector('.rg-source-pending').children.length, 0);
+  assert.equal(card.querySelector('.rg-source-upload-status').textContent, '');
+  assert.equal(card.querySelector('.rg-node-files').children.length, 1);
+});
+
+test('卡片文件迟到后仍写入原工作区和节点，不改变新卡阅读界面', async () => {
+  const app = fixture(), data = workspace('A'), pending = deferred<any>();
+  app.window.RabbitDocuments = { ...app.window.RabbitDocuments, readFile(_file: any, options: any) { assert.equal(options.workspaceId, 'A'); return pending.promise; } };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush();
+  const picker = app.document.querySelector('.rg-focus .rg-card').querySelector('[aria-label="添加卡片文件"]');
+  picker.files = [{ name: '慢文件.pdf' }]; const reading = picker.onchange();
+  const next = app.api.open({ workspaceId: 'B' }); await app.resolve(1, workspace('B')); await next;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); const newCard = app.document.querySelector('.rg-focus .rg-card');
+  app.mutateWith(mutation => { const saved = structuredClone(data); saved.revision++; if (mutation.type === 'append-node-attachments') saved.graphs[0].nodes[0].attachments = mutation.attachments; return saved; });
+  pending.resolve({ id: 'late', name: '慢文件.pdf', mimeType: 'text/plain', text: 'A的资料' }); await reading; await flush();
+  const write = app.mutations.find(item => item.mutation.type === 'append-node-attachments');
+  assert.equal(write.workspaceId, 'A'); assert.equal(write.mutation.graphId, 'graph-A'); assert.equal(write.mutation.nodeId, 'root');
+  assert.equal(app.api.getSnapshot().workspaceId, 'B'); assert.equal(app.document.querySelector('.rg-focus .rg-card'), newCard);
+  assert.equal(newCard.querySelector('.rg-node-files').children.length, 0); assert.equal(newCard.querySelector('.rg-source-pending').children.length, 0);
+});
+
+test('默认输入在附件导入和删除期间保持可写，保存等待素材修订完成', async () => {
+  const app = fixture(), data = workspace('A'), pending = deferred<any>(), removal = deferred<void>();
+  data.graphs[0].nodes[0].attachments = [{ id: 'existing', name: '已有.txt', mimeType: 'text/plain', text: '资料' }];
+  data.graphs[0].nodes[0].images = [{ id: 'image', title: '图.png', imageDataUrl: 'data:image/png;base64,AQ==' }];
+  let current = structuredClone(data);
+  app.mutateWith(mutation => {
+    if (!['append-node-attachments', 'remove-node-attachment', 'edit'].includes(mutation.type)) return current;
+    current = structuredClone(current); current.revision++; const node = current.graphs[0].nodes[0];
+    if (mutation.type === 'append-node-attachments') node.attachments!.push(...mutation.attachments);
+    if (mutation.type === 'remove-node-attachment') node.attachments = node.attachments!.filter(item => item.id !== mutation.attachmentId);
+    if (mutation.type === 'edit') { assert.equal(mutation.contentRevision, node.contentRevision); node.markdown = mutation.markdown; }
+    node.contentRevision++; return current;
+  });
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.click(app.document.querySelector('.rg-world .rg-card')); await flush(); const card = app.document.querySelector('.rg-focus .rg-card');
+  app.window.RabbitDocuments = { ...app.window.RabbitDocuments, readFile: () => pending.promise };
+  const picker = card.querySelector('[aria-label="添加卡片文件"]'); picker.files = [{ name: '新文件.pdf' }]; const reading = picker.onchange();
+  const input = editSource(card, '导入时写下的说明'); input.dispatchEvent({ type: 'blur' }); await flush();
+  assert.equal(input.disabled, false); assert.equal(app.mutations.some(item => item.mutation.type === 'edit'), false);
+  pending.resolve({ id: 'new', name: '新文件.pdf', mimeType: 'text/plain', text: '新的资料' }); await reading; await flush(); await flush();
+  assert.equal(current.graphs[0].nodes[0].markdown, '导入时写下的说明');
+  const original = app.window.rabbitDesktop.graphMutate;
+  app.window.rabbitDesktop.graphMutate = async (id: string, mutation: any) => { if (mutation.type === 'remove-node-attachment') await removal.promise; return original(id, mutation); };
+  app.click(card.querySelector('[aria-label="移除附件：已有.txt"]')); await flush();
+  editSource(card, '删除期间继续输入'); input.dispatchEvent({ type: 'blur' }); await flush();
+  assert.equal(input.disabled, false); assert.equal(app.mutations.filter(item => item.mutation.type === 'edit').length, 1);
+  removal.resolve(); await flush(); await flush();
+  assert.equal(current.graphs[0].nodes[0].markdown, '删除期间继续输入');
+  assert.deepEqual(current.graphs[0].nodes[0].attachments!.map(item => item.id), ['new']);
+});
+
+test('流式卡片附件正文按工作区和节点缓存，空正文和文件链接保持有效', async () => {
+  const app = fixture(), data = workspace('A'), attachment = { id: 'same', name: '来源.txt', mimeType: 'text/plain', file: 'assets/source.txt', text: '根节点资料' };
+  data.graphs[0].nodes[0].attachments = [attachment];
+  data.graphs[0].nodes.push({ ...structuredClone(data.graphs[0].nodes[0]), id: 'custom', parentId: 'root', attachments: [{ ...attachment, text: '自定义资料' }] });
+  data.background = { text: '', attachments: [{ ...attachment, text: '背景资料' }] };
+  const opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const other = structuredClone(data); other.id = 'B'; other.graphs[0].nodes[0].attachments![0].text = '其他工作区资料'; app.changed(other);
+  const compact = (value: GraphWorkspace, revision: number) => { const result = structuredClone(value); result.revision = revision; for (const graph of result.graphs) for (const node of graph.nodes) for (const item of node.attachments || []) delete item.text; return result; };
+  app.changed(compact(data, 2)); await flush();
+  const snapshot = app.api.getSnapshot().workspace;
+  assert.equal(snapshot.graphs[0].nodes[0].attachments[0].text, '根节点资料');
+  assert.equal(snapshot.graphs[0].nodes[1].attachments[0].text, '自定义资料');
+  assert.equal(snapshot.background.attachments[0].text, '背景资料');
+  assert.equal(snapshot.graphs[0].nodes[0].attachments[0].file, 'assets/source.txt');
+  const empty = structuredClone(data); empty.revision = 3; empty.graphs[0].nodes[0].attachments![0].text = '';
+  app.changed(empty); app.changed(compact(empty, 4)); await flush();
+  assert.equal(app.api.getSnapshot().workspace.graphs[0].nodes[0].attachments[0].text, '');
+  assert.ok(app.document.querySelector('.rg-thumb-preview').querySelectorAll('text').some((label: any) => label.textContent === 'TXT'));
+});
+
+test('迟到的旧工作区响应不污染后续省略正文更新的附件缓存', async () => {
+  const app = fixture(), old = workspace('A', 1), current = workspace('A', 2);
+  for (const [data, text] of [[old, '过期资料'], [current, '当前资料']] as const) {
+    data.graphs[0].nodes[0].attachments = [{ id: 'source', name: '来源.txt', mimeType: 'text/plain', text }];
+    data.background = { text: '', attachments: [{ id: 'background', name: '背景.txt', mimeType: 'text/plain', text }] };
+  }
+  const first = app.api.open({ workspaceId: 'A' }), second = app.api.open({ workspaceId: 'A' });
+  await app.resolve(1, current); await second; await app.resolve(0, old); await first;
+  const compact = structuredClone(current); compact.revision = 3;
+  delete compact.graphs[0].nodes[0].attachments![0].text; delete compact.background!.attachments[0].text;
+  app.changed(compact); await flush();
+  const snapshot = app.api.getSnapshot().workspace;
+  assert.equal(snapshot.graphs[0].nodes[0].attachments[0].text, '当前资料');
+  assert.equal(snapshot.background.attachments[0].text, '当前资料');
+});
+
+test('背景保存失败保留草稿，关闭重开可继续并重试，明确取消才丢弃修改', async () => {
+  const app = fixture(), data = workspace('A'), opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  app.mutateWith(mutation => { if (mutation.type === 'set-background') throw new Error('磁盘写入失败'); return data; });
+  const editor = backgroundEditor(app); editor.edit('不能丢失的背景'); app.click(editor.save); await flush();
+  assert.match(editor.panel.querySelector('.rg-background-status').textContent, /保存失败.*磁盘写入失败/);
+  assert.equal(editor.save.disabled, false); app.api.close(); await flush();
+  const reopening = app.api.open({ workspaceId: 'A' }); await app.resolve(1, data); await reopening;
+  assert.match(app.document.querySelector('.rg-background-summary').textContent, /未保存/);
+  const retry = backgroundEditor(app); assert.equal(retry.input.value, '不能丢失的背景');
+  app.mutateWith(mutation => { const saved = structuredClone(data); saved.revision++; if (mutation.type === 'set-background') saved.background = structuredClone(mutation.background); return saved; });
+  app.click(retry.save); await flush(); await flush();
+  assert.equal(app.api.getSnapshot().workspace.background.text, '不能丢失的背景');
+  const cancel = backgroundEditor(app); cancel.edit('明确放弃的修改'); app.click(cancel.cancel); await flush();
+  assert.equal(backgroundEditor(app).input.value, '不能丢失的背景');
+});
+
+test('切工作区时迟到的背景附件只进入原草稿，取消草稿使在途读取失效', async () => {
+  for (const discard of [false, true]) {
+    const app = fixture(), pending = deferred<any>(), data = workspace('A'), opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+    app.window.RabbitDocuments = { ...app.window.RabbitDocuments, readFile: () => pending.promise };
+    const editor = backgroundEditor(app); editor.edit('A的草稿'); const reading = editor.attach([{ name: '慢文件.pdf' }]);
+    if (discard) { app.click(editor.cancel); await flush(); }
+    const second = app.api.open({ workspaceId: 'B' }); await app.resolve(1, workspace('B')); await second;
+    const other = backgroundEditor(app); other.edit('B的草稿');
+    pending.resolve({ id: 'slow', name: '慢文件.pdf', mimeType: 'text/plain', text: 'A的附件' }); await reading;
+    assert.equal(other.input.value, 'B的草稿'); assert.equal(other.panel.querySelectorAll('.rabbit-attachment-tile').length, 0);
+    const returnA = app.api.open({ workspaceId: 'A' }); await app.resolve(2, data); await returnA;
+    const restored = backgroundEditor(app);
+    assert.equal(restored.input.value, discard ? '' : 'A的草稿');
+    assert.equal(restored.panel.querySelectorAll('.rabbit-attachment-tile').length, discard ? 0 : 1);
+  }
+});
+
+test('旧工作区背景保存完成不关闭新编辑器，也不覆盖新工作区和草稿', async () => {
+  const app = fixture(), data = workspace('A'), pending = deferred<GraphWorkspace>(), opening = app.api.open({ workspaceId: 'A' }); await app.resolve(0, data); await opening;
+  const originalMutate = app.window.rabbitDesktop.graphMutate;
+  app.window.rabbitDesktop.graphMutate = (id: string, mutation: any) => mutation.type === 'set-background' ? pending.promise : originalMutate(id, mutation);
+  const editor = backgroundEditor(app); editor.edit('A保存内容'); app.click(editor.save); await flush();
+  assert.equal(editor.input.disabled, true); assert.equal(editor.cancel.disabled, true);
+  const second = app.api.open({ workspaceId: 'B' }); await app.resolve(1, workspace('B')); await second;
+  const other = backgroundEditor(app); other.edit('B正在输入');
+  const saved = structuredClone(data); saved.revision++; saved.background = { text: 'A保存内容', attachments: [] }; pending.resolve(saved); await flush(); await flush();
+  assert.equal(app.api.getSnapshot().workspaceId, 'B'); assert.equal(other.panel.isConnected, true); assert.equal(other.input.value, 'B正在输入');
+  const returnA = app.api.open({ workspaceId: 'A' }); await app.resolve(2, saved); await returnA;
+  assert.equal(app.document.querySelector('.rg-background-button').classList.contains('is-dirty'), false);
+  assert.equal(backgroundEditor(app).input.value, 'A保存内容');
 });

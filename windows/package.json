@@ -6,6 +6,9 @@
   "description": "跟随鼠标的果冻兔球桌面助手",
   "main": "dist-electron/main.js",
   "scripts": {
+    "postinstall": "node scripts/patch-officeparser.mjs",
+    "prebuild": "node scripts/patch-officeparser.mjs",
+    "pretest": "node scripts/patch-officeparser.mjs",
     "build": "tsc -p tsconfig.json && node scripts/prepare.mjs",
     "icons": "electron scripts/generate-icons.cjs",
     "check": "tsc -p tsconfig.json --noEmit",
@@ -20,7 +23,8 @@
   "dependencies": {
     "dompurify": "3.4.17",
     "katex": "0.19.1",
-    "markdown-it": "15.0.3"
+    "markdown-it": "15.0.3",
+    "officeparser": "8.7.1"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

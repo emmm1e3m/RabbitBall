@@ -175,28 +175,62 @@ test('内置字体只接受布尔值，无效修改不改变内存或磁盘设�
   }
 });
 
-test('大爆炸插件与模式默认、停用归一化和持久重载一致，非法开关不写入', async t => {
+test('插件触发键默认继承，可独立保存和恢复继承，副本与本体触发键隔离', async t => {
+  const { Store, disk } = await settingsFixture(t);
+  const store = new Store();
+  assert.equal((await store.load()).graphActivationShortcut, null);
+  await store.save({ activationShortcut: ['ControlRight', 'Space'] });
+  assert.equal(store.getPublic().graphActivationShortcut, null);
+  const input = ['KeyK', 'AltRight'];
+  const saved = await store.save({ graphActivationShortcut: input });
+  assert.deepEqual([...saved.graphActivationShortcut!], ['AltRight', 'KeyK']);
+  input.push('ShiftLeft'); saved.graphActivationShortcut!.push('MetaLeft');
+  store.getPublic().graphActivationShortcut!.push('ControlLeft');
+  store.getPrivate().graphActivationShortcut!.push('ShiftRight');
+  assert.deepEqual([...store.getPublic().graphActivationShortcut!], ['AltRight', 'KeyK']);
+  assert.deepEqual([...store.getPublic().activationShortcut], ['ControlRight', 'Space']);
+  await store.save({ graphPluginEnabled: false, petSize: 1.1 });
+  assert.deepEqual((await disk()).graphActivationShortcut, ['AltRight', 'KeyK']);
+  const reloaded = new Store();
+  assert.deepEqual([...(await reloaded.load()).graphActivationShortcut!], ['AltRight', 'KeyK']);
+  await reloaded.save({ graphActivationShortcut: null, graphPluginEnabled: true });
+  assert.equal((await new Store().load()).graphActivationShortcut, null);
+  assert.equal((await disk()).graphActivationShortcut, null);
+});
+
+test('插件触发键拒绝非法按键而不改变已存配置', async t => {
+  const { Store, disk } = await settingsFixture(t);
+  const store = new Store();
+  await store.save({ graphActivationShortcut: ['AltRight'] });
+  const before = await disk();
+  for (const graphActivationShortcut of [[], ['Escape'], ['Unknown'], 'AltRight', {}, 42]) {
+    await assert.rejects(store.save({ graphActivationShortcut }));
+    assert.deepEqual([...store.getPublic().graphActivationShortcut!], ['AltRight']);
+    assert.deepEqual(await disk(), before);
+  }
+});
+
+test('插件开关持久保存，旧全局模式字段不进入当前设置', async t => {
   const { Store, file, disk } = await settingsFixture(t);
   const store = new Store(), initial = await store.load();
-  assert.equal(initial.graphPluginEnabled, true); assert.equal(initial.graphModeEnabled, false);
-  assert.equal((await store.save({ graphModeEnabled: true })).graphModeEnabled, true);
+  assert.equal(initial.graphPluginEnabled, true);
+  assert.equal('graphModeEnabled' in initial, false);
   const disabled = await store.save({ graphPluginEnabled: false });
-  assert.equal(disabled.graphPluginEnabled, false); assert.equal(disabled.graphModeEnabled, false);
-  assert.equal((await disk()).graphModeEnabled, false);
+  assert.equal(disabled.graphPluginEnabled, false);
   const reloaded = new Store(); await reloaded.load();
   const enabled = await reloaded.save({ graphPluginEnabled: true });
-  assert.equal(enabled.graphPluginEnabled, true); assert.equal(enabled.graphModeEnabled, false);
-  assert.equal((await new Store().load()).graphModeEnabled, false);
+  assert.equal(enabled.graphPluginEnabled, true);
+  assert.equal((await new Store().load()).graphPluginEnabled, true);
   const before = await disk();
-  for (const key of ['graphPluginEnabled', 'graphModeEnabled']) {
-    for (const invalid of [null, 0, 1, 'true', 'false', [], {}]) {
-      await assert.rejects(reloaded.save({ [key]: invalid }), /开关设置无效/);
-      assert.equal(reloaded.getPublic().graphPluginEnabled, true);
-      assert.equal(reloaded.getPublic().graphModeEnabled, false);
-      assert.deepEqual(await disk(), before);
-    }
+  for (const invalid of [null, 0, 1, 'true', 'false', [], {}]) {
+    await assert.rejects(reloaded.save({ graphPluginEnabled: invalid }), /开关设置无效/);
+    assert.equal(reloaded.getPublic().graphPluginEnabled, true);
+    assert.deepEqual(await disk(), before);
   }
   await writeFile(file, JSON.stringify({ graphPluginEnabled: false, graphModeEnabled: true }), 'utf8');
-  const normalized = await new Store().load();
-  assert.equal(normalized.graphPluginEnabled, false); assert.equal(normalized.graphModeEnabled, false);
+  const legacy = new Store(), normalized = await legacy.load();
+  assert.equal(normalized.graphPluginEnabled, false); assert.equal(normalized.graphActivationShortcut, null);
+  assert.equal('graphModeEnabled' in normalized, false);
+  await legacy.save({ graphPluginEnabled: true });
+  assert.equal('graphModeEnabled' in await disk(), false);
 });

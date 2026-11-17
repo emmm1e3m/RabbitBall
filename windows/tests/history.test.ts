@@ -98,6 +98,48 @@ test('删除与排队写入保持顺序，迟到完成或取消不会复活已�
   assert.deepEqual((await reload()).list(), []);
 });
 
+test('历史恢复沿用最新背景单份快照，背景清空后保存与再生成均不恢复旧资料', async t => {
+  const { store, reload } = await fixture(t), initial = conversation();
+  initial.background = { text: '最新工作区背景', images: [{ id: 'background-image', title: '公式图', imageDataUrl: 'data:image/png;base64,Ymc=' }] };
+  const initialRun = store.begin(request(), initial); await initialRun.save();
+  const restored = await reload(), state = restored.getConversation('conversation-1')!;
+  assert.deepEqual(state.background, initial.background);
+  assert.ok(!JSON.stringify(restored.get('conversation-1')).includes('最新工作区背景'));
+  const sent: Array<{ messages: unknown[] }> = [], fetchBefore = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => { sent.push(JSON.parse(String(init?.body))); return response('回复'); };
+  t.after(() => { globalThis.fetch = fetchBefore; });
+  const followup = request('conversation-1', 'turn-2'), run = restored.begin(followup, state);
+  await runAgent(followup, settings, { signal: new AbortController().signal, conversation: state, onEvent: run.onEvent });
+  await run.save();
+  assert.equal((JSON.stringify(sent[0].messages).match(/最新工作区背景/g) ?? []).length, 1);
+  assert.deepEqual(sent[0].messages.filter((_, index) => index !== 1).slice(0, initial.messages.length), initial.messages);
+  const regenerate = { ...request(), regenerate: true }, again = restored.begin(regenerate, state);
+  await runAgent(regenerate, settings, { signal: new AbortController().signal, conversation: state, background: null, onEvent: again.onEvent });
+  await again.save();
+  assert.deepEqual(sent[1].messages, initial.messages.slice(0, 2));
+  assert.equal((await reload()).getConversation('conversation-1')?.background, null);
+});
+
+test('图谱问答链独立持久化，恢复后只注入一份当前结构并保留正常对话', async t => {
+  const { store, reload } = await fixture(t), initial = conversation();
+  initial.reference = { messages: [{ role: 'user', content: '根节点资料' }, { role: 'assistant', content: '图谱已有回复' }] };
+  const saved = store.begin(request(), initial); await saved.save();
+  const restored = await reload(), state = restored.getConversation('conversation-1')!;
+  assert.deepEqual(state.reference, initial.reference);
+  assert.ok(!JSON.stringify(state.messages).includes('根节点资料'));
+  const previous = globalThis.fetch, sent: any[] = [];
+  globalThis.fetch = async (_input, init) => { sent.push(JSON.parse(String(init?.body))); return response('续聊'); };
+  t.after(() => { globalThis.fetch = previous; });
+  const reference = { messages: [{ role: 'user' as const, content: '当前根节点资料' }, { role: 'assistant' as const, content: '当前图谱回复' }] };
+  const next = request('conversation-1', 'turn-2'), run = restored.begin(next, state);
+  await runAgent(next, settings, { signal: new AbortController().signal, conversation: state, reference, onEvent: run.onEvent });
+  await run.save();
+  assert.ok(!JSON.stringify(sent[0]).includes('图谱已有回复'));
+  assert.equal((JSON.stringify(sent[0]).match(/当前图谱回复/g) ?? []).length, 1);
+  assert.deepEqual(sent[0].messages.slice(3, 3 + initial.messages.length - 1), initial.messages.slice(1));
+  assert.deepEqual((await reload()).getConversation('conversation-1')?.reference, reference);
+});
+
 test('按最近活动排序；减小限制立即持久裁剪，裁掉的旧请求不得迟到写回', async t => {
   const { store, reload } = await fixture(t, 3);
   const old = store.begin(request('old'), conversation()); await old.save();

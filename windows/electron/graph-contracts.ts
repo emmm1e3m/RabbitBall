@@ -1,4 +1,4 @@
-import type { CaptureImage } from './contracts.js';
+import type { Attachment, CaptureImage } from './contracts.js';
 
 export type GraphImage = CaptureImage & { file?: string };
 
@@ -21,6 +21,7 @@ export interface GraphSource {
   selection: GraphSelection;
   comment: string;
   revision: number;
+  question?: string;
   images?: GraphImage[];
   selectionImage?: GraphImage;
 }
@@ -40,6 +41,9 @@ export interface GraphNode {
   title: string;
   markdown: string;
   images: GraphImage[];
+  attachments?: Attachment[];
+  // 跨图片与文档的添加顺序，使用 image:<id> / attachment:<id> 区分同名编号。
+  materialOrder?: string[];
   annotations: GraphAnnotation[];
   source?: GraphSource;
   pinned: boolean;
@@ -70,6 +74,7 @@ export interface GraphWorkspace {
   revision: number;
   updatedAt: number;
   lastGraphId?: string;
+  background?: { text: string; attachments: Attachment[] };
   graphs: KnowledgeGraph[];
 }
 
@@ -82,10 +87,16 @@ export interface GraphWorkspaceSummary {
 
 export type GraphMutation =
   | { type: 'rename-workspace'; name: string }
+  | { type: 'set-background'; background: { text: string; attachments: Attachment[] } }
   | { type: 'create-graph'; title?: string }
+  | { type: 'delete-graph'; graphId: string }
   | { type: 'add-root'; graphId: string; markdown: string; images: GraphImage[] }
   | { type: 'add-custom-node'; graphId: string; parentId: string; markdown: string; images: GraphImage[] }
   | { type: 'append-node-images'; graphId: string; nodeId: string; images: GraphImage[] }
+  | { type: 'remove-node-image'; graphId: string; nodeId: string; imageId: string }
+  | { type: 'append-node-attachments'; graphId: string; nodeId: string; attachments: Attachment[] }
+  | { type: 'remove-node-attachment'; graphId: string; nodeId: string; attachmentId: string }
+  | { type: 'remove-latest-node-asset'; graphId: string; nodeId: string }
   | { type: 'rename-graph'; graphId: string; title: string }
   | { type: 'visit'; graphId: string }
   | { type: 'view'; graphId: string; view: KnowledgeGraph['view'] }
@@ -104,7 +115,7 @@ export type GraphMutation =
 
 export interface GraphNodeRequest { workspaceId: string; graphId: string; nodeId: string }
 export interface GraphCaptureRequest { workspaceId: string; graphId: string }
-export interface GraphGenerateRequest extends GraphNodeRequest { annotationIds?: string[] }
+export interface GraphGenerateRequest extends GraphNodeRequest { annotationIds?: string[]; question?: string }
 export interface GraphDocument { markdown: string; revision: number; path: string }
 
 export interface GraphDesktop {
@@ -115,11 +126,12 @@ export interface GraphDesktop {
   graphRevealDocument(workspaceId: string): Promise<void>;
   graphCapture(request: GraphCaptureRequest): Promise<void>;
   graphCaptureImages(request: GraphCaptureRequest & { nodeId?: string }): Promise<CaptureImage[] | null>;
-  graphActivate(action?: 'rename-graph' | 'undo' | 'redo'): Promise<void>;
+  graphActivate(action?: 'rename-graph' | 'undo' | 'redo' | GraphNodeRequest): Promise<void>;
+  onGraphWorkspaceChanged(listener: (workspace: GraphWorkspace) => void): () => void;
   graphGenerate(request: GraphGenerateRequest): Promise<void>;
   graphRegenerate(request: GraphNodeRequest): Promise<void>;
   graphCancel(request: GraphNodeRequest): void;
-  // 事件中的已发送图片可用空 dataURL 复用同 id 的缓存；直接查询始终返回完整图片。
+  // 事件可省略已发送附件正文或清空图片 dataURL，界面按工作区和节点缓存；查询返回完整内容。
   onGraphChanged(listener: (workspace: GraphWorkspace) => void): () => void;
   onGraphError(listener: (error: { workspaceId?: string; message: string }) => void): () => void;
 }

@@ -29,9 +29,9 @@ test('原生助手启动并确认启动键配置', { skip: !windows, timeout: 15
     // 只验证配置回执，不启用输入拦截或改变任何窗口。
     await native.configure({
       pauseOnFullscreen: false, inputEnabled: false, allowOwnForeground: false, recording: false,
-      shortcut: [{ code: 'AltLeft', key: 0x38, modifier: true }],
+      shortcuts: { prompt: [{ code: 'AltLeft', key: 0x38, modifier: true }], graph: [{ code: 'AltRight', key: 0x138, modifier: true }] },
     });
-    await assert.rejects(native.beginSelection(), /无法开始屏幕框选/, '禁用输入时不能暗中进入手动框选');
+    await assert.rejects(native.beginSelection('prompt'), /无法开始屏幕框选/, '禁用输入时不能暗中进入手动框选');
     assert.equal(await native.prepareOverlayWindow('0'), false);
     assert.equal(await native.prepareOverlayWindow('not-a-handle'), false);
     assert.equal(nativeFailure, false);

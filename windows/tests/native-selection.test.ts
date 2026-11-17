@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
 import type { WindowsNative } from '../electron/windows-native.ts';
+import type { ActivationTarget } from '../electron/shortcut.ts';
 
 function bridge() {
   const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter & { setEncoding(): void }; stdin: EventEmitter & { write(value: string): void; end(): void }; kill(): void };
@@ -25,8 +26,8 @@ function bridge() {
     Buffer, setTimeout, clearTimeout, queueMicrotask, __moduleUrl: url.href };
   vm.runInNewContext(stripTypeScriptTypes(source) + '\nglobalThis.create = createWindowsNative;', context);
   const native: WindowsNative = context.create({
-    onTriggerBegin(id: number) { events.push('begin:' + id); }, onTriggerHold(id: number) { events.push('hold:' + id); },
-    onTriggerEnd(id: number) { events.push('end:' + id); }, onTriggerCancel(id: number) { events.push('cancel:' + id); },
+    onTriggerBegin(id: number, target: ActivationTarget) { events.push('begin:' + id + ':' + target); }, onTriggerHold(id: number, target: ActivationTarget) { events.push('hold:' + id + ':' + target); },
+    onTriggerEnd(id: number, target: ActivationTarget) { events.push('end:' + id + ':' + target); }, onTriggerCancel(id: number, target: ActivationTarget) { events.push('cancel:' + id + ':' + target); },
     onSelectionPointer(id: number, phase: string) { events.push(phase + ':' + id); },
     onPointerDown(point: { x: number; y: number }) { events.push('pointer:' + point.x + ',' + point.y); },
     onPointerUp(point: { x: number; y: number }) { events.push('release:' + point.x + ',' + point.y); },
@@ -37,20 +38,67 @@ function bridge() {
   return { native, commands, events, emit, errors: () => errors, child };
 }
 
+test('原生配置同时传递两组快捷键，也支持只启用普通唤起', async () => {
+  const app = bridge();
+  try {
+    const prompt = [{ code: 'AltLeft', key: 0x38, modifier: true }];
+    const graph = [{ code: 'AltRight', key: 0x138, modifier: true }];
+    for (const shortcuts of [{ prompt, graph }, { prompt }]) {
+      const configuration = { pauseOnFullscreen: false, inputEnabled: true, allowOwnForeground: true, recording: false, shortcuts };
+      const pending = app.native.configure(configuration), command = app.commands.at(-1);
+      assert.equal(command.type, 'configure');
+      assert.deepEqual(command.shortcuts, shortcuts);
+      assert.equal('shortcut' in command, false);
+      app.emit({ type: 'configured', requestId: command.requestId });
+      await pending;
+    }
+    assert.equal(app.errors(), 0);
+  } finally { app.native.stop(); }
+});
+
+test('启动、长按、结束和取消都按原生事件目标路由', async () => {
+  const app = bridge();
+  try {
+    for (const [index, target] of (['prompt', 'graph'] as const).entries()) {
+      const captureId = index + 1;
+      app.emit(...['begin', 'hold', 'end', 'cancel'].map(phase => ({ type: 'trigger-' + phase, captureId, target })));
+    }
+    assert.deepEqual(app.events, ['begin:1:prompt', 'hold:1:prompt', 'end:1:prompt', 'cancel:1:prompt',
+      'begin:2:graph', 'hold:2:graph', 'end:2:graph', 'cancel:2:graph']);
+    assert.equal(app.errors(), 0);
+  } finally { app.native.stop(); }
+});
+
+test('所有启动事件拒绝缺失或非法目标，不把它们路由到默认入口', async () => {
+  for (const type of ['trigger-begin', 'trigger-hold', 'trigger-end', 'trigger-cancel']) {
+    for (const target of [undefined, null, '', 'settings', 'Prompt', 1, false, {}]) {
+      const app = bridge();
+      try {
+        app.emit({ type, captureId: 1, target });
+        assert.deepEqual(app.events, [], type + ' 不应交付非法目标');
+        assert.equal(app.errors(), 1);
+        app.emit({ type: 'trigger-begin', captureId: 2, target: 'prompt' });
+        assert.deepEqual(app.events, [], '协议失败后不继续交付事件');
+      } finally { app.native.stop(); }
+    }
+  }
+});
+
 test('手动框选同批回执先完成编号登记，再有序交付鼠标与结束事件', async () => {
   const app = bridge();
   try {
     await app.native.ready;
-    const pending = app.native.beginSelection().then(id => { app.events.push('registered:' + id); return id; });
+    const pending = app.native.beginSelection('prompt').then(id => { app.events.push('registered:' + id); return id; });
     const command = app.commands.at(-1);
     assert.equal(command.type, 'begin-selection');
+    assert.equal(command.target, 'prompt');
     app.emit({ type: 'selection-started', requestId: command.requestId, captureId: 17 },
       { type: 'selection-pointer', captureId: 17, phase: 'down', x: -20, y: 30 },
       { type: 'selection-pointer', captureId: 17, phase: 'up', x: 80, y: 130 },
-      { type: 'trigger-end', captureId: 17 });
+      { type: 'trigger-end', captureId: 17, target: 'prompt' });
     assert.deepEqual(app.events, []);
     assert.equal(await pending, 17);
-    assert.deepEqual(app.events, ['registered:17', 'down:17', 'up:17', 'end:17']);
+    assert.deepEqual(app.events, ['registered:17', 'down:17', 'up:17', 'end:17:prompt']);
     assert.equal(app.errors(), 0);
   } finally { app.native.stop(); }
 });
@@ -82,16 +130,17 @@ test('普通释放按原生顺序交给主进程，使页面丢失松开时仍�
 test('手动框选结束后的普通点击与下一次激活不越过此前的区域提交', async () => {
   const app = bridge();
   try {
-    const pending = app.native.beginSelection().then(id => { app.events.push('registered:' + id); return id; });
+    const pending = app.native.beginSelection('graph').then(id => { app.events.push('registered:' + id); return id; });
+    assert.equal(app.commands.at(-1).target, 'graph');
     app.emit({ type: 'selection-started', requestId: app.commands.at(-1).requestId, captureId: 19 },
       { type: 'selection-pointer', captureId: 19, phase: 'down', x: -20, y: 30 },
       { type: 'selection-pointer', captureId: 19, phase: 'up', x: 80, y: 130 },
-      { type: 'trigger-end', captureId: 19 },
+      { type: 'trigger-end', captureId: 19, target: 'graph' },
       { type: 'pointer-down', x: -300, y: 240 },
-      { type: 'trigger-begin', captureId: 20 });
+      { type: 'trigger-begin', captureId: 20, target: 'prompt' });
     assert.deepEqual(app.events, []);
     assert.equal(await pending, 19);
-    assert.deepEqual(app.events, ['registered:19', 'down:19', 'up:19', 'end:19', 'pointer:-300,240', 'begin:20']);
+    assert.deepEqual(app.events, ['registered:19', 'down:19', 'up:19', 'end:19:graph', 'pointer:-300,240', 'begin:20:prompt']);
     assert.equal(app.errors(), 0);
   } finally { app.native.stop(); }
 });
@@ -100,13 +149,13 @@ test('停止或故障后不交付已排队的框选、点击与下一次激活',
   for (const fail of [false, true]) {
     const app = bridge();
     try {
-      const pending = app.native.beginSelection();
+      const pending = app.native.beginSelection('graph');
       app.emit({ type: 'selection-started', requestId: app.commands.at(-1).requestId, captureId: 21 });
       assert.equal(await pending, 21);
       app.emit({ type: 'selection-pointer', captureId: 21, phase: 'up', x: 80, y: 130 },
-        { type: 'trigger-end', captureId: 21 },
+        { type: 'trigger-end', captureId: 21, target: 'graph' },
         { type: 'pointer-down', x: -300, y: 240 },
-        { type: 'trigger-begin', captureId: 22 });
+        { type: 'trigger-begin', captureId: 22, target: 'prompt' });
       assert.deepEqual(app.events, []);
       if (fail) app.child.emit('error', new Error('child stopped'));
       else app.native.stop();
@@ -137,27 +186,27 @@ test('普通点击必须包含有限坐标，拒绝旧空事件与非法坐标',
 test('手动框选拒绝可重试，取消所属编号且停止时释放等待回执的请求', async () => {
   const app = bridge();
   try {
-    const rejected = assert.rejects(app.native.beginSelection(), /无法开始屏幕框选/);
+    const rejected = assert.rejects(app.native.beginSelection('prompt'), /无法开始屏幕框选/);
     app.emit({ type: 'selection-started', requestId: app.commands.at(-1).requestId, captureId: 0 });
     await rejected;
-    const pending = app.native.beginSelection();
+    const pending = app.native.beginSelection('graph');
     app.emit({ type: 'selection-started', requestId: app.commands.at(-1).requestId, captureId: 18 });
     assert.equal(await pending, 18);
     app.native.cancelCapture(18);
     assert.deepEqual(app.commands.at(-1), { type: 'cancel-capture', captureId: 18 });
-    app.emit({ type: 'trigger-cancel', captureId: 18 });
+    app.emit({ type: 'trigger-cancel', captureId: 18, target: 'graph' });
     await Promise.resolve();
-    assert.deepEqual(app.events, ['cancel:18']);
-    const interrupted = assert.rejects(app.native.beginSelection(), /框选已取消/);
+    assert.deepEqual(app.events, ['cancel:18:graph']);
+    const interrupted = assert.rejects(app.native.beginSelection('prompt'), /框选已取消/);
     app.native.stop(); await interrupted;
-    await assert.rejects(app.native.beginSelection(), /助手不可用/);
+    await assert.rejects(app.native.beginSelection('prompt'), /助手不可用/);
     assert.equal(app.errors(), 0);
   } finally { app.native.stop(); }
 });
 
 test('原生助手故障立即拒绝尚未开始的框选', async () => {
   const app = bridge();
-  const pending = assert.rejects(app.native.beginSelection(), /框选未能开始/);
+  const pending = assert.rejects(app.native.beginSelection('graph'), /框选未能开始/);
   app.child.emit('error', new Error('child stopped'));
   await pending;
   assert.equal(app.errors(), 1);

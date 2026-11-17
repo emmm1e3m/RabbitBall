@@ -47,6 +47,9 @@ async function enter(shift = false) {
   // 真实 Enter 含字符事件，按钮的原生键盘激活也依赖这一阶段。
   for (const type of ['keyDown', 'keyUp']) await command('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: shift ? 8 : 0, text: type === 'keyDown' ? '\r' : undefined });
 }
+async function escape() {
+  for (const type of ['keyDown', 'keyUp']) await command('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+}
 
 async function main() {
   directory = await mkdtemp(temporaryPrefix);
@@ -119,19 +122,30 @@ async function main() {
   stage = '空批注与保存状态';
   await evaluate(async ids => { window.getSelection().removeAllRanges(); await window.RabbitGraph.open({ workspaceId: ids.workspaceId }); }, ids);
   await pause(500);
+  if (await evaluate(() => !!document.querySelector('.rg-card-focus'))) {
+    await until(() => !document.querySelector('.rg-card-focus').inert, '恢复的展开卡片未完成入场');
+    await escape();
+    await until(() => !document.querySelector('.rg-card-focus'), 'Esc 未收起恢复的展开卡片');
+  }
   const cardPoint = await center(`.rg-world .rg-card[data-node-id="${ids.cardId}"] .rg-body`);
+  await mouse('mouseMoved', cardPoint);
+  const hit = await evaluate((nodeId, point) => {
+    const target=document.elementFromPoint(point.x,point.y),card=document.querySelector(`.rg-world .rg-card[data-node-id="${nodeId}"]`);
+    return {matches:target?.closest('.rg-card')===card,element:target?.outerHTML.slice(0,200)};
+  },ids.cardId,cardPoint);
+  assert.equal(hit.matches,true,'拖动起点未命中画布目标卡片：'+JSON.stringify(hit));
   await mouse('mousePressed', cardPoint);
   await mouse('mouseMoved', { x: cardPoint.x + 3, y: cardPoint.y }, true);
   assert.equal(await evaluate(() => !!document.querySelector('.rg-drag-ghost')), false, '轻微抖动误启动拖动');
   await mouse('mouseMoved', { x: cardPoint.x + 30, y: cardPoint.y + 20 }, true);
   await until(() => !!document.querySelector('.rg-drag-ghost'), '按住卡片无法拖动');
-  for (const type of ['keyDown', 'keyUp']) await command('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await escape();
   await mouse('mouseReleased', { x: cardPoint.x + 30, y: cardPoint.y + 20 });
   await until(() => !document.querySelector('.rg-drag-ghost'), '取消拖动后浮动卡片未清理');
   await click(await center(`.rg-world .rg-card[data-node-id="${ids.cardId}"] .rg-body`));
   await until(() => !!document.querySelector('.rg-card-focus') && !document.querySelector('.rg-card-focus').inert, '正文单击未完成展开');
   const controls = await evaluate(() => {
-    const card = document.querySelector('.rg-card-focus'), generate = card.querySelector('.rg-generate'), exit = document.querySelector('.rg-plugin .rg-action');
+    const card = document.querySelector('.rg-card-focus'), generate = card.querySelector('.rg-generate'), exit = document.querySelector('.rg-plugin [aria-label="退出知识图谱"]');
     const a = generate.getBoundingClientRect(), b = exit.getBoundingClientRect(), c = card.getBoundingClientRect();
     return { width: a.width, height: a.height, exitWidth: b.width, exitHeight: b.height, right: a.x + a.width / 2 - c.right, bottom: a.y + a.height / 2 - c.bottom, disabled: generate.disabled, hit: document.elementFromPoint(a.x + a.width / 2, a.y + a.height / 2)?.closest('.rg-generate') === generate };
   });
@@ -181,15 +195,26 @@ async function main() {
   await until(() => !!document.querySelector('[aria-label="添加根节点"]'), '新图谱缺少添加根节点入口');
   await click(await center('[aria-label="添加根节点"]'));
   await until(() => !!document.querySelector('.rg-card-focus') && !document.querySelector('.rg-card-focus').inert, '首张截图后没有展开根卡片');
-  assert.equal(await evaluate(() => !!document.querySelector('.rg-root-editor,.rg-dialog')), false, '创建根节点仍出现前置输入框');
+  assert.equal(await evaluate(() => !!document.querySelector('.rg-dialog')), false, '创建根节点仍出现前置对话框');
+  assert.equal(await evaluate(() => {
+    const input = document.querySelector('.rg-card-focus .rg-source-input');
+    return !!input && !input.hidden && input.value === '';
+  }), true, '根节点未默认显示空白输入框');
   assert.equal(await evaluate(() => document.querySelectorAll('.rg-card-focus .rg-image').length), 1, '首张截图未创建根节点');
   await click(await center('.rg-card-focus [aria-label="添加截图"]'));
   await until(() => document.querySelectorAll('.rg-card-focus .rg-image').length === 2, '根节点未追加第二张截图');
-  await click(await center('.rg-card-focus [aria-label="添加文本"]'));
-  await until(() => !!document.querySelector('.rg-root-text textarea'), '未打开卡片内文字编辑');
-  await command('Input.insertText', { text: '两张截图的共同背景\n请结合这些资料理解问题。' });
+  await click(await center('.rg-card-focus .rg-source-input'));
+  await command('Input.insertText', { text: '两张截图的共同背景' });
   await enter();
-  await until(() => !document.querySelector('.rg-root-text'), '保存根节点文本后编辑区未收起');
+  await command('Input.insertText', { text: '请结合这些资料理解问题。' });
+  assert.equal(await evaluate(() => {
+    const input = document.querySelector('.rg-card-focus .rg-source-input');
+    return !input.hidden && document.activeElement === input && input.value === '两张截图的共同背景\n请结合这些资料理解问题。';
+  }), true, 'Enter 未在默认输入框中换行并保留编辑状态');
+  await until(() => {
+    const snapshot = window.RabbitGraph.getSnapshot(), graph = snapshot.workspace.graphs.find(graph => graph.id === snapshot.graphId);
+    return graph.nodes.find(node => node.id === graph.rootId).markdown === '两张截图的共同背景\n请结合这些资料理解问题。';
+  }, '根节点输入未自动保存');
   assert.equal(await evaluate(() => {
     const snapshot = window.RabbitGraph.getSnapshot(), graph = snapshot.workspace.graphs.find(graph => graph.id === snapshot.graphId), root = graph.nodes.find(node => node.id === graph.rootId);
     return graph.nodes.length === 1 && root.images.length === 2 && root.markdown === '两张截图的共同背景\n请结合这些资料理解问题。';
@@ -209,16 +234,23 @@ async function main() {
   const customId=await evaluate(()=>document.querySelector('.rg-card-focus').dataset.nodeId);
   assert.equal(await evaluate(()=>window.__customCaptureCount),0,'自定义卡片不应要求先截图');
   assert.equal(await evaluate(()=>!!document.querySelector('.rg-card-focus [aria-label="重新生成"]')),false,'用户资料不应提供重新生成');
-  await click(await center('.rg-card-focus [aria-label="添加文本"]'));
+  assert.equal(await evaluate(() => document.activeElement === document.querySelector('.rg-card-focus .rg-source-input')), true, '空白自定义卡片未聚焦默认输入框');
   await command('Input.insertText',{text:'这是一张直接输入文本建立的自定义资料卡片，可以选中这段内容进行批注。'});
-  await enter();
-  await until(()=>!document.querySelector('.rg-root-text'),'自定义文本未保存');
+  await until(customId=>{
+    const current=window.RabbitGraph.getSnapshot(),node=current.workspace.graphs.find(graph=>graph.id===current.graphId).nodes.find(node=>node.id===customId);
+    return node.markdown.includes('直接输入文本');
+  },'自定义文本未自动保存',customId);
   assert.equal(await evaluate((customId,parentId)=>{
     const current=window.RabbitGraph.getSnapshot(),node=current.workspace.graphs.find(graph=>graph.id===current.graphId).nodes.find(node=>node.id===customId);
     return node.parentId===parentId&&node.kind==='source'&&node.images.length===0&&node.markdown.includes('直接输入文本');
   },customId,parentId),true,'纯文本卡片未连接到原节点');
   await click(await center('.rg-card-focus [aria-label="添加截图"]'));
   await until(()=>document.querySelectorAll('.rg-card-focus .rg-image').length===1,'自定义卡片未追加截图');
+  await click(await center('.rg-card-focus [aria-label="预览内容并添加批注"]'));
+  await until(()=>{
+    const card=document.querySelector('.rg-card-focus');
+    return card.querySelector('.rg-source-input').hidden&&!card.querySelector('.rg-body').hidden&&card.querySelector('[aria-label="预览内容并添加批注"]').getAttribute('aria-pressed')==='true';
+  },'自定义卡片未从默认输入切换到可批注的正文预览');
   await evaluate(()=>{document.querySelector('.rg-card-focus .rg-body').scrollIntoView({block:'center'});});
   await dragText('.rg-card-focus .rg-body');
   await until(()=>!!document.querySelector('.rg-note-editor'),'自定义文本不能批注');

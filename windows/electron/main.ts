@@ -6,32 +6,38 @@ import { SettingsStore, validateSettingsPatch } from './settings.js';
 import { createTrayIcon } from './tray-icon.js';
 import { markCaptureCursor } from './capture-marker.js';
 import { createWindowsNative, type WindowsNative } from './windows-native.js';
-import { createAgentConversation, runAgent, type AgentConversation } from './agent.js';
+import { createAgentConversation, runAgent, setAgentUsageRecorder, type AgentBackground, type AgentReference, type AgentConversation } from './agent.js';
+import { UsageStore, validateUsageScope } from './usage.js';
 import { HistoryStore, type HistoryRun } from './history.js';
 import { GraphStore } from './graph-store.js';
 import { resolveGraphDirectory } from './graph-location.js';
-import { GraphJobs, buildGraphChatContext } from './graph-jobs.js';
+import { GraphJobs, buildGraphChatContext, GRAPH_CHAT_RULES } from './graph-jobs.js';
+import { parseDocumentAttachment, MAX_DOCUMENT_CHARACTERS } from './document-parser.js';
 import type { GraphCaptureRequest, GraphMutation, GraphNodeRequest, GraphWorkspace } from './graph-contracts.js';
 import { selectionRect, imageCropRect, unionBounds, type CapturePoint, type CaptureRect } from './capture-geometry.js';
 import { CaptureOverlays, type CaptureViewport } from './capture-overlays.js';
 import { CaptureWorker } from './capture-worker.js';
 import { ActivationEffectWindow } from './activation-effect-window.js';
+import { GraphWindow } from './graph-window.js';
 import { ClipboardStore, type ClipboardSnapshot } from './clipboard.js';
-import { nativeShortcut, shortcutToAccelerator, formatShortcut } from './shortcut.js';
+import { nativeShortcut, effectiveShortcutBindings, shortcutAcceleratorBindings, type ActivationTarget } from './shortcut.js';
 import type { Activation, AgentEvent, AgentRequest, Attachment, CaptureContext, CaptureEvent, CaptureImage, CursorPoint, GraphPinInteraction, PointerPoint } from './contracts.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let window: BrowserWindow;
+let graphWindow: GraphWindow | undefined;
 let activationEffect: ActivationEffectWindow | undefined;
 let tray: Tray;
 let store: SettingsStore;
 let historyStore: HistoryStore;
+let usageStore: UsageStore;
+const runningAgentRequests = new Set<Promise<void>>();
 let graphStore: GraphStore;
 let graphJobs: GraphJobs;
 let graphWorkspaceId: string | undefined;
-const graphImageCache = new Map<string, Map<string, string>>();
+const graphImageCache = new Map<Electron.WebContents, Map<string, Map<string, string>>>();
 let quitting = false;
-let panelView: Activation['view'] | undefined;
+let panelView: 'prompt' | 'settings' | undefined;
 let interactive = false;
 let windowMode: { focusable: boolean; ignoreMouse: boolean } | undefined;
 let graphPinRegions: Electron.Rectangle[] = [];
@@ -41,14 +47,18 @@ let activationEpoch = 0;
 let promptActivation: { epoch: number; phase: 'pending' | 'ready'; focus?: Promise<boolean> } | undefined;
 let suspended = false;
 let windowsNative: WindowsNative | undefined;
+let nativeFocusRequest: { surface: 'pet' | 'graph' } | undefined;
 let shortcutRecording = false;
 let recordingReady = Promise.resolve();
-let registeredShortcut: string | undefined;
+let registeredShortcuts: string[] = [];
 interface NativeCaptureContext extends CaptureContext {
   focusScreenBounds?: Electron.Rectangle;
 }
 let currentContext: NativeCaptureContext | undefined;
 let captureOverlays: CaptureOverlays | undefined;
+interface GraphTrigger { nativeId?: number; owner?: number; dismissOnTap: boolean; released: boolean }
+let pendingGraphTrigger: GraphTrigger | undefined;
+let captureRequestEpoch = 0;
 interface CaptureSession {
   id: string;
   nativeId?: number;
@@ -66,6 +76,7 @@ interface CaptureSession {
   released: boolean;
   visible: boolean;
   finishing: boolean;
+  dismissOnTap?: boolean;
   target: 'prompt' | 'graph' | 'images';
   workspaceId?: string;
   graphId?: string;
@@ -77,8 +88,12 @@ interface CaptureSession {
 let captureSession: CaptureSession | undefined;
 let clipboardQueue = Promise.resolve();
 const preservedClipboard = new ClipboardStore(clipboard, data => new ClipboardItem(data));
-let activeRequest: { id: string; conversationId: string; controller: AbortController; history?: HistoryRun } | undefined;
-let currentConversation: { id: string; conversation: AgentConversation } | undefined;
+interface ChatSession {
+  activeRequest?: { id: string; conversationId: string; controller: AbortController; history?: HistoryRun };
+  currentConversation?: { id: string; conversation: AgentConversation };
+}
+const petChat: ChatSession = {};
+const graphChat: ChatSession = {};
 let cursorTimer: ReturnType<typeof setInterval> | undefined;
 let petTransitionEpoch = 0;
 let petTransition: number | undefined;
@@ -93,7 +108,7 @@ function applyWindowMode(point?: CursorPoint): void {
   graphPinHover = hitsGraphPins(point);
   const available = !quitting && !captureSession && petTransition === undefined && (!suspended || panelView === 'settings');
   // 沿用本体的悬停穿透逻辑；插件只贡献自身命中，不裁剪或隐藏兔球画面。
-  const acceptsPointer = panelView === 'graph' || interactive || graphPinHover || graphPinPressed;
+  const acceptsPointer = interactive || graphPinHover || graphPinPressed;
   const ignoreMouse = !available || promptActivation?.phase === 'pending' || !acceptsPointer;
   // 可见固定卡提前允许系统点击激活；悬停不主动获取焦点。
   const focusable = petTransition === undefined && !captureSession && (panelView === 'settings' || promptActivation?.phase === 'ready' || graphPinsAvailable() || panelView === undefined && interactive);
@@ -125,7 +140,7 @@ function raiseMainWindow(): void {
 }
 
 function graphPinsVisible(): boolean {
-  return panelView === undefined && !suspended && !quitting && !captureSession && petTransition === undefined && store.getPublic().graphPluginEnabled;
+  return !graphWindow?.visible && panelView === undefined && !suspended && !quitting && !captureSession && petTransition === undefined && store.getPublic().graphPluginEnabled;
 }
 
 function graphPinsAvailable(): boolean {
@@ -204,22 +219,41 @@ function invalidateInput(): void {
   graphPinPressed = false;
   activationEpoch++;
   promptActivation = undefined;
-  windowsNative?.cancelFocus();
+  if (nativeFocusRequest?.surface !== 'graph') windowsNative?.cancelFocus();
 }
 
-function configureNative(shortcut = store.getPublic().activationShortcut): Promise<void> {
-  return windowsNative?.configure({ pauseOnFullscreen: store.getPublic().pauseOnFullscreen, inputEnabled: !suspended && !!window && !window.isDestroyed(), allowOwnForeground: panelView !== 'settings', recording: shortcutRecording, shortcut: nativeShortcut(shortcut) }) ?? Promise.resolve();
+async function focusNativeWindow(target: BrowserWindow, surface: 'pet' | 'graph'): Promise<boolean> {
+  const request = { surface };
+  nativeFocusRequest = request;
+  const bytes = target.getNativeWindowHandle();
+  const handle = bytes.length >= 8 ? bytes.readBigUInt64LE().toString() : bytes.readUInt32LE().toString();
+  try { return await windowsNative?.focusWindow(handle) ?? false; }
+  finally { if (nativeFocusRequest === request) nativeFocusRequest = undefined; }
 }
 
-function registerPlatformShortcut(shortcut: readonly string[]): void {
-  const accelerator = shortcutToAccelerator(shortcut, process.platform);
-  if (!accelerator) throw new Error('当前平台无法注册此物理按键组合，请选择其他普通按键或组合键。');
-  if (accelerator === registeredShortcut && globalShortcut.isRegistered(accelerator)) return;
-  if (!globalShortcut.register(accelerator, activatePrompt)) throw new Error('启动键 ' + formatShortcut(shortcut, process.platform) + ' 已被其他应用占用，请选择其他组合。');
-  if (registeredShortcut && registeredShortcut !== accelerator) globalShortcut.unregister(registeredShortcut);
-  registeredShortcut = accelerator;
+function configureNative(): Promise<void> {
+  const settings = store.getPublic(), bindings = effectiveShortcutBindings(settings);
+  return windowsNative?.configure({ pauseOnFullscreen: settings.pauseOnFullscreen, inputEnabled: !suspended && !!window && !window.isDestroyed(), allowOwnForeground: panelView !== 'settings' || graphWindow?.window?.isFocused() === true, recording: shortcutRecording,
+    shortcuts: { prompt: nativeShortcut(bindings.prompt), ...(bindings.graph ? { graph: nativeShortcut(bindings.graph) } : {}) } }) ?? Promise.resolve();
+}
+
+function unregisterPlatformShortcuts(): void {
+  for (const accelerator of registeredShortcuts) globalShortcut.unregister(accelerator);
+  registeredShortcuts = [];
+}
+
+function registerPlatformShortcut(settings: Parameters<typeof effectiveShortcutBindings>[0] = store.getPublic()): void {
+  const bindings = shortcutAcceleratorBindings(effectiveShortcutBindings(settings), process.platform);
+  unregisterPlatformShortcuts();
   // globalShortcut 无法逐次旁路事件；自有窗口聚焦时解除，保留输入框的正常按键。
-  if (window && !window.isDestroyed() && window.isFocused()) globalShortcut.unregister(accelerator);
+  if (window && !window.isDestroyed() && window.isFocused() || graphWindow?.window?.isFocused()) return;
+  for (const { target, accelerator } of bindings) {
+    if (!globalShortcut.register(accelerator, () => activateTarget(target))) {
+      unregisterPlatformShortcuts();
+      throw new Error('启动键 ' + accelerator + ' 已被其他应用占用，请选择其他组合。');
+    }
+    registeredShortcuts.push(accelerator);
+  }
 }
 
 function setShortcutRecording(recording: boolean): Promise<void> {
@@ -227,8 +261,8 @@ function setShortcutRecording(recording: boolean): Promise<void> {
   shortcutRecording = recording;
   if (recording) cancelCapture();
   recordingReady = process.platform === 'win32' ? configureNative() : Promise.resolve().then(() => {
-    if (recording) { if (registeredShortcut) globalShortcut.unregister(registeredShortcut); registeredShortcut = undefined; }
-    else registerPlatformShortcut(store.getPublic().activationShortcut);
+    if (recording) unregisterPlatformShortcuts();
+    else registerPlatformShortcut();
   });
   return recordingReady;
 }
@@ -241,7 +275,28 @@ function finishShortcutRecording(): void {
 
 
 function trusted(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
-  return event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame;
+  return (event.sender === window?.webContents || graphWindow?.owns(event.sender) === true) && event.senderFrame === event.sender.mainFrame;
+}
+
+function trustedPet(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return event.sender === window?.webContents && event.senderFrame === event.sender.mainFrame;
+}
+
+function sendToSurfaces(channel: string, value: unknown): void {
+  if (window && !window.isDestroyed()) window.webContents.send(channel, value);
+  graphWindow?.send(channel, value);
+}
+
+function graphVisibilityChanged(visible: boolean): void {
+  if (!visible) {
+    cancelActiveRequest(graphChat);
+    if (nativeFocusRequest?.surface === 'graph') windowsNative?.cancelFocus();
+  }
+  if (window && !window.isDestroyed()) {
+    window.webContents.send('rabbit:graph-visibility', visible);
+    graphPinPressed = false;
+    applyWindowMode();
+  }
 }
 
 function assertTrusted(event: IpcMainInvokeEvent): void {
@@ -304,16 +359,16 @@ function followPetPosition(value: unknown): void {
   movePetViewport(area);
 }
 
-function showPanel(view: Activation['view'], context?: NativeCaptureContext, extra: Pick<Activation, 'workspaceId' | 'backgroundImageDataUrl' | 'graphAction'> = {}): void {
+function showPanel(view: 'prompt' | 'settings', context?: NativeCaptureContext): void {
   if (!window || window.isDestroyed()) return;
   if (suspended && view !== 'settings') return;
   invalidateInput();
   panelView = view;
   void configureNative().catch(() => {});
-  interactive = view === 'settings' || view === 'graph';
+  interactive = view === 'settings';
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
-  if (view === 'prompt' || view === 'graph') promptActivation = { epoch: activationEpoch, phase: 'pending' };
+  if (view === 'prompt') promptActivation = { epoch: activationEpoch, phase: 'pending' };
   const transitioning = movePetViewport(display.workArea, cursor);
   if (!transitioning) {
     if (view === 'settings') activateWindow();
@@ -321,13 +376,13 @@ function showPanel(view: Activation['view'], context?: NativeCaptureContext, ext
   }
   debugWindow('show-' + view);
   const [x, y] = window.getPosition();
-  const activation: Activation = { activationId: activationEpoch, view, ...extra, ...(context ? { context: rendererContext(context) } : {}), anchor: { x: cursor.x - x, y: cursor.y - y } };
+  const activation: Activation = { activationId: activationEpoch, view, ...(context ? { context: rendererContext(context) } : {}), anchor: { x: cursor.x - x, y: cursor.y - y } };
   window.webContents.send('rabbit:activate', activation);
 }
 
 function focusInput(observedEpoch: unknown): Promise<boolean> {
   const activation = promptActivation;
-  if (!activation || observedEpoch !== activation.epoch || !['prompt', 'graph'].includes(panelView ?? '') || suspended || quitting) return Promise.resolve(false);
+  if (!activation || observedEpoch !== activation.epoch || panelView !== 'prompt' || suspended || quitting) return Promise.resolve(false);
   activation.phase = 'ready';
   applyWindowMode();
   if (captureSession || petTransition !== undefined) return Promise.resolve(false);
@@ -336,14 +391,12 @@ function focusInput(observedEpoch: unknown): Promise<boolean> {
     activateWindow();
     let focused: boolean;
     if (process.platform === 'win32') {
-      const bytes = window.getNativeWindowHandle();
-      const handle = bytes.length >= 8 ? bytes.readBigUInt64LE().toString() : bytes.readUInt32LE().toString();
-      focused = await windowsNative?.focusWindow(handle) ?? false;
+      focused = await focusNativeWindow(window, 'pet');
     } else {
       window.focus();
       focused = window.isFocused();
     }
-    if (promptActivation !== activation || activation.epoch !== activationEpoch || !['prompt', 'graph'].includes(panelView ?? '') || captureSession || suspended || quitting) return false;
+    if (promptActivation !== activation || activation.epoch !== activationEpoch || panelView !== 'prompt' || captureSession || suspended || quitting) return false;
     applyWindowMode();
     if (focused) window.webContents.focus();
     if (process.env.RABBITBALL_WINDOW_DEBUG === '1') {
@@ -381,7 +434,7 @@ function hidePanel(reason = 'renderer-hide'): void {
   debugWindow(reason);
 }
 
-function openSettings(): void { cancelCapture(); showPanel('settings'); }
+function openSettings(): void { cancelCapture(); windowsNative?.cancelFocus(); showPanel('settings'); }
 
 function setSuspended(value: boolean): void {
   if (suspended === value) return;
@@ -390,9 +443,10 @@ function setSuspended(value: boolean): void {
   if (value) {
     activationEffect?.clear();
     graphPinPressed = false;
-    cancelActiveRequest();
+    cancelActiveRequest(petChat); cancelActiveRequest(graphChat);
     cancelCapture();
-    if (panelView === 'prompt' || panelView === 'graph') hidePanel('suspend-fullscreen');
+    graphWindow?.hide();
+    if (panelView === 'prompt') hidePanel('suspend-fullscreen');
     else windowsNative?.cancelFocus();
   }
   if (!window || window.isDestroyed()) return;
@@ -402,7 +456,7 @@ function setSuspended(value: boolean): void {
   } else {
     if (petTransition === undefined && !window.isVisible()) showMainWindow();
   }
-  window.webContents.send('rabbit:suspended', value);
+  sendToSurfaces('rabbit:suspended', value);
   debugWindow(value ? 'suspend-fullscreen' : 'resume-fullscreen');
 }
 
@@ -428,15 +482,19 @@ function captureViewports(): CaptureViewport[] {
   return screen.getAllDisplays().map(display => ({ bounds: display.bounds, physicalBounds: process.platform === 'win32' ? screen.dipToScreenRect(null, display.bounds) : display.bounds }));
 }
 
+async function readDesktop(signal: AbortSignal, bounds: CaptureRect, maxWidth?: number): Promise<NativeImage> {
+  if (process.platform !== 'win32') throw new Error('此平台暂未接入屏幕框选。');
+  const result = await captureWorker.capture({ type: 'desktop', bounds, ...(maxWidth === undefined ? {} : { maxWidth }) }, signal);
+  const image = result.desktopBitmap ? nativeImage.createFromBitmap(result.desktopBitmap, { width: result.desktopWidth!, height: result.desktopHeight!, scaleFactor: 1 }) : nativeImage.createEmpty();
+  if (image.isEmpty()) throw new Error(result.desktopError || '屏幕选区暂不能截取，请重试。');
+  return image;
+}
+
 async function captureDesktop(signal: AbortSignal, bounds: CaptureRect): Promise<CaptureSnapshot> {
   const context: NativeCaptureContext = { id: randomUUID(), title: '屏幕选区', images: [], capturedAt: Date.now() };
   const snapshot: CaptureSnapshot = { context };
   try {
-    if (process.platform !== 'win32') throw new Error('此平台暂未接入屏幕框选。');
-    const result = await captureWorker.capture({ type: 'desktop', bounds }, signal);
-    const background = result.desktopBitmap ? nativeImage.createFromBitmap(result.desktopBitmap, { width: result.desktopWidth!, height: result.desktopHeight!, scaleFactor: 1 }) : nativeImage.createEmpty();
-    if (background.isEmpty()) throw new Error(result.desktopError || '屏幕选区暂不能截取，请重试。');
-    snapshot.background = background;
+    snapshot.background = await readDesktop(signal, bounds);
   } catch (error) {
     context.error = (error as Error).message;
   }
@@ -488,25 +546,45 @@ async function captureForeground(signal: AbortSignal, backgroundBounds?: Capture
 }
 
 function emitGraphError(error: unknown, workspaceId?: string): void {
-  if (window && !window.isDestroyed()) window.webContents.send('rabbit:graph-error', { workspaceId, message: error instanceof Error ? error.message : String(error) });
+  sendToSurfaces('rabbit:graph-error', { workspaceId, message: error instanceof Error ? error.message : String(error) });
 }
 
 function graphChanged(workspace: GraphWorkspace): void {
   graphJobs?.reconcile(workspace);
-  if (window && !window.isDestroyed()) {
-    const previousImages = graphImageCache.get(workspace.id), images = new Map<string, string>();
+  const recipients = [window?.webContents, graphWindow?.webContents].filter((value): value is Electron.WebContents => !!value && !value.isDestroyed());
+  for (const recipient of recipients) {
+    let cache = graphImageCache.get(recipient);
+    if (!cache) { cache = new Map(); graphImageCache.set(recipient, cache); }
+    const previousImages = cache.get(workspace.id), images = new Map<string, string>();
     const compactImage = <T extends CaptureImage>(image: T): T => {
       images.set(image.id, image.imageDataUrl);
       return previousImages?.get(image.id) === image.imageDataUrl ? { ...image, imageDataUrl: '' } : image;
     };
-    const packet = { ...workspace, graphs: workspace.graphs.map(graph => ({ ...graph, nodes: graph.nodes.map(node => ({ ...node,
+    const compactAttachment = (attachment: Attachment, scope: string): Attachment => {
+      const key = `${scope}:${attachment.id}`;
+      const content = attachment.text !== undefined ? `text:${attachment.text}` : `image:${attachment.dataUrl}`;
+      images.set(key, content);
+      if (previousImages?.get(key) !== content) return attachment;
+      const { text, dataUrl, ...metadata } = attachment;
+      return metadata;
+    };
+    const packet = { ...workspace,
+      ...(workspace.background ? { background: { ...workspace.background, attachments: workspace.background.attachments.map(attachment => compactAttachment(attachment, `background:${workspace.id}`)) } } : {}),
+      graphs: workspace.graphs.map(graph => ({ ...graph, nodes: graph.nodes.map(node => ({ ...node,
       images: node.images.map(compactImage),
+      ...(node.attachments ? { attachments: node.attachments.map(attachment => compactAttachment(attachment, `node:${workspace.id}:${node.id}`)) } : {}),
       annotations: node.annotations.map(annotation => ({ ...annotation, ...(annotation.images ? { images: annotation.images.map(compactImage) } : {}) })),
       ...(node.source ? { source: { ...node.source, ...(node.source.images ? { images: node.source.images.map(compactImage) } : {}), ...(node.source.selectionImage ? { selectionImage: compactImage(node.source.selectionImage) } : {}) } } : {})
     })) })) };
-    graphImageCache.set(workspace.id, images);
-    window.webContents.send('rabbit:graph-changed', packet);
+    cache.set(workspace.id, images);
+    recipient.send('rabbit:graph-changed', packet);
   }
+}
+
+function selectGraphWorkspace(workspace: GraphWorkspace): void {
+  if (graphWorkspaceId === workspace.id) return;
+  graphWorkspaceId = workspace.id;
+  if (window && !window.isDestroyed()) window.webContents.send('rabbit:graph-active-workspace', workspace);
 }
 
 async function captureWorkspace(session: CaptureSession, createGraph = true): Promise<GraphWorkspace | undefined> {
@@ -549,9 +627,22 @@ function graphBackground(session: CaptureSession): string | undefined {
   const bounds = process.platform === 'win32' ? screen.dipToScreenRect(null, display.workArea) : display.workArea;
   const crop = session.background.crop(imageCropRect(bounds, session.physicalBounds, session.background.getSize()));
   if (crop.isEmpty()) return undefined;
-  const size = crop.getSize(), ratio = Math.min(1, 1600 / size.width);
-  const image = ratio < 1 ? crop.resize({ width: Math.round(size.width * ratio), height: Math.round(size.height * ratio) }) : crop;
-  return 'data:image/jpeg;base64,' + image.toJPEG(78).toString('base64');
+  return encodeGraphBackground(crop);
+}
+
+function encodeGraphBackground(image: NativeImage): string {
+  const resized = image.getSize().width > 1600 ? image.resize({ width: 1600 }) : image;
+  return 'data:image/jpeg;base64,' + resized.toJPEG(78).toString('base64');
+}
+
+async function captureGraphBackground(area: Electron.Rectangle, signal: AbortSignal): Promise<string | undefined> {
+  if (signal.aborted || captureSession || suspended || quitting) return undefined;
+  // 复用预热的截图助手，仅取装饰背景，不创建资料截图会话或改变兔球窗口。
+  const bounds = process.platform === 'win32' ? screen.dipToScreenRect(null, area) : area;
+  try {
+    const image = await readDesktop(signal, bounds, 1600);
+    return signal.aborted ? undefined : encodeGraphBackground(image);
+  } catch { return undefined; }
 }
 
 async function completeGraphCapture(session: CaptureSession): Promise<void> {
@@ -569,12 +660,14 @@ async function completeGraphCapture(session: CaptureSession): Promise<void> {
       }
     }
     if (captureSession !== session || session.controller.signal.aborted) return;
-    graphWorkspaceId = workspace.id;
+    selectGraphWorkspace(workspace);
     const backgroundImageDataUrl = graphBackground(session);
     captureSession = undefined;
     captureOverlays?.close();
     emitCapture({ type: 'end', sessionId: session.id });
-    showPanel('graph', undefined, { workspaceId: workspace.id, backgroundImageDataUrl, graphAction: session.graphAction });
+    applyWindowMode();
+    showMainWindow();
+    await graphWindow?.show({ workspaceId: workspace.id, backgroundImageDataUrl, graphAction: session.graphAction });
     if (captureError) emitGraphError(new Error(captureError), workspace.id);
   } catch (error) {
     if (captureSession === session) cancelCapture();
@@ -584,15 +677,17 @@ async function completeGraphCapture(session: CaptureSession): Promise<void> {
 
 function restoreGraphImageCapture(session: CaptureSession, images: CaptureImage[] | null): void {
   session.imageResult?.(images);
-  if (window && !window.isDestroyed() && !quitting && !suspended && store.getPublic().graphPluginEnabled && panelView === 'graph' && activationEpoch === session.owner) {
+  if (window && !window.isDestroyed() && !quitting && !suspended) {
     applyWindowMode();
     showMainWindow();
-    void focusInput(session.owner);
+    if (store.getPublic().graphPluginEnabled && graphWindow && graphWindow.activationId === session.owner) {
+      void graphWindow.restoreAfterCapture().then(() => graphWindow?.focusInput(session.owner)).catch(error => emitGraphError(error, session.workspaceId));
+    }
   }
 }
 
 function emitCapture(event: CaptureEvent): void {
-  if (window && !window.isDestroyed()) window.webContents.send('rabbit:capture-event', event);
+  sendToSurfaces('rabbit:capture-event', event);
 }
 
 function copyScreenshot(session: CaptureSession, image: NativeImage): void {
@@ -650,6 +745,7 @@ function completeCapture(session: CaptureSession): void {
     return;
   }
   currentContext = session.context;
+  void graphWindow?.restoreAfterCapture().catch(error => emitGraphError(error));
   showPanel('prompt', currentContext);
 }
 
@@ -657,10 +753,14 @@ function showCapture(session: CaptureSession): void {
   if (captureSession !== session || !session.holdReady || session.released || session.visible || !session.context || !session.background) return;
   session.visible = true;
   const settings = store.getPublic();
-  void captureOverlays!.show({ sessionId: session.id, viewports: session.viewports, background: session.background, physicalBounds: session.physicalBounds, context: rendererContext(session.context), purpose: session.target, shortcut: settings.activationShortcut, color: settings.eyeColor, useBuiltinFont: settings.useBuiltinFont }).then(() => {
+  const shortcut = session.target === 'prompt' ? settings.activationShortcut : settings.graphActivationShortcut ?? settings.activationShortcut;
+  void captureOverlays!.show({ sessionId: session.id, viewports: session.viewports, background: session.background, physicalBounds: session.physicalBounds, context: rendererContext(session.context), purpose: session.target, shortcut, color: settings.eyeColor, useBuiltinFont: settings.useBuiltinFont }).then(() => {
     if (captureSession === session) updateCaptureFrame(session);
-  }).catch(() => {
-    if (captureSession === session) cancelCapture();
+  }).catch(error => {
+    if (captureSession === session) {
+      cancelCapture();
+      emitGraphError(error, session.workspaceId);
+    }
   });
 }
 
@@ -684,14 +784,20 @@ function acceptCaptureSnapshot(session: CaptureSession, snapshot: CaptureSnapsho
   else showCapture(session);
 }
 
-function holdCapture(session: CaptureSession): void {
+function holdCapture(session: CaptureSession | undefined): void {
+  if (!session && pendingGraphTrigger && !pendingGraphTrigger.released) {
+    const trigger = pendingGraphTrigger;
+    pendingGraphTrigger = undefined;
+    session = beginCapture(false, trigger.nativeId, { workspaceId: graphWorkspaceId });
+  }
+  if (!session) return;
   if (captureSession !== session || session.holdReady || session.released) return;
   session.holdReady = true;
   // 长按只冻结屏幕，不读取、选择或截取应用窗口。
   void captureDesktop(session.controller.signal, session.physicalBounds).then(snapshot => acceptCaptureSnapshot(session, snapshot));
 }
 
-function beginCapture(released = false, nativeId?: number, graph?: { workspaceId: string; graphId?: string; target?: 'graph' | 'images'; imageResult?: CaptureSession['imageResult']; fillEmptyGraph?: boolean; graphAction?: Activation['graphAction'] }): CaptureSession | undefined {
+function beginCapture(released = false, nativeId?: number, graph?: { workspaceId?: string; graphId?: string; target?: 'graph' | 'images'; imageResult?: CaptureSession['imageResult']; fillEmptyGraph?: boolean; graphAction?: Activation['graphAction'] }): CaptureSession | undefined {
   if (suspended || quitting || !window || window.isDestroyed()) return;
   activationEffect?.clear();
   cancelCapture(false);
@@ -699,19 +805,25 @@ function beginCapture(released = false, nativeId?: number, graph?: { workspaceId
   windowsNative?.cancelFocus();
   const viewports = captureViewports();
   const clipboardSnapshot = store.getPublic().autoCopyScreenshots ? preservedClipboard.beginActivation() : Promise.resolve(null);
-  const settings = store.getPublic();
-  const target = graph?.target ?? (graph || settings.graphPluginEnabled && settings.graphModeEnabled ? 'graph' : 'prompt');
-  const session: CaptureSession = { id: randomUUID(), nativeId, controller: new AbortController(), clipboardSnapshot, viewports, physicalBounds: unionBounds(viewports.map(viewport => viewport.physicalBounds)), regions: [], hasSelection: false, holdReady: false, released, visible: false, finishing: false, target, workspaceId: graph?.workspaceId ?? graphWorkspaceId, graphId: graph?.graphId, owner: activationEpoch, imageResult: graph?.imageResult, fillEmptyGraph: graph?.fillEmptyGraph, graphAction: graph?.graphAction };
+  const target = graph?.target ?? (graph ? 'graph' : 'prompt');
+  const session: CaptureSession = { id: randomUUID(), nativeId, controller: new AbortController(), clipboardSnapshot, viewports, physicalBounds: unionBounds(viewports.map(viewport => viewport.physicalBounds)), regions: [], hasSelection: false, holdReady: false, released, visible: false, finishing: false, target, workspaceId: graph?.workspaceId ?? graphWorkspaceId, graphId: graph?.graphId, owner: target === 'prompt' ? activationEpoch : graphWindow?.activationId, imageResult: graph?.imageResult, fillEmptyGraph: graph?.fillEmptyGraph, graphAction: graph?.graphAction };
   captureSession = session;
   // 隐藏宠物后再采集；原生按键释放或长按事件决定使用哪条截图流程。
   hideMainWindow();
+  graphWindow?.hideForCapture();
   if (released) void captureShortPress(session);
   return session;
 }
 
 function endCapture(): void {
+  if (pendingGraphTrigger) {
+    const trigger = pendingGraphTrigger;
+    if (!trigger.released) { trigger.released = true; void finishGraphTrigger(trigger); }
+    return;
+  }
   const session = captureSession;
   if (!session) return;
+  if (session.dismissOnTap && !session.holdReady) { cancelCapture(false); return; }
   const point = screen.getCursorScreenPoint();
   queueCaptureRegion(session, process.platform === 'win32' ? screen.dipToScreenPoint(point) : point);
   session.released = true;
@@ -728,6 +840,11 @@ function selectionPointer(phase: 'down' | 'up', point: CapturePoint): void {
 }
 
 function cancelCapture(notifyNative = true): void {
+  // 工作区读取尚未创建捕获会话时，取消或新请求也必须使其失效。
+  captureRequestEpoch++;
+  const trigger = pendingGraphTrigger;
+  pendingGraphTrigger = undefined;
+  if (notifyNative && trigger?.nativeId !== undefined) windowsNative?.cancelCapture(trigger.nativeId);
   const session = captureSession;
   if (!session) return;
   captureSession = undefined;
@@ -739,19 +856,57 @@ function cancelCapture(notifyNative = true): void {
   if (window && !window.isDestroyed() && !quitting) {
     applyWindowMode();
     if (!suspended && petTransition === undefined) showMainWindow();
+    if (!suspended) void graphWindow?.restoreAfterCapture().catch(error => emitGraphError(error));
   }
 }
 
 function activatePrompt(released = true, nativeId?: number): void {
-  const settings = store.getPublic();
-  if (panelView === 'graph' || panelView === 'prompt' && !(settings.graphPluginEnabled && settings.graphModeEnabled)) {
+  if (panelView === 'prompt') {
     window.webContents.send('rabbit:dismiss', activationEpoch);
     hidePanel('shortcut-cancel');
+    // 短按仍只收起面板，同一次按住达到阈值时则进入截图，不能丢弃后续长按事件。
+    if (!released) {
+      const session = beginCapture(false, nativeId);
+      if (session) session.dismissOnTap = true;
+    }
     return;
   }
-  if (panelView === 'prompt') window.webContents.send('rabbit:dismiss', activationEpoch);
   cancelCapture();
   beginCapture(released, nativeId);
+}
+
+async function finishGraphTrigger(trigger: GraphTrigger): Promise<void> {
+  const current = () => pendingGraphTrigger === trigger && graphWindow?.activationId === trigger.owner && !suspended && !quitting && store.getPublic().graphPluginEnabled;
+  try {
+    if (!current()) return;
+    if (trigger.dismissOnTap) { pendingGraphTrigger = undefined; graphWindow?.hide(); return; }
+    const workspace = await graphStore.open(graphWorkspaceId);
+    if (!current()) return;
+    const graph = workspace.graphs.find(item => item.id === workspace.lastGraphId) ?? workspace.graphs[0];
+    pendingGraphTrigger = undefined;
+    // 恢复已有图谱不创建资料截图会话，不改本体显隐或输入状态。
+    if (graph?.nodes.length) {
+      selectGraphWorkspace(workspace);
+      await graphWindow?.show({ workspaceId: workspace.id }).catch(error => emitGraphError(error, workspace.id));
+    } else beginCapture(true, trigger.nativeId, { workspaceId: workspace.id });
+  } catch (error) {
+    if (pendingGraphTrigger === trigger) { pendingGraphTrigger = undefined; emitGraphError(error); }
+  } finally {
+    if (pendingGraphTrigger === trigger) pendingGraphTrigger = undefined;
+  }
+}
+
+function activateGraph(released = true, nativeId?: number): void {
+  if (!store.getPublic().graphPluginEnabled || suspended || quitting) return;
+  cancelCapture(false);
+  const trigger: GraphTrigger = { nativeId, owner: graphWindow?.activationId, dismissOnTap: graphWindow?.visible === true, released };
+  pendingGraphTrigger = trigger;
+  if (released) void finishGraphTrigger(trigger);
+}
+
+function activateTarget(target: ActivationTarget, released = true, nativeId?: number): void {
+  if (target === 'graph') activateGraph(released, nativeId);
+  else activatePrompt(released, nativeId);
 }
 
 function validateAttachment(value: unknown): Attachment {
@@ -759,12 +914,13 @@ function validateAttachment(value: unknown): Attachment {
   const attachment = value as Partial<Attachment>;
   if (typeof attachment.id !== 'string' || typeof attachment.name !== 'string' || attachment.name.length > 240 || typeof attachment.mimeType !== 'string') throw new Error('附件格式无效。');
   if (attachment.text !== undefined) {
-    if (typeof attachment.text !== 'string' || attachment.text.length > 20_000) throw new Error('文字附件不能超过两万字。');
+    if (typeof attachment.text !== 'string' || attachment.text.length > MAX_DOCUMENT_CHARACTERS) throw new Error('解析失败：文件文字过长，请拆分后添加。');
   } else {
     if (typeof attachment.dataUrl !== 'string' || !/^data:image\/(png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i.test(attachment.dataUrl)) throw new Error('请选择支持的图片附件。');
     if (Buffer.byteLength(attachment.dataUrl.split(',')[1]!, 'base64') > 5 * 1024 * 1024) throw new Error('图片附件不能超过 5 MiB。');
   }
-  return { id: attachment.id, name: attachment.name, mimeType: attachment.mimeType, ...(attachment.text !== undefined ? { text: attachment.text } : { dataUrl: attachment.dataUrl }) };
+  for (const value of [attachment.format, attachment.language]) if (value !== undefined && (typeof value !== 'string' || value.length > 240)) throw new Error('附件类型标签无效。');
+  return { id: attachment.id, name: attachment.name, mimeType: attachment.mimeType, ...(attachment.format ? { format: attachment.format } : {}), ...(attachment.language ? { language: attachment.language } : {}), ...(attachment.text !== undefined ? { text: attachment.text } : { dataUrl: attachment.dataUrl }) };
 }
 
 function validateRequest(value: unknown): AgentRequest {
@@ -797,18 +953,18 @@ function graphCaptureRequest(value: unknown): GraphCaptureRequest {
   return { workspaceId: historyId(input.workspaceId), graphId: historyId(input.graphId) };
 }
 
-function emitAgent(event: AgentEvent): void {
-  if (!window.isDestroyed()) window.webContents.send('rabbit:agent-event', event);
+function emitAgent(event: AgentEvent, recipient = window?.webContents): void {
+  if (recipient && !recipient.isDestroyed()) recipient.send('rabbit:agent-event', event);
 }
 
-function cancelActiveRequest(): void {
-  const request = activeRequest;
+function cancelActiveRequest(chat = petChat): void {
+  const request = chat.activeRequest;
   if (!request) return;
   request.controller.abort();
   request.history?.onEvent({ id: request.id, type: 'cancelled' });
   if (request.history) void request.history.save().catch(error => console.error('保存历史记录失败：', error));
-  else emitAgent({ id: request.id, type: 'cancelled' });
-  activeRequest = undefined;
+  else emitAgent({ id: request.id, type: 'cancelled' }, chat === petChat ? window?.webContents : graphWindow?.webContents);
+  chat.activeRequest = undefined;
 }
 
 function historyId(value: unknown): string {
@@ -826,18 +982,31 @@ function historyThumbnail(image: CaptureImage | undefined): string | undefined {
 }
 
 function registerIpc(): void {
+  ipcMain.handle('rabbit:parse-document', async (event, value: unknown) => {
+    assertTrusted(event);
+    if (!value || typeof value !== 'object') throw new Error('解析失败：文件数据无效。');
+    const input = value as { name?: unknown; bytes?: unknown; workspaceId?: unknown };
+    if (typeof input.name !== 'string' || !input.name || input.name.length > 240 || !(input.bytes instanceof Uint8Array)) throw new Error('解析失败：文件数据无效。');
+    try {
+      const workspaceId = input.workspaceId === undefined ? undefined : historyId(input.workspaceId);
+      const parsed = await parseDocumentAttachment({ name: input.name, bytes: input.bytes });
+      return { value: workspaceId ? await graphStore.stageAttachment(workspaceId, parsed) : parsed };
+    }
+    catch (error) { return { error: error instanceof Error ? error.message : '无法读取文件，请重新选择。' }; }
+  });
   ipcMain.handle('rabbit:graph-list', event => { assertTrusted(event); return graphStore.list(); });
   ipcMain.handle('rabbit:graph-open', async (event, value: unknown) => {
     assertTrusted(event);
     const workspace = await graphStore.open(value === undefined ? undefined : historyId(value));
-    graphWorkspaceId = workspace.id;
+    // 本体只恢复桌面固定卡，不能用迟到的读取覆盖图谱窗口刚切换的工作区。
+    if (!graphWorkspaceId || !trustedPet(event)) selectGraphWorkspace(workspace);
     return workspace;
   });
   ipcMain.handle('rabbit:graph-create', async (event, name: unknown) => {
     assertTrusted(event);
     if (typeof name !== 'string') throw new Error('工作区名称无效。');
     const workspace = await graphStore.create(name);
-    graphWorkspaceId = workspace.id;
+    selectGraphWorkspace(workspace);
     return workspace;
   });
   ipcMain.handle('rabbit:graph-mutate', (event, id: unknown, mutation: unknown) => {
@@ -851,34 +1020,42 @@ function registerIpc(): void {
   });
   ipcMain.handle('rabbit:graph-activate', async (event, action: unknown) => {
     assertTrusted(event);
-    if (action !== undefined && !['rename-graph', 'undo', 'redo'].includes(action as string)) throw new Error('图谱操作无效。');
+    const selection = action && typeof action === 'object' ? graphRequest(action) : undefined;
+    if (!selection && action !== undefined && !['rename-graph', 'undo', 'redo'].includes(action as string)) throw new Error('图谱操作无效。');
     if (!store.getPublic().graphPluginEnabled) throw new Error('请先启用大爆炸插件。');
     if (suspended) throw new Error('全屏应用运行中，兔球已暂停。');
-    const owner = activationEpoch;
-    const workspace = await graphStore.open(graphWorkspaceId);
-    if (activationEpoch !== owner || suspended || !store.getPublic().graphPluginEnabled) return;
-    beginCapture(true, undefined, { workspaceId: workspace.id, fillEmptyGraph: action === undefined, graphAction: action as Activation['graphAction'] });
+    cancelCapture();
+    const owner = graphWindow?.activationId, requestEpoch = captureRequestEpoch;
+    const workspace = await graphStore.open(selection?.workspaceId ?? graphWorkspaceId);
+    if (captureRequestEpoch !== requestEpoch || graphWindow?.activationId !== owner || suspended || !store.getPublic().graphPluginEnabled) return;
+    if (selection && !workspace.graphs.some(graph => graph.id === selection.graphId && graph.nodes.some(node => node.id === selection.nodeId))) throw new Error('当前卡片已被删除。');
+    selectGraphWorkspace(workspace);
+    await graphWindow?.show({ workspaceId: workspace.id,
+      ...(selection ? { graphSelection: { graphId: selection.graphId, nodeId: selection.nodeId } } : { graphAction: action as Activation['graphAction'] }) });
   });
   ipcMain.handle('rabbit:graph-capture', async (event, value: unknown) => {
     assertTrusted(event);
     if (!store.getPublic().graphPluginEnabled) throw new Error('请先启用大爆炸插件。');
     if (suspended) throw new Error('全屏应用运行中，兔球已暂停。');
     const request = graphCaptureRequest(value);
-    const owner = activationEpoch;
+    cancelCapture();
+    const owner = graphWindow?.activationId, requestEpoch = captureRequestEpoch;
     const workspace = await graphStore.open(request.workspaceId);
-    if (!store.getPublic().graphPluginEnabled || suspended || activationEpoch !== owner) return;
+    if (captureRequestEpoch !== requestEpoch || !store.getPublic().graphPluginEnabled || suspended || graphWindow?.activationId !== owner) return;
     const graph = workspace.graphs.find(graph => graph.id === request.graphId);
     if (!graph) throw new Error('当前图谱已被删除。');
     if (graph.nodes.length) throw new Error('请先新建空白图谱，再附加根截图。');
-    graphWorkspaceId = workspace.id;
+    selectGraphWorkspace(workspace);
     beginCapture(true, undefined, request);
   });
   ipcMain.handle('rabbit:graph-capture-images', async (event, value: unknown) => {
     assertTrusted(event);
-    if (!store.getPublic().graphPluginEnabled || suspended || panelView !== 'graph') return null;
-    const request = { ...graphCaptureRequest(value), ...((value as { nodeId?: unknown }).nodeId !== undefined ? { nodeId: historyId((value as { nodeId?: unknown }).nodeId) } : {}) }, owner = activationEpoch;
+    if (!store.getPublic().graphPluginEnabled || suspended || !graphWindow?.visible) return null;
+    const request = { ...graphCaptureRequest(value), ...((value as { nodeId?: unknown }).nodeId !== undefined ? { nodeId: historyId((value as { nodeId?: unknown }).nodeId) } : {}) };
+    cancelCapture();
+    const owner = graphWindow.activationId, requestEpoch = captureRequestEpoch;
     const workspace = await graphStore.open(request.workspaceId);
-    if (activationEpoch !== owner || panelView !== 'graph' || suspended || !store.getPublic().graphPluginEnabled) return null;
+    if (captureRequestEpoch !== requestEpoch || graphWindow.activationId !== owner || !graphWindow.visible || suspended || !store.getPublic().graphPluginEnabled) return null;
     const graph = workspace.graphs.find(graph => graph.id === request.graphId);
     if (!graph) throw new Error('当前图谱已被删除。');
     if (request.nodeId !== undefined ? !graph.nodes.some(node => node.id === request.nodeId) : graph.nodes.length > 0) throw new Error(request.nodeId !== undefined ? '当前卡片已被删除。' : '此图谱已有根节点。');
@@ -888,8 +1065,8 @@ function registerIpc(): void {
     const session = beginCapture(false, undefined, { ...request, target: 'images', imageResult: resolve });
     if (!session) return null;
     try {
-      const nativeId = await windowsNative.beginSelection();
-      if (captureSession !== session || activationEpoch !== owner || !store.getPublic().graphPluginEnabled || suspended) {
+      const nativeId = await windowsNative.beginSelection('graph');
+      if (captureSession !== session || graphWindow.activationId !== owner || !store.getPublic().graphPluginEnabled || suspended) {
         windowsNative?.cancelCapture(nativeId);
         if (captureSession === session) cancelCapture();
         return null;
@@ -905,9 +1082,10 @@ function registerIpc(): void {
   ipcMain.handle('rabbit:graph-generate', (event, value: unknown) => {
     assertTrusted(event);
     if (!store.getPublic().graphPluginEnabled) throw new Error('大爆炸插件已停用。');
-    const request = graphRequest(value), ids = (value as { annotationIds?: unknown }).annotationIds;
+    const request = graphRequest(value), ids = (value as { annotationIds?: unknown }).annotationIds, question = (value as { question?: unknown }).question;
     if (ids !== undefined && (!Array.isArray(ids) || ids.length > 128 || ids.some(id => typeof id !== 'string' || !id || id.length > 128))) throw new Error('批注标识无效。');
-    return graphJobs.generate({ ...request, ...(ids ? { annotationIds: ids as string[] } : {}) });
+    if (question !== undefined && (typeof question !== 'string' || question.length > MAX_DOCUMENT_CHARACTERS)) throw new Error('问题格式无效或超过 100 万字符。');
+    return graphJobs.generate({ ...request, ...(ids ? { annotationIds: ids as string[] } : {}), ...(typeof question === 'string' ? { question } : {}) });
   });
   ipcMain.handle('rabbit:graph-regenerate', (event, value: unknown) => {
     assertTrusted(event);
@@ -925,106 +1103,124 @@ function registerIpc(): void {
   });
   ipcMain.handle('rabbit:read-clipboard-for-paste', event => { assertTrusted(event); return preservedClipboard.readForPaste(); });
   ipcMain.handle('rabbit:load-settings', event => { assertTrusted(event); return store.getPublic(); });
+  ipcMain.handle('rabbit:usage-query', (event, value: unknown) => { assertTrusted(event); return usageStore.query(validateUsageScope(value)); });
   ipcMain.handle('rabbit:list-history', event => { assertTrusted(event); return historyStore.list(); });
   ipcMain.handle('rabbit:get-history', (event, value: unknown) => { assertTrusted(event); return historyStore.get(historyId(value)); });
   ipcMain.handle('rabbit:delete-history', async (event, value: unknown) => {
     assertTrusted(event);
     const id = historyId(value);
-    if (activeRequest?.conversationId === id) cancelActiveRequest();
-    if (currentConversation?.id === id) currentConversation = undefined;
+    for (const chat of [petChat, graphChat]) {
+      if (chat.activeRequest?.conversationId === id) cancelActiveRequest(chat);
+      if (chat.currentConversation?.id === id) chat.currentConversation = undefined;
+    }
     await historyStore.delete(id);
   });
-  ipcMain.handle('rabbit:focus-input', (event, observedEpoch: unknown) => { assertTrusted(event); return focusInput(observedEpoch); });
+  ipcMain.handle('rabbit:focus-input', (event, observedEpoch: unknown) => {
+    assertTrusted(event);
+    if (suspended || quitting || captureSession) return false;
+    return trustedPet(event) ? focusInput(observedEpoch) : graphWindow!.focusInput(observedEpoch);
+  });
   ipcMain.handle('rabbit:shortcut-recording', (event, recording: unknown) => { assertTrusted(event); if (typeof recording !== 'boolean') throw new Error('录制状态无效。'); return setShortcutRecording(recording); });
   ipcMain.handle('rabbit:save-settings', async (event, value: unknown) => {
     assertTrusted(event);
     const previous = store.getPublic();
     const patch = validateSettingsPatch(value);
-    const shortcutChanged = patch.activationShortcut !== undefined && JSON.stringify(patch.activationShortcut) !== JSON.stringify(previous.activationShortcut);
+    const shortcutChanged = ['activationShortcut', 'graphActivationShortcut', 'graphPluginEnabled'].some(key => Object.hasOwn(patch, key));
     if (shortcutChanged && process.platform !== 'win32') {
       if (shortcutRecording) await setShortcutRecording(false);
-      registerPlatformShortcut(patch.activationShortcut!);
+      registerPlatformShortcut({ ...previous, ...patch });
     }
     let settings;
     try { settings = await store.save(patch); }
     catch (error) {
-      if (shortcutChanged && process.platform !== 'win32') registerPlatformShortcut(previous.activationShortcut);
+      if (shortcutChanged && process.platform !== 'win32') registerPlatformShortcut(previous);
       throw error;
     }
     if (settings.launchAtLogin !== previous.launchAtLogin) configureLoginItem(settings.launchAtLogin);
     if (settings.historyLimit !== previous.historyLimit) await historyStore.setLimit(settings.historyLimit);
     if (!settings.graphPluginEnabled) { graphJobs.cancelAll(); graphPinRegions = []; applyWindowMode(); }
-    const graphDisabled = !settings.graphPluginEnabled || previous.graphModeEnabled && !settings.graphModeEnabled;
-    if (captureSession && captureSession.target !== 'prompt' && graphDisabled) cancelCapture();
-    if (panelView === 'graph' && graphDisabled) {
-      window.webContents.send('rabbit:dismiss', activationEpoch);
-      hidePanel('graph-disabled');
-    }
+    const graphDisabled = !settings.graphPluginEnabled;
+    if (graphDisabled && (pendingGraphTrigger || captureSession && captureSession.target !== 'prompt')) cancelCapture();
+    if (graphDisabled) graphWindow?.hide();
     await configureFullscreen(settings.pauseOnFullscreen);
-    window.webContents.send('rabbit:settings-changed', settings);
-    if (!previous.graphModeEnabled && settings.graphModeEnabled && settings.graphPluginEnabled && !suspended) {
-      if (panelView === 'prompt') window.webContents.send('rabbit:dismiss', activationEpoch);
-      beginCapture(true);
-    }
+    sendToSurfaces('rabbit:settings-changed', settings);
     return settings;
   });
   ipcMain.handle('rabbit:send-message', async (event, value: unknown) => {
     assertTrusted(event);
     if (suspended) throw new Error('全屏应用运行中，兔球已暂停。');
     const request = validateRequest(value);
-    cancelActiveRequest();
+    const recipient = event.sender, chat = trustedPet(event) ? petChat : graphChat;
+    if (chat === graphChat && request.contextId) throw new Error('图谱聊天不能引用兔球截图上下文。');
+    cancelActiveRequest(chat);
     const conversationId = request.conversationId;
-    if (currentConversation?.id !== conversationId) currentConversation = { id: conversationId, conversation: historyStore.getConversation(conversationId) ?? createAgentConversation() };
-    const conversation = currentConversation.conversation;
+    if (chat.currentConversation?.id !== conversationId) chat.currentConversation = { id: conversationId, conversation: historyStore.getConversation(conversationId) ?? createAgentConversation() };
+    const conversation = chat.currentConversation.conversation;
     const controller = new AbortController();
     // 读取图谱也属于本次请求，取消或后续发送必须立即使它失效。
-    const pending = { id: request.id, conversationId, controller } as NonNullable<typeof activeRequest>;
-    activeRequest = pending;
+    const pending = { id: request.id, conversationId, controller } as NonNullable<ChatSession['activeRequest']>;
+    chat.activeRequest = pending;
     let context = request.contextId && currentContext ? { ...currentContext, images: request.imageIds!.map(id => currentContext!.images.find(image => image.id === id)!) } : undefined;
-    let modelRequest = request;
+    let background: AgentBackground | null | undefined;
+    let reference: AgentReference | null | undefined;
+    let firstScreenshot = context?.images[0];
     if (request.graphContext) {
       const selection = request.graphContext;
       let workspace: GraphWorkspace;
       try { workspace = await graphStore.open(selection.workspaceId); }
-      catch (error) { if (activeRequest === pending) activeRequest = undefined; throw error; }
-      if (controller.signal.aborted || activeRequest !== pending) return;
-      const reference = buildGraphChatContext(workspace, selection.graphId, selection.nodeId);
-      context = reference.context;
-      modelRequest = { ...request, text: request.text + '\n\n' + reference.reference };
+      catch (error) { if (chat.activeRequest === pending) chat.activeRequest = undefined; throw error; }
+      if (controller.signal.aborted || chat.activeRequest !== pending) return;
+      const graphContext = buildGraphChatContext(workspace, selection.graphId, selection.nodeId);
+      context = undefined;
+      background = graphContext.background;
+      reference = graphContext.path;
+      const graph = workspace.graphs.find(graph => graph.id === selection.graphId);
+      firstScreenshot = graph?.nodes.find(node => node.id === graph.rootId)?.images[0];
     }
-    const firstScreenshot = context?.images[0];
     const thumbnail = store.getPublic().historyLimit > 0 && !historyStore.list().some(entry => entry.id === conversationId) ? historyThumbnail(firstScreenshot) : undefined;
     const history = historyStore.begin(request, conversation, firstScreenshot, thumbnail);
     pending.history = history;
-    void runAgent(modelRequest, store.getPrivate(), { signal: controller.signal, conversation, context, onEvent: event => {
+    const settings = store.getPrivate();
+    const modelSettings = request.graphContext ? { ...settings, prompts: { ...settings.prompts, system: settings.prompts.system + '\n\n' + GRAPH_CHAT_RULES } } : settings;
+    const completion = runAgent(request, modelSettings, { signal: controller.signal, conversation, context, background, reference, onEvent: event => {
       history.onEvent(event);
-      if (!controller.signal.aborted || event.type === 'cancelled') emitAgent(event);
+      if (!controller.signal.aborted || event.type === 'cancelled') emitAgent(event, recipient);
     } }).catch(error => {
       const event: AgentEvent = { id: request.id, type: controller.signal.aborted ? 'cancelled' : 'error', message: error instanceof Error ? error.message : '请求未完成。' };
-      history.onEvent(event); emitAgent(event);
+      history.onEvent(event); emitAgent(event, recipient);
     }).finally(async () => {
-      if (activeRequest === pending) activeRequest = undefined;
+      if (chat.activeRequest === pending) chat.activeRequest = undefined;
       await history.save();
     }).catch(error => console.error('保存历史记录失败：', error));
+    runningAgentRequests.add(completion);
+    void completion.finally(() => runningAgentRequests.delete(completion));
     await history.save();
   });
-  ipcMain.on('rabbit:cancel-message', (event, id: unknown) => { if (trusted(event) && activeRequest && activeRequest.id === id) cancelActiveRequest(); });
-  ipcMain.on('rabbit:hide-panel', (event, owner: unknown) => { if (trusted(event) && !captureSession && panelView !== undefined && owner === activationEpoch) hidePanel(); });
+  ipcMain.on('rabbit:cancel-message', (event, id: unknown) => {
+    if (!trusted(event)) return;
+    const chat = trustedPet(event) ? petChat : graphChat;
+    if (chat.activeRequest?.id === id) cancelActiveRequest(chat);
+  });
+  ipcMain.on('rabbit:hide-panel', (event, owner: unknown) => {
+    if (!trusted(event) || captureSession) return;
+    if (trustedPet(event)) { if (panelView !== undefined && owner === activationEpoch) hidePanel(); }
+    else if (owner === graphWindow?.activationId) graphWindow?.hide();
+  });
   ipcMain.on('rabbit:cancel-capture', event => { if (trusted(event) || captureOverlays?.owns(event.sender) && event.senderFrame === event.sender.mainFrame) cancelCapture(); });
   ipcMain.on('rabbit:open-settings', event => { if (trusted(event)) openSettings(); });
   ipcMain.on('rabbit:activation-effect', (event, origin: unknown, owner: unknown, color: unknown) => {
     const point = origin as Partial<PointerPoint> | null, bounds = currentContext?.focusScreenBounds;
-    if (!trusted(event) || owner !== activationEpoch || panelView !== 'prompt' || captureSession || suspended || quitting || !bounds ||
+    if (!trustedPet(event) || owner !== activationEpoch || panelView !== 'prompt' || captureSession || suspended || quitting || !bounds ||
       !point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || typeof color !== 'string' || !/^#[\da-f]{6}$/i.test(color)) return;
     const [x, y] = window.getPosition();
     void activationEffect?.play(bounds, { x: x + point.x!, y: y + point.y! }, color, raiseMainWindow).catch(() => {});
   });
-  ipcMain.on('rabbit:set-interactive', (event, value: unknown, owner: unknown) => { if (trusted(event) && !captureSession && (panelView === undefined || owner === activationEpoch)) setInteractive(value); });
-  ipcMain.on('rabbit:set-graph-pin-regions', (event, value: unknown) => { if (trusted(event)) setGraphPinRegions(value); });
-  ipcMain.handle('rabbit:graph-pin-interaction', (event, value: unknown) => trusted(event) ? interactGraphPin(value) : false);
-  ipcMain.on('rabbit:pet-position', (event, point: unknown) => { if (trusted(event)) followPetPosition(point); });
+  ipcMain.on('rabbit:set-interactive', (event, value: unknown, owner: unknown) => { if (trustedPet(event) && !captureSession && (panelView === undefined || owner === activationEpoch)) setInteractive(value); });
+  ipcMain.on('rabbit:set-graph-pin-regions', (event, value: unknown) => { if (trustedPet(event)) setGraphPinRegions(value); });
+  ipcMain.handle('rabbit:graph-pin-interaction', (event, value: unknown) => trustedPet(event) ? interactGraphPin(value) : false);
+  ipcMain.on('rabbit:pet-position', (event, point: unknown) => { if (trustedPet(event)) followPetPosition(point); });
   ipcMain.handle('rabbit:pet-viewport-ready', async (event, id: unknown) => {
-    if (!trusted(event) || id !== petTransition || petTransition === undefined) return false;
+    if (!trustedPet(event) || id !== petTransition || petTransition === undefined) return false;
     // 保持原生透明且不可聚焦地挂回合成树，隐藏窗口可能不产出新帧。
     if (quitting || window.isDestroyed()) return false;
     window.showInactive();
@@ -1040,7 +1236,7 @@ function registerIpc(): void {
     if (reveal) {
       showMainWindow();
       if (panelView === 'settings') activateWindow();
-      else if ((panelView === 'prompt' || panelView === 'graph') && promptActivation?.phase === 'ready') void focusInput(activationEpoch);
+      else if (panelView === 'prompt' && promptActivation?.phase === 'ready') void focusInput(activationEpoch);
     }
     return true;
   });
@@ -1048,14 +1244,14 @@ function registerIpc(): void {
 
 async function registerActivationKey(): Promise<void> {
   if (process.platform !== 'win32') {
-    registerPlatformShortcut(store.getPublic().activationShortcut);
+    registerPlatformShortcut();
     return;
   }
   const service = createWindowsNative({
-    onTriggerBegin(captureId) { activatePrompt(false, captureId); },
-    onTriggerHold(captureId) { if (captureSession?.nativeId === captureId) holdCapture(captureSession); },
-    onTriggerEnd(captureId) { if (captureSession?.nativeId === captureId) endCapture(); },
-    onTriggerCancel(captureId) { if (captureSession?.nativeId === captureId) cancelCapture(false); },
+    onTriggerBegin(captureId, target) { activateTarget(target, false, captureId); },
+    onTriggerHold(captureId) { if (pendingGraphTrigger?.nativeId === captureId || captureSession?.nativeId === captureId) holdCapture(captureSession); },
+    onTriggerEnd(captureId) { if (pendingGraphTrigger?.nativeId === captureId || captureSession?.nativeId === captureId) endCapture(); },
+    onTriggerCancel(captureId) { if (pendingGraphTrigger?.nativeId === captureId || captureSession?.nativeId === captureId) cancelCapture(false); },
     onSelectionPointer(captureId, phase, point) { if (captureSession?.nativeId === captureId) selectionPointer(phase, point); },
     onPointerDown: nativePointerDown,
     onPointerUp: nativePointerUp,
@@ -1069,6 +1265,36 @@ async function registerActivationKey(): Promise<void> {
 }
 
 async function createWindow(): Promise<void> {
+  graphWindow = new GraphWindow({
+    preload: path.join(here, 'preload.cjs'),
+    onVisibility: graphVisibilityChanged,
+    onClose() { if (captureSession?.target !== 'prompt') cancelCapture(); },
+    onReload(contents) { graphImageCache.delete(contents); },
+    background: captureGraphBackground,
+    async prepare(graph) {
+      if (process.platform === 'win32') {
+        const bytes = graph.getNativeWindowHandle();
+        const handle = bytes.length >= 8 ? bytes.readBigUInt64LE().toString() : bytes.readUInt32LE().toString();
+        if (!await windowsNative?.prepareOverlayWindow(handle)) throw new Error('无法初始化图谱窗口。');
+      }
+      graph.on('focus', () => {
+        if (process.platform !== 'win32') unregisterPlatformShortcuts();
+        else void configureNative().catch(() => {});
+      });
+      graph.on('blur', () => {
+        if (process.platform === 'win32') void configureNative().catch(() => {});
+        if (process.platform !== 'win32' && !shortcutRecording && !quitting) {
+          try { registerPlatformShortcut(); }
+          catch (error) { emitGraphError(error); }
+        }
+      });
+    },
+    async focus(graph) {
+      if (captureSession || suspended || quitting) return false;
+      if (process.platform !== 'win32') { graph.focus(); return graph.isFocused(); }
+      return focusNativeWindow(graph, 'graph');
+    },
+  });
   activationEffect = new ActivationEffectWindow();
   void activationEffect.prepare().catch(() => {});
   captureOverlays = new CaptureOverlays(() => cancelCapture());
@@ -1094,20 +1320,23 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-attach-webview', event => event.preventDefault());
   window.on('close', event => { if (!quitting) { event.preventDefault(); hidePanel('window-close'); } });
   window.on('focus', () => {
-    if (process.platform !== 'win32' && registeredShortcut) globalShortcut.unregister(registeredShortcut);
+    if (process.platform !== 'win32') unregisterPlatformShortcuts();
+    else void configureNative().catch(() => {});
     debugWindow('focus');
   });
   window.on('blur', () => {
+    if (process.platform === 'win32') void configureNative().catch(() => {});
     if (graphPinPressed) { graphPinPressed = false; applyWindowMode(); }
     finishShortcutRecording();
     if (process.platform !== 'win32' && !shortcutRecording && !quitting) {
-      try { registerPlatformShortcut(store.getPublic().activationShortcut); }
+      try { registerPlatformShortcut(); }
       catch (error) { dialog.showErrorBox('启动键注册失败', error instanceof Error ? error.message : '请在设置中重新选择启动键。'); }
     }
     debugWindow('blur');
   });
   window.webContents.on('render-process-gone', finishShortcutRecording);
-  window.webContents.on('did-start-loading', () => { graphImageCache.clear(); graphPinRegions = []; interactive = false; graphPinPressed = false; applyWindowMode(); });
+  window.webContents.on('did-start-loading', () => { graphImageCache.delete(window.webContents); graphPinRegions = []; interactive = false; graphPinPressed = false; applyWindowMode(); });
+  window.webContents.on('did-finish-load', () => window.webContents.send('rabbit:graph-visibility', graphWindow?.visible === true));
   window.webContents.on('destroyed', finishShortcutRecording);
   window.on('always-on-top-changed', () => debugWindow('always-on-top-changed'));
   await window.loadFile(path.join(app.getAppPath(), 'prototype', 'index.html'));
@@ -1141,10 +1370,10 @@ else {
     if (quitting) return;
     event.preventDefault();
     quitting = true;
-    captureWorker.stop(); shortcutRecording = false; invalidateInput(); cancelActiveRequest(); graphJobs?.cancelAll();
-    cancelCapture(); captureOverlays?.dispose(); activationEffect?.dispose(); windowsNative?.stop();
+    captureWorker.stop(); shortcutRecording = false; invalidateInput(); cancelActiveRequest(petChat); cancelActiveRequest(graphChat); graphJobs?.cancelAll();
+    cancelCapture(); graphWindow?.dispose(); captureOverlays?.dispose(); activationEffect?.dispose(); windowsNative?.stop();
     // 等待已排队的历史写入完成再退出，停止生成的最后一段文字也能恢复。
-    void Promise.all([historyStore?.flush(), graphJobs?.idle().then(() => graphStore.flush())]).catch(error => console.error('保存记录失败：', error)).finally(() => { graphStore?.dispose(); app.quit(); });
+    void Promise.all([Promise.all([...runningAgentRequests]).then(async () => { await historyStore?.flush(); await usageStore?.idle(); }), graphJobs?.idle().then(() => graphStore.flush())]).catch(error => console.error('保存记录失败：', error)).finally(() => { graphStore?.dispose(); app.quit(); });
   });
   app.on('will-quit', () => { if (cursorTimer) clearInterval(cursorTimer); globalShortcut.unregisterAll(); });
   void app.whenReady().then(async () => {
@@ -1153,6 +1382,9 @@ else {
     const settings = await store.load();
     historyStore = new HistoryStore(app.getPath('userData'), settings.historyLimit);
     await historyStore.load();
+    usageStore = new UsageStore(app.getPath('userData'), scope => sendToSurfaces('rabbit:usage-changed', scope));
+    await usageStore.load();
+    setAgentUsageRecorder(report => usageStore.record(report));
     graphStore = new GraphStore(await resolveGraphDirectory(app.getPath('userData'), app.getPath('documents')), graphChanged, error => emitGraphError(error, (error as Error & { workspaceId?: string }).workspaceId));
     await graphStore.load();
     graphJobs = new GraphJobs(graphStore, () => store.getPrivate());

@@ -50,12 +50,12 @@ export class CaptureOverlays {
     try {
       await this.preparePool(options.viewports);
       if (sessionGeneration !== this.sessionGeneration) return;
-      for (const [index, entry] of this.entries.entries()) {
+      const entries = [...this.entries];
+      await Promise.all(entries.map(async (entry, index) => {
         const { window } = entry;
         const viewport = options.viewports[index];
         const background = options.background.crop(imageCropRect(viewport.physicalBounds, options.physicalBounds, options.background.getSize()));
-        window.showInactive();
-        // Windows 初次显示可能压到工作区；125% 等缩放还可能产生一 DIP 舍入差异。
+        // 先在隐藏窗口准备每屏位图和状态条，避免逐屏传输大图时先露出空白或仅一屏。
         window.setBounds(viewport.bounds);
         entry.viewport.bounds = window.getContentBounds();
         this.send(entry, {
@@ -63,6 +63,33 @@ export class CaptureOverlays {
           width: entry.viewport.bounds.width, height: entry.viewport.bounds.height, shortcut: [...options.shortcut], color: options.color, useBuiltinFont: options.useBuiltinFont ?? false, purpose: options.purpose ?? 'prompt',
         });
         entry.active = true;
+        await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+          const sessionId = ${JSON.stringify(options.sessionId)};
+          const ready = () => window.RabbitCapture.getSnapshot().sessionId === sessionId
+            && document.getElementById('rabbit-capture-root').classList.contains('is-active');
+          if (ready()) { resolve(true); return; }
+          const finish = (error) => {
+            clearTimeout(timer);
+            document.removeEventListener('selection:open', opened);
+            document.removeEventListener('selection:close', closed);
+            if (error) reject(error); else resolve(true);
+          };
+          const opened = () => { if (ready()) finish(); };
+          const closed = event => { if (event.detail.sessionId === sessionId) finish(new Error('截图已取消。')); };
+          const timer = setTimeout(() => finish(new Error('截图界面未能完成绘制，请重试。')), 5000);
+          document.addEventListener('selection:open', opened);
+          document.addEventListener('selection:close', closed);
+        })`);
+        // 获取一个隐藏首帧作为绘制屏障，不保存屏幕内容，也不激活窗口。
+        await window.webContents.capturePage({ x: 0, y: 0, width: 1, height: 1 }, { stayHidden: true });
+      }));
+      if (sessionGeneration !== this.sessionGeneration) return;
+      for (const [index, entry] of entries.entries()) {
+        const { window } = entry;
+        window.showInactive();
+        // Windows 初次显示可能压到工作区；125% 等缩放还可能产生一 DIP 舍入差异。
+        window.setBounds(options.viewports[index].bounds);
+        entry.viewport.bounds = window.getContentBounds();
         if (this.lastFrame) this.sendFrame(entry, this.lastFrame.start, this.lastFrame.end);
       }
     } catch (error) {

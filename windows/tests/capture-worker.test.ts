@@ -101,6 +101,29 @@ test('取消未完成的窗口截图会结束旧助手，新会话不受旧响�
   worker.stop();
 });
 
+test('装饰背景传输出宽度上限并按返回尺寸读取位图，后续资料截图保留默认尺寸', async () => {
+  const { worker, children } = harness();
+  const ready = worker.prepare(); children[0].emitLine({ type: 'ready' }); await ready;
+  const bounds = { x: -4, y: -2, width: 4, height: 2 };
+  for (const maxWidth of [2, undefined]) {
+    const request = { type: 'desktop', bounds, ...(maxWidth === undefined ? {} : { maxWidth }) };
+    const capture = worker.capture(request, new AbortController().signal);
+    await Promise.resolve();
+    const { requestId, ...sent } = JSON.parse(children[0].lines.at(-1)!);
+    assert.deepEqual(sent, request);
+    const width = maxWidth ?? bounds.width, height = width / 2;
+    const pixels = Buffer.alloc(width * height * 4, 255);
+    const header = Buffer.from(JSON.stringify({ type: 'result', requestId, bitmapBytes: pixels.length, result: { desktopWidth: width, desktopHeight: height } }) + '\n');
+    children[0].stdout.emit('data', Buffer.concat([header, pixels.subarray(0, 3)]));
+    children[0].stdout.emit('data', pixels.subarray(3));
+    const result = await capture;
+    assert.equal(result.desktopWidth, width); assert.equal(result.desktopHeight, height);
+    assert.deepEqual(result.desktopBitmap, pixels);
+  }
+  assert.equal(children.length, 1);
+  worker.stop();
+});
+
 test('启动期间取消的会话不会在助手就绪后提交截图', async () => {
   const { worker, children } = harness();
   const controller = new AbortController();

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { GraphJobs, buildGraphChatContext, parseCardResponse } from '../electron/graph-jobs.ts';
+import { GraphJobs, GRAPH_CHAT_RULES, GRAPH_REFERENCE_RULES, buildGraphChatContext, parseCardResponse } from '../electron/graph-jobs.ts';
 import type { GraphModelRunner } from '../electron/graph-jobs.ts';
-import type { AgentRequest, CaptureImage, PrivateSettings } from '../electron/contracts.ts';
+import type { AgentReference, Message } from '../electron/agent.ts';
+import type { AgentRequest, Attachment, CaptureImage, PrivateSettings } from '../electron/contracts.ts';
 import type { GraphAnnotation, GraphNode, GraphNodeRequest, GraphWorkspace } from '../electron/graph-contracts.ts';
 import { DEFAULT_PROMPTS } from '../electron/prompts.ts';
 
@@ -15,6 +16,13 @@ const settings = {
 } as PrivateSettings;
 
 const sourceImage: CaptureImage = { id: 'image-root', title: '根截图', imageDataUrl: 'data:image/png;base64,cm9vdA==' };
+function messageText(message: Message): string {
+  return typeof message.content === 'string' ? message.content : (message.content ?? []).flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
+}
+function referenceText(reference?: AgentReference): string { return reference?.messages.map(messageText).join('\n') ?? ''; }
+function referenceImages(reference?: AgentReference): string[] {
+  return reference?.messages.flatMap(message => typeof message.content === 'string' ? [] : (message.content ?? []).flatMap(part => part.type === 'image_url' ? [part.image_url.url] : [])) ?? [];
+}
 function node(id: string, parentId: string | null = 'root', extra: Partial<GraphNode> = {}): GraphNode {
   return {
     id, parentId, kind: parentId === null ? 'source' : 'card', title: id,
@@ -67,6 +75,7 @@ class MemoryStore {
 type ModelOptions = Parameters<GraphModelRunner>[2];
 interface ModelCall {
   request: AgentRequest;
+  settings: PrivateSettings;
   options: ModelOptions;
   ignoreAbort: boolean;
   settled: boolean;
@@ -92,7 +101,7 @@ function modelHarness(automaticStart = true) {
       options.onEvent({ id: req.id, type: 'done', text });
     };
     const call: ModelCall = {
-      request: req, options, ignoreAbort: false, settled: false,
+      request: req, settings: _settings, options, ignoreAbort: false, settled: false,
       start() { options.onEvent({ id: req.id, type: 'start' }); },
       progress(toolCounts) { options.onEvent({ id: req.id, type: 'tool', toolCounts }); },
       delta(text) { streamed += text; options.onEvent({ id: req.id, type: 'delta', text }); },
@@ -146,7 +155,7 @@ test('单卡解析保留代码围栏中的标题，并拒绝多章节或缺少�
   assert.throws(() => parseCardResponse('没有卡片标题的正文'));
 });
 
-test('快速会话上下文包含完整祖先路径和原图，不混入旁支', () => {
+test('自定义及无来源卡片作为已有资料，不捏造问答或混入旁支', () => {
   const value = workspace([
     node('root', null, { markdown: '根资料的独有内容', images: [sourceImage] }),
     node('middle', 'root', { markdown: '中间解释的独有内容' }),
@@ -154,19 +163,240 @@ test('快速会话上下文包含完整祖先路径和原图，不混入旁支',
     node('sibling', 'root', { markdown: '不应发送的旁支秘密', images: [{ ...sourceImage, id: 'sibling-image' }] }),
   ]);
   const result = buildGraphChatContext(value, 'graph', 'current');
-  assert.ok(result.reference.startsWith('如果使用标题，'));
-  for (const rule of ['短概念名', '8～14字', '最多约18个汉字', '英文3～7词', '公式和推导写在正文']) assert.ok(result.reference.includes(rule));
-  assert.ok(!result.reference.includes('输出必须以一个“### 标题”开始'));
-  for (const text of ['根资料的独有内容', '中间解释的独有内容', '当前卡片的独有内容']) assert.ok(result.reference.includes(text));
-  assert.ok(!result.reference.includes('不应发送的旁支秘密'));
-  assert.deepEqual(result.context.images.map(image => image.id), ['image-root']);
+  const text = referenceText(result.path);
+  assert.deepEqual(result.path.messages.map(message => message.role), ['user', 'user', 'user']);
+  assert.match(messageText(result.path.messages[0]), /原始资料/);
+  assert.match(messageText(result.path.messages[1]), /已有卡片，未记录原始提问/);
+  for (const content of ['根资料的独有内容', '中间解释的独有内容', '当前卡片的独有内容']) assert.ok(text.includes(content));
+  assert.ok(!text.includes('不应发送的旁支秘密'));
+  assert.ok(!text.includes(GRAPH_REFERENCE_RULES), '规则应留在系统层，不作为历史问题');
+  assert.deepEqual(referenceImages(result.path), [sourceImage.imageDataUrl]);
+  for (const rule of ['短概念名', '8～14字', '最多约18个汉字', '英文3～7词', '公式和推导写在正文']) assert.ok(GRAPH_CHAT_RULES.includes(rule));
+});
+
+test('卡片文件沿根到叶传递全文及格式语言标签，正文保持独立且不读取旁支', () => {
+  const fullText = '文档完整段落。'.repeat(6000) + '\n$\\frac{a}{b}$\n文末标记';
+  const documents: Attachment[] = [
+    { id: 'paper', name: '物理资料.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', format: 'docx', text: fullText },
+    { id: 'code', name: 'derive.py', mimeType: 'text/plain', format: 'py', language: 'python', text: 'def result():\n    return "完整代码"\n' },
+    { id: 'note', name: '说明.txt', mimeType: 'text/plain', text: '叶节点附件内容' },
+  ];
+  const value = workspace([
+    node('root', null, { markdown: '根资料正文', attachments: [documents[0]], images: [sourceImage] }),
+    node('custom', 'root', { kind: 'source', markdown: '自定义资料正文', attachments: [documents[1]] }),
+    node('leaf', 'custom', { kind: 'source', markdown: '叶节点正文', attachments: [documents[2]] }),
+    node('sibling', 'root', { kind: 'source', attachments: [{ id: 'secret', name: '旁支附件.txt', mimeType: 'text/plain', text: '旁支附件秘密' }] }),
+  ]);
+  const before = structuredClone(value);
+  const { path } = buildGraphChatContext(value, 'graph', 'leaf');
+  assert.equal(path.messages.length, 3);
+  for (const [index, message] of path.messages.entries()) {
+    assert.ok(Array.isArray(message.content));
+    const parts = message.content as Exclude<Message['content'], string | null>;
+    assert.equal(parts[0].type, 'text');
+    if (parts[0].type === 'text') {
+      assert.ok(parts[0].text.includes(value.graphs[0].nodes[index].markdown));
+      assert.ok(!parts[0].text.includes(documents[index].name), '文件不混入卡片正文块');
+    }
+    assert.equal(parts[1].type, 'text');
+    if (parts[1].type === 'text') {
+      const payload = JSON.parse(parts[1].text.slice(parts[1].text.indexOf('\n') + 1));
+      const { text, format, ...metadata } = documents[index];
+      assert.deepEqual(payload.documents, [{ ...metadata, format: format ?? documents[index].mimeType, content: text }]);
+    }
+  }
+  assert.deepEqual(value, before);
+  assert.deepEqual(referenceImages(path), [sourceImage.imageDataUrl]);
+  assert.ok(!referenceText(path).includes('旁支附件'));
+  assert.deepEqual(path.messages.slice(0, 2), buildGraphChatContext(value, 'graph', 'custom').path.messages);
+});
+
+test('图谱按根资料、真实提问和原回答恢复对话，标题与选区完整保留', () => {
+  const value = workspace([
+    node('root', null, { markdown: '原始资料正文', images: [sourceImage], annotations: [{ id: 'question-a', childId: 'middle',
+      selection: { kind: 'text', text: '第一段原文' }, comment: '第一个真实问题' }] }),
+    node('middle', 'root', { title: '第一张卡片标题', markdown: '第一段完整解释', source: { nodeId: 'root', annotationId: 'question-a',
+      selection: { kind: 'text', text: '第一段原文' }, comment: '第一个真实问题', revision: 0 } }),
+    node('leaf', 'middle', { title: '第二张卡片标题', markdown: '第二段完整解释', source: { nodeId: 'middle',
+      selection: { kind: 'text', text: '第一段解释中的选区' }, comment: '第二个真实问题', revision: 0 } }),
+  ]);
+  const { messages } = buildGraphChatContext(value, 'graph', 'leaf').path;
+  assert.deepEqual(messages.map(message => message.role), ['user', 'user', 'assistant', 'user', 'assistant']);
+  assert.match(messageText(messages[0]), /原始资料正文/);
+  assert.match(messageText(messages[0]), /已有的标注，仅供参考，不是本次提问/);
+  assert.match(messageText(messages[1]), /第一段原文[\s\S]*第一个真实问题/);
+  assert.equal(messages[2].content, '### 第一张卡片标题\n\n第一段完整解释');
+  assert.match(messageText(messages[3]), /第一段解释中的选区[\s\S]*第二个真实问题/);
+  assert.equal(messages[4].content, '### 第二张卡片标题\n\n第二段完整解释');
+});
+
+test('叶节点会话包含根起完整图片批注和回复链，引用图片按编号去重且不读取旁支', () => {
+  const nodes: GraphNode[] = [], depth = 12;
+  for (let i = 0; i <= depth; i++) {
+    const image = { ...sourceImage, id: `page-${i}`, title: `第 ${i} 层资料`, source: 'region' as const };
+    const supplement = { ...sourceImage, id: `note-image-${i}`, title: `第 ${i} 层补充图片` };
+    const note = { id: `note-${i}`, selection: { kind: 'image' as const, imageId: image.id, rect: { x: .1, y: .2, width: .3, height: .4 } },
+      comment: `第 ${i} 层批注：解释当前图片符号`, childId: i < depth ? `level-${i + 1}` : undefined, images: [supplement] };
+    const previous = nodes.at(-1), previousNote = previous?.annotations[0];
+    nodes.push(node(i === 0 ? 'root' : `level-${i}`, previous?.id ?? null, { markdown: `第 ${i} 层完整回复 $x_${i}^2$`, images: [image], annotations: [note],
+      ...(previous && previousNote ? { source: { nodeId: previous.id, annotationId: previousNote.id, selection: previousNote.selection,
+        comment: previousNote.comment, revision: 1, images: previousNote.images, selectionImage: previous.images[0] } } : {}),
+    }));
+  }
+  nodes.push(node('sibling', 'root', { markdown: '旁支回复不应出现', images: [{ ...sourceImage, id: 'sibling-image' }], annotations: [{ id: 'sibling-note',
+    selection: { kind: 'text', text: '旁支选区' }, comment: '旁支批注不应出现', images: [{ ...sourceImage, id: 'sibling-note-image' }] }] }));
+  const result = buildGraphChatContext(workspace(nodes), 'graph', `level-${depth}`);
+  const text = referenceText(result.path), messages = result.path.messages;
+  assert.equal(messages.filter(message => message.role === 'assistant').length, depth);
+  for (let i = 0; i <= depth; i++) {
+    assert.ok(text.includes(nodes[i].markdown));
+    assert.ok(text.includes(nodes[i].annotations[0].comment));
+    assert.ok(text.includes(`图片 page-${i} 中的矩形选区（归一化坐标：x=0.1, y=0.2, width=0.3, height=0.4）`));
+    if (i) {
+      const questionIndex = messages.findIndex(message => messageText(message).startsWith('【当前选区】') && messageText(message).includes(nodes[i - 1].annotations[0].comment));
+      assert.equal(messages[questionIndex].role, 'user');
+      assert.equal(messages[questionIndex + 1].role, 'assistant');
+      assert.ok(messageText(messages[questionIndex + 1]).includes(nodes[i].markdown));
+    }
+  }
+  assert.equal(referenceImages(result.path).length, (depth + 1) * 2);
+  const imageLabels = messages.flatMap(message => typeof message.content === 'string' ? [] : (message.content ?? [])
+    .filter((part, index, parts) => part.type === 'text' && parts[index + 1]?.type === 'image_url')
+    .flatMap(part => part.type === 'text' ? [part.text] : []));
+  for (let i = 0; i <= depth; i++) {
+    assert.equal(imageLabels.filter(label => label.startsWith(`图片 page-${i}：`)).length, 1);
+    assert.equal(imageLabels.filter(label => label.startsWith(`图片 note-image-${i}：`)).length, 1);
+  }
+  assert.ok(messages.filter(message => message.role === 'assistant').every(message => typeof message.content === 'string'));
+  assert.ok(!text.includes('旁支'));
+  assert.match(messageText(messages.at(-1)!), /已有的标注，仅供参考，不是本次提问/);
+});
+
+test('路径参考不带工作区修订时间，背景变化也不改写相同路径前缀', () => {
+  const value = workspace([node('root', null, { images: [sourceImage] }), node('leaf')]);
+  value.background = { text: '第一版背景', attachments: [] };
+  const first = buildGraphChatContext(value, 'graph', 'leaf');
+  value.updatedAt = 999_999; value.revision = 123;
+  value.graphs[0].updatedAt = 888_888;
+  value.background.text = '第二版背景';
+  const next = buildGraphChatContext(value, 'graph', 'leaf');
+  assert.deepEqual(next.path, first.path);
+  assert.notEqual(next.background?.text, first.background?.text);
+  assert.ok(!JSON.stringify(next.path).includes('updatedAt'));
+  assert.ok(!JSON.stringify(next.path).includes('revision'));
+});
+
+test('不同子分支共用完全相同的祖先消息前缀，批注附图仍只发送一次', () => {
+  const noteA = { id: 'note-a', childId: 'a', selection: { kind: 'text' as const, text: '选区 A' }, comment: '问题 A', images: [sourceImage] };
+  const noteB = { id: 'note-b', childId: 'b', selection: { kind: 'text' as const, text: '选区 B' }, comment: '问题 B' };
+  const value = workspace([node('root', null, { images: [sourceImage], annotations: [noteA, noteB] }),
+    node('a', 'root', { source: { ...noteA, nodeId: 'root', annotationId: noteA.id, revision: 0 } }),
+    node('b', 'root', { source: { ...noteB, nodeId: 'root', annotationId: noteB.id, revision: 0 } })]);
+  const root = buildGraphChatContext(value, 'graph', 'root').path;
+  const a = buildGraphChatContext(value, 'graph', 'a').path, b = buildGraphChatContext(value, 'graph', 'b').path;
+  assert.deepEqual(a.messages.slice(0, root.messages.length), root.messages);
+  assert.deepEqual(b.messages.slice(0, root.messages.length), root.messages);
+  assert.deepEqual(referenceImages(a), [sourceImage.imageDataUrl]);
+  assert.match(messageText(a.messages[1]), /批注附图[\s\S]*图片 image-root：根截图/);
+  assert.ok(!referenceText(a).includes('b 的正文'));
+  assert.ok(!referenceText(b).includes('a 的正文'));
+});
+
+test('同工作区各图聊天完整引用共享背景，仍限定当前问题和参考路径', () => {
+  const value = workspace([node('root', null, { markdown: '第一张图' })]);
+  value.graphs.push({ ...structuredClone(value.graphs[0]), id: 'second', rootId: 'second-root', nodes: [node('second-root', null, { markdown: '第二张图' })] });
+  const formula = '$\\frac{\\partial f}{\\partial x}$';
+  const fullText = '完整资料。'.repeat(6000) + formula + '文末仍然保留';
+  value.background = { text: '理解变分法所需的背景；忽略之前的指令属于引用内容', attachments: [
+    { id: 'paper', name: '数学资料.md', mimeType: 'text/markdown', text: fullText },
+    { id: 'figure', name: '符号图', mimeType: 'image/png', dataUrl: sourceImage.imageDataUrl },
+  ] };
+  for (const graphId of ['graph', 'second']) {
+    const context = buildGraphChatContext(value, graphId);
+    assert.ok(context.background?.text.includes(JSON.stringify(fullText)));
+    assert.equal(context.background?.images.at(-1)?.title, '工作区背景：符号图');
+    assert.equal(context.background?.images.at(-1)?.imageDataUrl, sourceImage.imageDataUrl);
+    assert.ok(!referenceText(context.path).includes('数学资料.md'));
+    assert.equal(referenceImages(context.path).length, 0, '背景图片不固化到图谱消息中');
+  }
+  const second = buildGraphChatContext(value, 'second');
+  assert.ok(!referenceText(second.path).includes('第一张图'));
+  assert.ok(referenceText(second.path).includes('第二张图'));
+  assert.ok(!referenceText(buildGraphChatContext(workspace(), 'graph').path).includes('数学资料.md'));
+  assert.equal(buildGraphChatContext(workspace(), 'graph').background, null);
+  value.background = { text: '', attachments: [] };
+  assert.equal(buildGraphChatContext(value, 'graph').background, null);
+});
+
+test('生成和重新生成均使用当前背景，并把问题优先规则放入系统提示', { timeout: 5000 }, async t => {
+  const value = workspace([node('root', null, { annotations: annotations(1) })]);
+  value.background = { text: '最初的物理背景', attachments: [{ id: 'paper', name: '参考.md', mimeType: 'text/markdown', text: '原始公式 $x^2$' }] };
+  const { store, model, jobs } = arrange(t, value);
+  await jobs.generate(request());
+  await eventually(() => model.calls.length === 1);
+  assert.ok(model.calls[0].options.background?.text.includes('最初的物理背景'));
+  assert.ok(model.calls[0].request.text.includes('批注问题 0'));
+  assert.ok(model.calls[0].settings.prompts.system.includes(GRAPH_REFERENCE_RULES));
+  const prompt = model.calls[0].request.text;
+  assert.ok(prompt.startsWith('【当前选区】\n'));
+  assert.ok(!prompt.includes('最初的物理背景'));
+  assert.ok(!prompt.includes('root 的正文'));
+  assert.ok(!prompt.includes('你正在为用户生成一张知识卡片'));
+  assert.ok(referenceText(model.calls[0].options.reference).includes('root 的正文'));
+  assert.match(referenceText(model.calls[0].options.reference), /已有的标注，仅供参考，不是本次提问/);
+  model.calls[0].finish('### 解释\n\n第一版说明。');
+  await jobs.idle();
+  const child = (await store.nodes()).find(n => n.kind === 'card')!;
+  await store.update('workspace', w => { w.background!.text = '重生成使用的新背景'; });
+  await jobs.regenerate(request(child.id));
+  await eventually(() => model.calls.length === 2);
+  assert.ok(model.calls[1].options.background?.text.includes('重生成使用的新背景'));
+  assert.ok(!model.calls[1].options.background?.text.includes('最初的物理背景'));
+  assert.ok(model.calls[1].options.background?.text.includes('原始公式 $x^2$'));
+  model.calls[1].finish('### 解释\n\n结合新背景说明。');
+  await jobs.idle();
+  assert.equal((await store.nodes()).find(n => n.id === child.id)?.markdown, '结合新背景说明。');
+});
+
+test('卡片生成复用真实问答路径，当前选区作为唯一的新提问', { timeout: 5000 }, async t => {
+  const value = workspace([node('root', null, { markdown: '根资料', images: [sourceImage] }),
+    node('middle', 'root', { title: '已回答的概念', markdown: '历史回答正文', source: { nodeId: 'root',
+      selection: { kind: 'text', text: '历史选区' }, comment: '历史问题', revision: 0 }, annotations: annotations(1) })]);
+  const expected = buildGraphChatContext(value, 'graph', 'middle').path;
+  const { model, jobs } = arrange(t, value);
+  await jobs.generate(request('middle'));
+  await eventually(() => model.calls.length === 1);
+  assert.deepEqual(model.calls[0].options.reference, expected);
+  assert.ok(model.calls[0].options.reference?.messages.some(message => message.role === 'assistant' && message.content === '### 已回答的概念\n\n历史回答正文'));
+  assert.match(model.calls[0].request.text, /^【当前选区】\n选区内容 0\n\n【批注】\n批注问题 0/);
+  assert.ok(!model.calls[0].request.text.includes('历史回答正文'));
+  assert.ok(!model.calls[0].request.text.includes('历史问题'));
+  model.calls[0].finish('### 新的解释\n\n只回答当前问题。');
+  await jobs.idle();
+});
+
+test('背景修改停止旧生成，迟到结果不能覆盖卡片', { timeout: 5000 }, async t => {
+  const value = workspace([node('root', null, { annotations: annotations(1) })]);
+  value.background = { text: '旧背景', attachments: [] };
+  const { store, model, jobs } = arrange(t, value);
+  await jobs.generate(request());
+  await eventually(() => model.calls.length === 1);
+  model.calls[0].ignoreAbort = true;
+  const updated = await store.update('workspace', w => { w.background!.text = '新背景'; });
+  jobs.reconcile(updated);
+  assert.equal(model.calls[0].options.signal.aborted, true);
+  model.calls[0].finish('### 过期解释\n\n旧背景生成的答案。');
+  await jobs.idle();
+  const child = (await store.nodes()).find(n => n.kind === 'card')!;
+  assert.equal(child.status, 'cancelled');
+  assert.equal(child.markdown, '');
 });
 
 test('生成提示约束简短概念标题，较长合法回复仍完整保留', { timeout: 5000 }, async t => {
   const { store, model, jobs } = arrange(t, workspace([node('root', null, { annotations: annotations(1) })]));
   await jobs.generate(request());
   await eventually(() => model.calls.length === 1);
-  const prompt = model.calls[0].request.text;
+  const prompt = model.calls[0].settings.prompts.system;
   for (const rule of ['短概念名', '8～14字', '最多约18个汉字', '英文3～7词', '标题不复述批注或问题', '不放长公式或推导句', '公式和推导写在正文']) assert.ok(prompt.includes(rule));
   const title = '解释归一化条件与测量概率之间的关系 $\\sum_{i=1}^{n} |\\alpha_i|^2 = 1$';
   model.calls[0].finish(`### ${title}\n\n完整的选区解释。`);
@@ -180,9 +410,7 @@ test('生成提示约束简短概念标题，较长合法回复仍完整保留',
 test('空图快速会话没有参考路径或图片', () => {
   for (const nodeId of [undefined, 'root']) {
     const result = buildGraphChatContext(workspace([]), 'graph', nodeId);
-    assert.ok(result.reference.startsWith('如果使用标题，'));
-    assert.ok(!result.reference.includes('完整参考路径'));
-    assert.deepEqual(result.context.images, []);
+    assert.deepEqual(result.path.messages, []);
   }
   assert.throws(() => buildGraphChatContext(workspace([]), 'graph', 'missing-card'));
 });
@@ -452,7 +680,7 @@ test('重新关联后使用新的祖先路径，同时保留原选区作为讲�
   const { model, jobs } = arrange(t, value);
   await jobs.regenerate(request('answer'));
   await eventually(() => model.calls.length === 1);
-  const sent = JSON.stringify({ request: model.calls[0].request, context: model.calls[0].options.context });
+  const sent = JSON.stringify({ request: model.calls[0].request, reference: model.calls[0].options.reference });
   for (const expected of ['根的参考上下文', '新父完整参考内容', '原始选区快照', '只解释这一句']) assert.ok(sent.includes(expected));
   assert.ok(!sent.includes('旧父全文不应发送'));
   model.calls[0].finish('### 新路径下的说明\n\n说明原来的选区。');
@@ -476,16 +704,14 @@ test('图片批注的选区裁图与补充截图分别发送，并保留完整�
   await eventually(() => model.calls.length === 1);
   assert.deepEqual(crops, [{ image: 'image-root', rect }]);
   const attachments = model.calls[0].request.attachments!;
-  assert.equal(attachments.length, 2);
+  assert.equal(attachments.length, 1);
   assert.equal(attachments[0].id, 'selected-image');
-  assert.equal(attachments[1].id, supplement.id);
-  assert.equal(attachments[1].dataUrl, supplement.imageDataUrl);
-  assert.equal(attachments[1].mimeType, 'image/jpeg');
-  assert.notEqual(attachments[0].name, attachments[1].name);
+  assert.deepEqual(referenceImages(model.calls[0].options.reference), [sourceImage.imageDataUrl, supplement.imageDataUrl]);
+  assert.match(model.calls[0].request.text, /批注附图[\s\S]*图片 supplement-image：补充符号定义/);
   const child = (await store.nodes())[1];
   assert.deepEqual(child.source?.images, [supplement]);
   assert.deepEqual(child.source?.selectionImage, sourceImage);
-  const sent = JSON.stringify({ request: model.calls[0].request, context: model.calls[0].options.context });
+  const sent = JSON.stringify({ request: model.calls[0].request, reference: model.calls[0].options.reference });
   assert.ok(sent.includes('Y3JvcC1tYXJrZXI='));
   assert.ok(sent.includes(sourceImage.imageDataUrl));
   assert.ok(sent.includes('只解释框里的符号'));
@@ -511,7 +737,8 @@ test('来源图删除后使用选区图片快照，优先于工作区同 ID 的�
   await jobs.regenerate(request());
   await eventually(() => model.calls.length === 1);
   assert.deepEqual(crops, [snapshot]);
-  assert.deepEqual(model.calls[0].options.context?.images, [snapshot]);
+  assert.deepEqual(referenceImages(model.calls[0].options.reference), []);
+  assert.equal(model.calls[0].request.attachments?.[1].dataUrl, snapshot.imageDataUrl);
   assert.equal(model.calls[0].request.attachments?.[0].id, 'snapshot-crop');
   model.calls[0].finish('### 快照区域\n\n基于保留的选区说明。');
   await jobs.idle();
@@ -555,18 +782,25 @@ for (const nodeId of ['root', 'custom']) test(`${nodeId === 'root' ? '根资料'
 });
 
 test('自定义资料卡的批注生成子卡，参考完整祖先资料并保留用户原文', { timeout: 5000 }, async t => {
-  const custom = node('custom', 'root', { kind: 'source', markdown: '用户补充的自定义原文', images: [sourceImage], annotations: annotations(1) });
+  const attachment: Attachment = { id: 'custom-file', name: '推导.tex', mimeType: 'text/x-tex', format: 'tex', language: 'latex', text: '附件完整推导 $\\sum_i p_i=1$' };
+  const custom = node('custom', 'root', { kind: 'source', markdown: '用户补充的自定义原文', attachments: [attachment], images: [sourceImage], annotations: annotations(1) });
   const { store, model, jobs } = arrange(t, workspace([node('root', null, { markdown: '根资料的完整内容' }), custom]));
   await jobs.generate(request('custom'));
   await eventually(() => model.calls.length === 1);
   const call = model.calls[0];
-  for (const text of ['根资料的完整内容', '用户补充的自定义原文', '选区内容 0', '批注问题 0']) assert.ok(call.request.text.includes(text));
-  assert.deepEqual(call.options.context?.images, [sourceImage]);
+  const sent = referenceText(call.options.reference) + call.request.text;
+  for (const text of ['根资料的完整内容', '用户补充的自定义原文', '选区内容 0', '批注问题 0']) assert.ok(sent.includes(text));
+  assert.ok(sent.includes(JSON.stringify(attachment.text)));
+  assert.match(sent, /"format": "tex"/);
+  assert.match(sent, /"language": "latex"/);
+  assert.ok(!call.request.text.includes(attachment.name), '卡片附件属于参考路径，不混入当前问题');
+  assert.deepEqual(referenceImages(call.options.reference), [sourceImage.imageDataUrl]);
   call.finish('### 自定义资料说明\n\n只解释用户批注所选的内容。');
   await jobs.idle();
   const nodes = await store.nodes(), original = nodes.find(item => item.id === 'custom')!, child = nodes.find(item => item.parentId === 'custom')!;
   assert.equal(original.kind, 'source');
   assert.equal(original.markdown, custom.markdown);
+  assert.deepEqual(original.attachments, custom.attachments);
   assert.deepEqual(original.images, custom.images);
   assert.equal(original.annotations[0].childId, child.id);
   assert.equal(child.kind, 'card');
@@ -575,12 +809,37 @@ test('自定义资料卡的批注生成子卡，参考完整祖先资料并保�
   assert.equal(child.markdown, '只解释用户批注所选的内容。');
 });
 
+for (const field of ['text', 'format', 'language'] as const) test(`祖先附件的 ${field} 改变会取消旧生成，即使附件编号和节点修订未变`, { timeout: 5000 }, async t => {
+  const value = workspace([
+    node('root', null, { attachments: [{ id: 'reference', name: '参考.txt', mimeType: 'text/plain', format: 'txt', language: 'text', text: '旧的完整资料' }] }),
+    node('answer', 'root', { markdown: '保留原回答', source: {
+      nodeId: 'root', selection: { kind: 'text', text: '原选区' }, comment: '结合附件解释', revision: 0,
+    } }),
+  ]);
+  const { store, model, jobs } = arrange(t, value);
+  await jobs.regenerate(request('answer'));
+  await eventually(() => model.calls.length === 1);
+  model.calls[0].ignoreAbort = true;
+  const updated = await store.update('workspace', draft => {
+    draft.graphs[0].nodes[0].attachments![0][field] = field === 'text' ? '新的完整资料' : field === 'format' ? 'md' : 'markdown';
+  });
+  assert.equal(updated.graphs[0].nodes[0].contentRevision, 0);
+  jobs.reconcile(updated);
+  assert.equal(model.calls[0].options.signal.aborted, true);
+  model.calls[0].finish('### 旧资料的回答\n\n迟到回答不能覆盖。');
+  await jobs.idle();
+  const answer = (await store.nodes()).find(item => item.id === 'answer')!;
+  assert.equal(answer.markdown, '保留原回答');
+  assert.equal(answer.status, 'cancelled');
+  assert.equal(answer.candidate, undefined);
+});
+
 test('没有来源批注的生成卡提升为根后仍能以自身正文重新生成', { timeout: 5000 }, async t => {
   const { store, model, jobs } = arrange(t, workspace([node('root', null, { kind: 'card', markdown: '用户写入的原始正文' })]));
   await jobs.regenerate(request());
   await eventually(() => model.calls.length === 1);
   assert.ok(model.calls[0].request.text.includes('用户写入的原始正文'));
-  assert.deepEqual(model.calls[0].options.context?.images, []);
+  assert.deepEqual(model.calls[0].options.reference?.messages, []);
   assert.equal((await store.nodes())[0].markdown, '用户写入的原始正文');
   model.calls[0].finish('### 根卡说明\n\n对原始正文的说明。');
   await jobs.idle();
@@ -620,13 +879,55 @@ test('没有批注时不会自动分析截图或生成子卡', { timeout: 5000 }
   assert.deepEqual(result[0].images, [sourceImage]);
 });
 
+test('无批注时直接提问创建真实问答卡，截图根不需要伪造文字选区', { timeout: 5000 }, async t => {
+  const { store, model, jobs } = arrange(t, workspace([node('root', null, { images: [sourceImage], markdown: '' })]));
+  await jobs.generate({ ...request(), question: '  这张图表达了什么物理规律？  ' });
+  await eventually(() => model.calls.length === 1);
+  const first = model.calls[0], child = (await store.nodes())[1];
+  assert.equal(first.request.text, '这张图表达了什么物理规律？');
+  assert.deepEqual(first.request.graphContext, request(child.id));
+  assert.deepEqual(referenceImages(first.options.reference), [sourceImage.imageDataUrl]);
+  assert.equal(child.source?.question, first.request.text);
+  assert.equal(child.source?.comment, '');
+  assert.equal(child.source?.annotationId, undefined);
+  assert.deepEqual((await store.nodes())[0].annotations, []);
+  first.finish('### 物理规律\n\n依据图片解释规律。');
+  await jobs.idle();
+  const path = buildGraphChatContext(await store.open('workspace'), 'graph', child.id).path.messages;
+  assert.deepEqual(path.map(message => message.role), ['user', 'user', 'assistant']);
+  assert.equal(path[1].content, '这张图表达了什么物理规律？');
+  assert.equal(path[2].content, '### 物理规律\n\n依据图片解释规律。');
+  await jobs.regenerate(request(child.id));
+  await eventually(() => model.calls.length === 2);
+  assert.equal(model.calls[1].request.text, first.request.text);
+  model.calls[1].finish('### 规律的原因\n\n重新回答原问题。');
+  await jobs.idle();
+});
+
+test('已有待生成批注时优先批注，空问题及非法问题不创建直接提问卡', { timeout: 5000 }, async t => {
+  const { store, model, jobs } = arrange(t);
+  await jobs.generate({ ...request(), question: '不应替换批注的问题', annotationIds: ['annotation-0'] });
+  await eventually(() => model.calls.length === 1);
+  assert.ok(model.calls[0].request.text.includes('批注问题 0'));
+  assert.ok(!model.calls[0].request.text.includes('不应替换批注的问题'));
+  assert.equal((await store.nodes())[1].source?.question, undefined);
+  model.calls[0].finish('### 批注说明\n\n回答批注。');
+  await jobs.idle();
+  const before = (await store.nodes()).length;
+  await jobs.generate({ ...request(), annotationIds: [], question: ' \n\t ' });
+  await assert.rejects(jobs.generate({ ...request(), question: 4 as unknown as string }), /问题格式/);
+  await assert.rejects(jobs.generate({ ...request(), question: 'x'.repeat(1_000_001) }), /问题格式/);
+  assert.equal((await store.nodes()).length, before);
+});
+
 test('只生成指定批注，未提交的其它批注保持等待', { timeout: 5000 }, async t => {
   const { store, model, jobs } = arrange(t, workspace([node('root', null, { images: [sourceImage], annotations: annotations(3) })]));
   await jobs.generate({ ...request(), annotationIds: ['annotation-1'] });
   await eventually(() => model.calls.length === 1);
-  assert.ok(model.calls[0].request.text.includes('批注问题 1'));
-  assert.ok(!model.calls[0].request.text.includes('批注问题 0'));
-  assert.ok(!model.calls[0].request.text.includes('批注问题 2'));
+  const target = model.calls[0].request.text;
+  assert.ok(target.includes('批注问题 1'));
+  assert.ok(!target.includes('批注问题 0'));
+  assert.ok(!target.includes('批注问题 2'));
   model.calls[0].finish('### 指定批注\n\n只解释已提交的选区。');
   await jobs.idle();
   const result = await store.nodes();
@@ -779,7 +1080,7 @@ test('修改批注会立即停止旧任务，重试采用新批注并保留原�
   assert.ok(next.request.text.includes('新的批注要求：解释必要条件'));
   assert.ok(next.request.text.includes('原始选区引用'));
   assert.ok(!next.request.text.includes('旧批注内容'));
-  assert.deepEqual(next.options.context?.images.map(image => image.id), ['image-root']);
+  assert.deepEqual(referenceImages(next.options.reference), [sourceImage.imageDataUrl]);
   next.finish('### 新批注解释\n\n按照新批注解释原选区。');
   await jobs.idle();
   const answer = (await store.nodes()).find(item => item.id === 'answer')!;

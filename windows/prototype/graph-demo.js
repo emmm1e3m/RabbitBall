@@ -15,9 +15,16 @@
       if (!Array.isArray(saved.workspaces) || saved.workspaces.some(w => !w || typeof w.id !== 'string' || typeof w.name !== 'string' || !Array.isArray(w.graphs))) throw new Error('记录格式无效');
       state = saved;
       // 页面关闭时的演示任务不会在新页面中偷偷继续。
-      for (const w of state.workspaces) for (const g of w.graphs) {
-        if (!Number.isFinite(g.layoutUnit) || g.layoutUnit <= 0) g.layoutUnit = 238;
-        for (const n of g.nodes) if (n.status === 'generating' || n.status === 'queued') { n.status = 'cancelled'; delete n.draft; }
+      for (const w of state.workspaces) {
+        if (w.background !== undefined) w.background = background(w.background);
+        for (const g of w.graphs) {
+          if (!Number.isFinite(g.layoutUnit) || g.layoutUnit <= 0) g.layoutUnit = 238;
+          for (const n of g.nodes) {
+            if (n.attachments !== undefined) validateAttachments(n.attachments, '卡片', true);
+            n.materialOrder = materialOrder(n);
+            if (n.status === 'generating' || n.status === 'queued') { n.status = 'cancelled'; delete n.draft; }
+          }
+        }
       }
     }
   } catch (error) { loadError = '浏览器演示记录暂时无法读取：' + error.message; }
@@ -54,7 +61,35 @@
     if (typeof value !== 'string' || value.length > 1_000_000) throw new Error('内容格式无效或过长。');
     return value;
   }
+  function background(value) {
+    if (!value || typeof value.text !== 'string' || !Array.isArray(value.attachments)) throw new Error('背景信息格式无效。');
+    validateAttachments(value.attachments, '背景');
+    return copy(value);
+  }
+  function validateAttachments(attachments, owner, textOnly = false) {
+    if (!Array.isArray(attachments) || attachments.length > 64) throw new Error(`${owner}最多保留 64 个文件。`);
+    const ids = new Set();
+    for (const attachment of attachments) {
+      if (!attachment || typeof attachment.id !== 'string' || !attachment.id || ids.has(attachment.id)
+        || typeof attachment.name !== 'string' || !attachment.name.trim() || attachment.name.length > 240
+        || typeof attachment.mimeType !== 'string' || !attachment.mimeType || attachment.mimeType.length > 200
+        || (attachment.text !== undefined && (typeof attachment.text !== 'string' || attachment.text.length > 1_000_000))
+        || (attachment.dataUrl !== undefined && (typeof attachment.dataUrl !== 'string' || !/^data:image\/(?:png|jpeg|webp|svg\+xml)[;,]/.test(attachment.dataUrl)))
+        || (attachment.text === undefined && attachment.dataUrl === undefined)) throw new Error(`${owner}附件格式无效或文档超过 100 万字符。`);
+      for (const tag of [attachment.format, attachment.language]) if (tag !== undefined && (typeof tag !== 'string' || tag.length > 240)) throw new Error(`${owner}附件类型标签无效。`);
+      if (textOnly && (typeof attachment.text !== 'string' || attachment.dataUrl !== undefined)) throw new Error('卡片文件需要先解析为文字，图片请通过图片入口添加。');
+      ids.add(attachment.id);
+    }
+  }
   function changed(w, before, active = state.active) {
+    for (const g of w.graphs) for (const n of g.nodes) n.materialOrder = materialOrder(n);
+    const previous = state.workspaces.find(item => item.id === w.id);
+    if (JSON.stringify(previous?.background) !== JSON.stringify(w.background)) {
+      // 背景是整个工作区的生成依据；保存成功后再让旧任务停止。
+      for (const g of w.graphs) for (const n of g.nodes) if (n.status === 'queued' || n.status === 'generating') {
+        n.status = 'cancelled'; delete n.draft;
+      }
+    }
     w.revision++; w.updatedAt = Date.now();
     const workspaces = state.workspaces.filter(item => item.id !== w.id);
     const index = state.workspaces.findIndex(item => item.id === w.id);
@@ -91,6 +126,10 @@
       const id = uid(); return { ...copy(image), id, file: 'assets/' + id + '.' + extension };
     });
   }
+  function materialOrder(n) {
+    const remaining = new Set([...n.images.map(image => 'image:' + image.id), ...(n.attachments ?? []).map(attachment => 'attachment:' + attachment.id)]);
+    return [...(n.materialOrder ?? []), ...remaining].filter(key => remaining.delete(key));
+  }
   function preserveSources(w) {
     const nodes = w.graphs.flatMap(g => g.nodes), byId = new Map(nodes.map(n => [n.id, n]));
     for (const n of nodes) {
@@ -104,6 +143,14 @@
       }
       if (!parent) { delete n.source.nodeId; delete n.source.annotationId; }
     }
+  }
+  function removeGraph(w, g) {
+    preserveSources(w);
+    const index = w.graphs.indexOf(g);
+    w.graphs.splice(index, 1);
+    if (!w.graphs.length) delete w.lastGraphId;
+    else if (w.lastGraphId === g.id) w.lastGraphId = (w.graphs[index] ?? w.graphs[index - 1]).id;
+    preserveSources(w);
   }
   function descendants(g, id) {
     const result = new Set([id]);
@@ -158,7 +205,7 @@
   function graphMeta(g) { const { nodes, updatedAt, ...meta } = g; return meta; }
   function nodeMap(w) { return new Map(w.graphs.flatMap(g => g.nodes.map((n, index) => [n.id, { graphId: g.id, unit: g.layoutUnit, index, node: n }]))); }
   function historyPatch(before, after) {
-    const patch = { fields: fields({ name: before.name }, { name: after.name }), graphs: [], nodes: [], orders: [] };
+    const patch = { fields: fields({ name: before.name, background: before.background }, { name: after.name, background: after.background }), graphs: [], nodes: [], orders: [] };
     const order = (a, b, graphId) => {
       const common = new Set(a.filter(id => b.includes(id)));
       if (JSON.stringify(a.filter(id => common.has(id))) !== JSON.stringify(b.filter(id => common.has(id)))) patch.orders.push({ graphId, before: a, after: b });
@@ -230,8 +277,8 @@
         if (current.graphId !== change.afterGraphId) throw new Error('卡片已移动，无法撤销这项修改。');
         restored = copy(current.node); restoreFields(restored, change.fields);
         targetId = change.beforeGraphId; index = change.beforeIndex;
-        if (change.beforeGraphId !== change.afterGraphId || change.fields.some(field => ['parentId', 'source', 'title', 'markdown', 'images', 'kind'].includes(field.path[0]))) affected.add(restored.id);
-        if (restored.title !== current.node.title || restored.markdown !== current.node.markdown) restored.contentRevision = current.node.contentRevision + 1;
+        if (change.beforeGraphId !== change.afterGraphId || change.fields.some(field => ['parentId', 'source', 'title', 'markdown', 'images', 'attachments', 'materialOrder', 'kind'].includes(field.path[0]))) affected.add(restored.id);
+        if (['title', 'markdown', 'images', 'attachments', 'materialOrder'].some(key => JSON.stringify(restored[key]) !== JSON.stringify(current.node[key]))) restored.contentRevision = current.node.contentRevision + 1;
       } else {
         if (current) throw new Error('原卡片已存在，无法恢复重复的卡片。');
         restored = copy(change.before.node); targetId = change.before.graphId; index = change.before.index;
@@ -253,7 +300,8 @@
       const ordered = change.before.map(id => items.find(item => item.id === id)).filter(Boolean);
       let index = 0; for (let slot = 0; slot < items.length; slot++) if (ids.has(items[slot].id)) items[slot] = ordered[index++];
     }
-    if (!next.graphs.some(g => g.id === next.lastGraphId)) next.lastGraphId = next.graphs.at(-1)?.id;
+    if (!next.graphs.length) delete next.lastGraphId;
+    else if (!next.graphs.some(g => g.id === next.lastGraphId)) next.lastGraphId = next.graphs.at(-1).id;
     preserveSources(next); return next;
   }
 
@@ -269,11 +317,13 @@
     }
     const before = ['view', 'layout', 'visit'].includes(operation.type) ? null : copy(w);
     if (operation.type === 'rename-workspace') { w.name = label(operation.name, '未命名工作区'); return changed(w, before); }
+    if (operation.type === 'set-background') { w.background = background(operation.background); return changed(w, before); }
     if (operation.type === 'create-graph') {
       const created = newGraph(operation.title); w.graphs.push(created); w.lastGraphId = created.id; return changed(w, before);
     }
     const g = graph(w, operation.graphId);
     switch (operation.type) {
+      case 'delete-graph': removeGraph(w, g); break;
       case 'add-root': {
         if (g.nodes.length) throw new Error('当前图谱已有根节点，请先新建空白图谱。');
         const markdown = text(operation.markdown).replace(/\r\n?/g, '\n').trim();
@@ -295,6 +345,44 @@
         const n = node(g, operation.nodeId);
         if (!Array.isArray(operation.images) || !operation.images.length || n.images.length + operation.images.length > 64) throw new Error('请添加截图，卡片最多保留 64 张图片。');
         n.images.push(...saveImages(operation.images)); n.contentRevision++; break;
+      }
+      case 'remove-node-image': {
+        const n = node(g, operation.nodeId), images = n.images.filter(image => image.id !== operation.imageId);
+        if (images.length !== n.images.length) { preserveSources(w); n.images = images; n.contentRevision++; }
+        break;
+      }
+      case 'append-node-attachments': {
+        const n = node(g, operation.nodeId);
+        if (!Array.isArray(operation.attachments) || !operation.attachments.length) throw new Error('请先选择要添加的文件。');
+        const attachments = copy(operation.attachments), used = new Set(n.attachments?.map(attachment => attachment.id));
+        for (const attachment of attachments) {
+          if (!attachment || typeof attachment !== 'object') throw new Error('卡片附件格式无效。');
+          if (used.has(attachment.id)) attachment.id = uid();
+          used.add(attachment.id);
+        }
+        const combined = [...(n.attachments ?? []), ...attachments];
+        validateAttachments(combined, '卡片', true);
+        n.attachments = combined; n.contentRevision++; break;
+      }
+      case 'remove-node-attachment': {
+        const n = node(g, operation.nodeId), attachments = n.attachments?.filter(attachment => attachment.id !== operation.attachmentId);
+        if (attachments?.length !== n.attachments?.length) {
+          if (attachments.length) n.attachments = attachments; else delete n.attachments;
+          n.contentRevision++;
+        }
+        break;
+      }
+      case 'remove-latest-node-asset': {
+        const n = node(g, operation.nodeId), latest = materialOrder(n).at(-1);
+        if (!latest) return w;
+        if (latest.startsWith('image:')) {
+          preserveSources(w);
+          n.images.splice(n.images.findIndex(image => image.id === latest.slice('image:'.length)), 1);
+        } else {
+          n.attachments.splice(n.attachments.findIndex(attachment => attachment.id === latest.slice('attachment:'.length)), 1);
+          if (!n.attachments.length) delete n.attachments;
+        }
+        n.contentRevision++; break;
       }
       case 'rename-graph': g.title = label(operation.title, '未命名图谱'); break;
       case 'visit': w.lastGraphId = g.id; break;
@@ -385,8 +473,7 @@
         const n = node(g, operation.nodeId), ids = descendants(g, n.id);
         preserveSources(w);
         if (n.id === g.rootId) {
-          w.graphs = w.graphs.filter(item => item !== g);
-          if (w.lastGraphId === g.id) w.lastGraphId = w.graphs.at(-1)?.id;
+          removeGraph(w, g);
         } else {
           g.nodes = g.nodes.filter(item => !ids.has(item.id));
           for (const remaining of g.nodes) for (const a of remaining.annotations) if (ids.has(a.childId)) delete a.childId;
@@ -430,17 +517,18 @@
     return window.RabbitCapture.captureImages();
   }
   async function activate(action) {
-    if (action !== undefined && !['rename-graph', 'undo', 'redo'].includes(action)) throw new Error('图谱操作无效。');
+    const target=action&&typeof action==='object'?action:null;
+    if (!target&&action !== undefined && !['rename-graph', 'undo', 'redo'].includes(action)) throw new Error('图谱操作无效。');
     window.RabbitSettings?.close();
     if (window.RabbitSettings?.getSnapshot().settings.graphPluginEnabled === false) throw new Error('请先启用大爆炸插件。');
-    window.RabbitChat?.close();
-    let w = await window.RabbitGraphDemo.graphOpen();
-    if (action === undefined) {
+    let w = await window.RabbitGraphDemo.graphOpen(target?.workspaceId);
+    if(target){const g=graph(w,target.graphId);node(g,target.nodeId);w=await mutate(w.id,{type:'visit',graphId:g.id});}
+    else if (action === undefined) {
       let g = w.graphs.find(g => g.id === w.lastGraphId) || w.graphs[0];
       if (!g) { w = await mutate(w.id, { type: 'create-graph' }); g = graph(w, w.lastGraphId); }
       if (!g.nodes.length) { await capture({ workspaceId: w.id, graphId: g.id }); return; }
     }
-    await window.RabbitGraph?.open({ activationId: Date.now(), view: 'graph', workspaceId: w.id, ...(action ? { graphAction: action } : {}) });
+    await window.RabbitGraph?.open({ activationId: Date.now(), view: 'graph', workspaceId: w.id, ...(target?{graphSelection:{graphId:target.graphId,nodeId:target.nodeId}}:action?{graphAction:action}:{}) });
   }
 
   function startJob(request, result) {
@@ -477,6 +565,8 @@
     job.timer = setTimeout(next, 35);
   }
   function answer(source) {
+    if (source.question) return { title: '问题解答',
+      markdown: '这是浏览器中的生成演示，未调用模型。\n\n> ' + source.question.replace(/\n/g, '\n> ') + '\n\n桌面版会结合从资料根节点到当前卡片的参考内容，直接回答这个问题。' };
     const quote = source.selection.kind === 'text' ? source.selection.text : '所选图片区域';
     return { title: source.selection.kind === 'image' ? '图片解读' : '选区含义',
       markdown: '这是浏览器中的生成演示，未调用模型。\n\n> ' + quote.replace(/\n/g, '\n> ') + '\n\n桌面版会只解释这处选区，并按批注的侧重，结合从资料根节点到当前卡片的参考内容生成这一张卡片。' };
@@ -490,17 +580,25 @@
   async function generate(request) {
     const w = workspace(request.workspaceId), before = copy(w), g = graph(w, request.graphId), parent = node(g, request.nodeId);
     if (request.annotationIds !== undefined && (!Array.isArray(request.annotationIds) || request.annotationIds.some(id => typeof id !== 'string'))) throw new Error('批注列表无效。');
+    const question = request.question === undefined ? '' : text(request.question).trim();
     const selected = parent.annotations.filter(a => !a.childId && (!request.annotationIds || request.annotationIds.includes(a.id)));
-    if (!selected.length) throw new Error('请先选择内容并添加批注。');
+    if (!selected.length && !question) return;
+    const created = [];
     for (const annotation of selected) {
       if (!annotation.comment.trim() && !annotation.images?.length) throw new Error('请填写批注或附加截图。');
       const source = annotationSource(parent, annotation);
       const n = newNode(parent.id, '生成中'); n.status = 'queued'; n.source = source;
       n.x = parent.x + g.layoutUnit * 1.12; n.y = parent.y + g.nodes.filter(n => n.parentId === parent.id).length * g.layoutUnit * (4 / 3 + .1);
-      annotation.childId = n.id; g.nodes.push(n);
+      annotation.childId = n.id; g.nodes.push(n); created.push(n);
+    }
+    if (!selected.length) {
+      const n = newNode(parent.id, '生成中'); n.status = 'queued';
+      n.source = { nodeId: parent.id, question, selection: { kind: 'text', text: parent.markdown }, comment: '', revision: parent.contentRevision };
+      n.x = parent.x + g.layoutUnit * 1.12; n.y = parent.y + g.nodes.filter(n => n.parentId === parent.id).length * g.layoutUnit * (4 / 3 + .1);
+      g.nodes.push(n); created.push(n);
     }
     changed(w, before);
-    for (const annotation of selected) startJob({ ...request, nodeId: annotation.childId }, answer(node(g, annotation.childId).source));
+    for (const n of created) startJob({ ...request, nodeId: n.id }, answer(n.source));
   }
   async function regenerate(request) {
     const w = workspace(request.workspaceId), g = graph(w, request.graphId), n = node(g, request.nodeId);
@@ -509,6 +607,9 @@
   }
 
   window.RabbitGraphDemo = Object.freeze({
+    // 预览没有真实模型请求，用量保持空白，不推算 token 或缓存命中率。
+    usageQuery: async () => ({ requestCount: 0, reportedRequestCount: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheReportedRequestCount: 0 }),
+    onUsageChanged: () => () => {},
     graphList: async () => state.workspaces.map(w => ({ id: w.id, name: w.name, updatedAt: w.updatedAt, graphCount: w.graphs.length })),
     graphOpen: async id => {
       if (loadError) throw new Error(loadError);
