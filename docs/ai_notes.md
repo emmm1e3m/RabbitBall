@@ -254,3 +254,9 @@
 - 全量 Node 658/658、构建和差异检查通过。output/prompt-focus-qa/baseline.json 留存真实原生前台失败；verification.json 验证首次左Alt、重开、长按700ms释放及F23；selection.json 验证鼠标结束拖框后350ms才释放Alt。五类均为原生hook真实触发，前台进程等于测试实例、native聚焦true，直接敲键进入chat-input，Alt/Ctrl/Shift均已释放。测试使用隔离配置，无模型调用，测试实例已退出。
 - 本机中文IME会把原生qafocus预编辑为q'a'focus，键盘和input事件均到正确输入框；不能把音节分隔误判为焦点失败。QA键盘驱动仅在真实前台属于自有测试实例时发送文字，避免误写外部应用。
 - 同版本 0.1.3 完成 dist:win，ASAR 确认 bounded focus recovery 与 marker 已打入。正常启动正式包，主进程71144响应、标题正确、两项原生助手正常；未升级版本或发布GitHub。
+
+## 2026-11-17 GitHub 同步
+
+- 用户明确授权更新 GitHub。功能源码、测试与更新后的 Windows README 已提交并推送 main：5eed302d8755f87e885a5103656bf40f94f12456。沿用已通过658项回归和真实窗口验证的0.1.3包，不升级任何版本。
+- 更新既有 v0.1.3 release（439375406）；先临时上传并核对 uploaded/大小，再替换 Windows 同名 ZIP。新资产757991976，218,867,855B；旧Windows资产738985208已移除。Android资产728166493（2,982,570B）的ID、大小、digest、更新时间均未变。原始tag保留，release说明明确链接本次功能源码提交。
+- GitHub连接器get_repo/fetch仍返回Unknown tool，本次用现有Git与REST完成；认证信息只在进程内读取，不落盘。发布前确认60项源码/说明变更均在windows/docs，output、release、node_modules未进Git；发布元数据核验在output/github-release-before.json及github-release-after.json。
